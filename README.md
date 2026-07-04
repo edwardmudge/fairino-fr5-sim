@@ -12,8 +12,8 @@ A Python-based 3D visualisation tool for a 6-degree-of-freedom Fairino FR5 manip
 ## Usage
 
 ```bash
-git clone https://github.com/edwardmudge/polyscope-3dof-sim.git
-cd polyscope-3dof-sim
+git clone https://github.com/edwardmudge/fairino-fr5-sim.git
+cd fairino-fr5-sim
 pip install -r requirements.txt
 python main.py
 ```
