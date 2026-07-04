@@ -1,0 +1,22 @@
+# Tutorial / assignment scaffolding (kept locally, not published)
+tutorials/
+
+# Claude Code local/session config
+.claude/settings.local.json
+
+# Editor config (machine-local)
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local GUI window state (regenerates automatically)
+.polyscope.ini
+imgui.ini
+
+# OS cruft
+Thumbs.db
+.DS_Store
