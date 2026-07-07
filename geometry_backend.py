@@ -7,6 +7,11 @@ import trimesh
 MESH_DIR = "assets/fr5_meshes"
 MESH_FILES = [f"Robot{i}.obj" for i in range(7)]  # Robot0 (base) .. Robot6
 
+# Tool head: nozzle mesh + TCP point, same zero-pose convention, mounted on the flange (Delta_6)
+PRINTER_HEAD_DIR = "assets/printerHead"
+NOZZLE_FILE = "nozzle.obj"
+TCP_FILE = "TCP.txt"
+
 class VisContent:
     """
     [Backend Logic Layer]
@@ -106,6 +111,13 @@ class VisContent:
             handle = ps.register_surface_mesh(f"Robot{i+1}", m.vertices, m.faces)
             self.mesh_handles.append(handle)
 
+        # Nozzle rides on the flange -- same Delta_6 as Robot6, see docs/FR5_Mesh_Convention.md
+        nozzle = self.load_mesh(os.path.join(PRINTER_HEAD_DIR, NOZZLE_FILE))
+        self.rest_verts.append(nozzle.vertices.copy())
+        self.mesh_handles.append(ps.register_surface_mesh("Nozzle", nozzle.vertices, nozzle.faces))
+
+        self.tcp_local = np.loadtxt(os.path.join(PRINTER_HEAD_DIR, TCP_FILE))  # Zero-pose world frame [x, y, z]
+
         return meshes
 
 
@@ -113,11 +125,13 @@ class VisContent:
         """Update link mesh vertex positions for the given joint angles.
 
         Delta_i = T_0_i(q) @ inv(T_0_i(0)) -- see docs/FR5_Mesh_Convention.md.
-        Robot0 is the fixed base and is never updated.
+        Robot0 is the fixed base and is never updated. The nozzle (index 6)
+        rides on the flange, reusing Delta_6 (index 5).
         """
         T_current = self.compute_fk(joint_angles_deg)
-        for i in range(6):
-            Delta = T_current[i] @ np.linalg.inv(self.T_zero[i])
+        for i in range(7):
+            src = min(i, 5)
+            Delta = T_current[src] @ np.linalg.inv(self.T_zero[src])
 
             # Convert rest verts to homogenous [x,y,z,1]
             N = self.rest_verts[i].shape[0]
