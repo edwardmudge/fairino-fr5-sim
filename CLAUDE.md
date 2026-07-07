@@ -53,3 +53,16 @@ English. Keep code comments minimal — explain *why*, not *what*.
 
 See `wiki/005_AgentMgmt/active/ctx_main/ctx_system_current.md` for current
 build status and `wiki/002_Architecture/settled.md` for locked-in decisions.
+
+## Python environment
+
+This project uses the conda environment `fairino-fr5-sim`. Always use its interpreter directly rather than relying on `conda activate`, since shell activation doesn't persist between commands.
+
+- Python: `C:\Users\Edward\miniconda3\envs\fairino-fr5-sim\python.exe`
+- pip: `C:\Users\Edward\miniconda3\envs\fairino-fr5-sim\Scripts\pip.exe`
+
+Do not call bare `python`, `python3`, or `pip`. They resolve to system Python, not this environment.
+
+<!-->
+(Note to self: change this in final version)
+-->
