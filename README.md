@@ -15,6 +15,7 @@ A Python-based 3D visualisation tool for a 6-degree-of-freedom Fairino FR5 manip
 * `assets/` — robot arm, tool head, and build plate meshes
 * `docs/` — technical reference (DH parameters, joint limits, mesh coordinate convention)
 * `wiki/` — project knowledge base: architecture decisions, glossary, agent boot protocol
+* `wiki-template/` — the generic, project-agnostic methodology behind `wiki/`, reusable to bootstrap this documentation system on other projects
 
 ## Usage
 
