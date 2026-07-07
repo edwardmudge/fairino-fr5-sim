@@ -1,4 +1,5 @@
 import os
+import time
 import polyscope as ps
 import numpy as np
 import trimesh
@@ -11,6 +12,9 @@ MESH_FILES = [f"Robot{i}.obj" for i in range(7)]  # Robot0 (base) .. Robot6
 PRINTER_HEAD_DIR = "assets/printerHead"
 NOZZLE_FILE = "nozzle.obj"
 TCP_FILE = "TCP.txt"
+
+TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
+TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
 
 
 class VisContent:
@@ -27,6 +31,10 @@ class VisContent:
         self.point_cloud_data = None
         self.mesh_data = None
         self.current_joint_angles = None
+
+        self.tcp_world = None            # current TCP world position, set each apply_delta_transform call
+        self.trajectory_points = []      # recorded TCP world positions (see record_trajectory_point)
+        self._last_sample_time = time.time()
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -156,12 +164,41 @@ class VisContent:
             # Update Polyscope structure (mesh or point cloud, per registration)
             self.update_fns[i](new_verts)
 
+            if i == 7:
+                self.tcp_world = new_verts[0]
+
 
     def update_arm(self, joint_angles_deg):
         """GUI-facing entry point: record the current joint state and move
         the rendered arm to match via the Delta transform."""
         self.current_joint_angles = joint_angles_deg
         self.apply_delta_transform(joint_angles_deg)
+
+
+    def record_trajectory_point(self):
+        """Sample self.tcp_world at most once per TRAJECTORY_SAMPLE_INTERVAL_S;
+        discard the sample if the TCP hasn't moved since the last recorded point."""
+        now = time.time()
+        if now - self._last_sample_time < TRAJECTORY_SAMPLE_INTERVAL_S:
+            return
+        self._last_sample_time = now
+
+        if self.trajectory_points and np.allclose(self.tcp_world, self.trajectory_points[-1]):
+            return
+
+        self.trajectory_points.append(self.tcp_world.copy())
+        self._update_trajectory_curve()
+
+
+    def _update_trajectory_curve(self):
+        """Re-register the curve network -- Polyscope curve networks don't support
+        growing node count in place, unlike update_vertex_positions."""
+        nodes = np.array(self.trajectory_points)
+        if len(nodes) < 2:
+            return
+        edges = np.array([[i, i + 1] for i in range(len(nodes) - 1)])
+        curve = ps.register_curve_network("Trajectory", nodes, edges)
+        curve.set_radius(TRAJECTORY_RADIUS_MM, relative=False)
 
 
     def update_transformation(self, rotation, translation):

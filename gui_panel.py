@@ -33,7 +33,8 @@ class UI_Menu:
 
     def render(self):
         """This function needs to be called by Polyscope every frame"""
-        
+        self.content.record_trajectory_point()
+
         # 1. Panel title
         psim.TextUnformatted("GeoProc Template Control")
         psim.Separator()
