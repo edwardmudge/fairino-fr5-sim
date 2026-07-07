@@ -32,9 +32,11 @@ class VisContent:
         self.mesh_data = None
         self.current_joint_angles = None
 
-        self.tcp_world = None            # current TCP world position, set each apply_delta_transform call
-        self.trajectory_points = []      # recorded TCP world positions (see record_trajectory_point)
+        self.tcp_world = None            # Current TCP world position, set each apply_delta_transform call
+        self.trajectory_points = []      # Recorded TCP world positions (see record_trajectory_point)
         self._last_sample_time = time.time()
+        self.trajectory_enabled = True
+        self.trajectory_handle = None    # Set once a curve exists, see _update_trajectory_curve
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -178,6 +180,9 @@ class VisContent:
     def record_trajectory_point(self):
         """Sample self.tcp_world at most once per TRAJECTORY_SAMPLE_INTERVAL_S;
         discard the sample if the TCP hasn't moved since the last recorded point."""
+        if not self.trajectory_enabled:
+            return
+
         now = time.time()
         if now - self._last_sample_time < TRAJECTORY_SAMPLE_INTERVAL_S:
             return
@@ -197,8 +202,15 @@ class VisContent:
         if len(nodes) < 2:
             return
         edges = np.array([[i, i + 1] for i in range(len(nodes) - 1)])
-        curve = ps.register_curve_network("Trajectory", nodes, edges)
-        curve.set_radius(TRAJECTORY_RADIUS_MM, relative=False)
+        self.trajectory_handle = ps.register_curve_network("Trajectory", nodes, edges)
+        self.trajectory_handle.set_radius(TRAJECTORY_RADIUS_MM, relative=False)
+
+
+    def set_trajectory_enabled(self, enabled):
+        """Pause/resume TCP trajectory recording and show/hide the existing curve."""
+        self.trajectory_enabled = enabled
+        if self.trajectory_handle is not None:
+            self.trajectory_handle.set_enabled(enabled)
 
 
     def update_transformation(self, rotation, translation):

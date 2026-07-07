@@ -30,6 +30,7 @@ class UI_Menu:
         self.trans_vec = np.array([0.0, 0.0, 0.0])
         self.rot_vec = np.array([0.0, 0.0, 0.0])
         self.joint_angles = np.zeros(6)
+        self.trajectory_enabled = True
 
     def render(self):
         """This function needs to be called by Polyscope every frame"""
@@ -39,13 +40,19 @@ class UI_Menu:
         psim.TextUnformatted("GeoProc Template Control")
         psim.Separator()
 
-        # 2. Data loading section
+        # 2. Trajectory section
+        changed, self.trajectory_enabled = psim.Checkbox("Enable Trajectory", self.trajectory_enabled)
+        if changed:
+            self.content.set_trajectory_enabled(self.trajectory_enabled)
+        psim.Separator()
+
+        # 3. Data loading section
         if psim.TreeNode("I/O Operations"):
             if psim.Button("Load Test Data"):
                 self.content.load_dummy_data()
             psim.TreePop()
 
-        # 3. Joint angle control section
+        # 4. Joint angle control section
         if psim.TreeNode("Joint Angles"):
             changed_any = False
             for i in range(6):
@@ -58,7 +65,7 @@ class UI_Menu:
 
             psim.TreePop()
 
-        # 4. Transformation control section
+        # 5. Transformation control section
         if psim.TreeNode("Transformation"):
             changed_t, self.trans_vec = psim.InputFloat3("Translate", self.trans_vec)
             changed_r, self.rot_vec = psim.SliderFloat3("Rotate", self.rot_vec, -180, 180)
@@ -69,7 +76,7 @@ class UI_Menu:
             
             psim.TreePop()
 
-        # 5. Algorithm parameters section
+        # 6. Algorithm parameters section
         if psim.TreeNode("Algorithm Settings"):
             _, self.show_settings = psim.Checkbox("Enable Advanced", self.show_settings)
             
