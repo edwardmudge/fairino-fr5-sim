@@ -20,11 +20,12 @@ class VisContent:
         self.transformation = np.eye(4)
         self.point_cloud_data = None
         self.mesh_data = None
+        self.current_joint_angles = None
 
         # Initialise the scene
         self.create_coordinate_frame()
         self.mesh_data = self.load_data()
-        self.apply_delta_transform([0, 0, 0, 0, 0, 0])
+        self.update_arm([0, 0, 0, 0, 0, 0])
 
 
     def create_coordinate_frame(self, scale=1.0):
@@ -127,6 +128,13 @@ class VisContent:
 
             # Update Polyscope mesh
             self.mesh_handles[i].update_vertex_positions(new_verts)
+
+
+    def update_arm(self, joint_angles_deg):
+        """GUI-facing entry point: record the current joint state and move
+        the rendered arm to match via the Delta transform."""
+        self.current_joint_angles = joint_angles_deg
+        self.apply_delta_transform(joint_angles_deg)
 
 
     def update_transformation(self, rotation, translation):
