@@ -12,6 +12,7 @@ PRINTER_HEAD_DIR = "assets/printerHead"
 NOZZLE_FILE = "nozzle.obj"
 TCP_FILE = "TCP.txt"
 
+
 class VisContent:
     """
     [Backend Logic Layer]
@@ -104,19 +105,31 @@ class VisContent:
         # Store the rest-pose vertices for each list
         self.rest_verts = [m.vertices.copy() for m in meshes[1:]]  # List of Nx3 arrays, one per link (Robot1..Robot6)
         self.mesh_handles = []
+        self.update_fns = []  # matching per-object position-update method (meshes vs point clouds differ)
 
         ps.register_surface_mesh("Robot0", meshes[0].vertices, meshes[0].faces)  # Fixed base, no transforms
 
         for i, m in enumerate(meshes[1:]):
             handle = ps.register_surface_mesh(f"Robot{i+1}", m.vertices, m.faces)
             self.mesh_handles.append(handle)
+            self.update_fns.append(handle.update_vertex_positions)
 
         # Nozzle rides on the flange -- same Delta_6 as Robot6, see docs/FR5_Mesh_Convention.md
         nozzle = self.load_mesh(os.path.join(PRINTER_HEAD_DIR, NOZZLE_FILE))
         self.rest_verts.append(nozzle.vertices.copy())
-        self.mesh_handles.append(ps.register_surface_mesh("Nozzle", nozzle.vertices, nozzle.faces))
+        nozzle_handle = ps.register_surface_mesh("Nozzle", nozzle.vertices, nozzle.faces)
+        self.mesh_handles.append(nozzle_handle)
+        self.update_fns.append(nozzle_handle.update_vertex_positions)
 
         self.tcp_local = np.loadtxt(os.path.join(PRINTER_HEAD_DIR, TCP_FILE))  # Zero-pose world frame [x, y, z]
+
+        # TCP point, also Delta_6, but a Polyscope point cloud -- update_point_positions,
+        # not update_vertex_positions, hence the per-object self.update_fns lookup
+        tcp_point = self.tcp_local.reshape(1, 3)
+        self.rest_verts.append(tcp_point)
+        self.point_cloud_data = ps.register_point_cloud("TCP", tcp_point)
+        self.mesh_handles.append(self.point_cloud_data)
+        self.update_fns.append(self.point_cloud_data.update_point_positions)
 
         return meshes
 
@@ -126,10 +139,10 @@ class VisContent:
 
         Delta_i = T_0_i(q) @ inv(T_0_i(0)) -- see docs/FR5_Mesh_Convention.md.
         Robot0 is the fixed base and is never updated. The nozzle (index 6)
-        rides on the flange, reusing Delta_6 (index 5).
+        and TCP (index 7) ride on the flange, reusing Delta_6 (index 5).
         """
         T_current = self.compute_fk(joint_angles_deg)
-        for i in range(7):
+        for i in range(8):
             src = min(i, 5)
             Delta = T_current[src] @ np.linalg.inv(self.T_zero[src])
 
@@ -140,8 +153,8 @@ class VisContent:
             # Apply delta
             new_verts = (Delta @ homo.T).T[:, :3]
 
-            # Update Polyscope mesh
-            self.mesh_handles[i].update_vertex_positions(new_verts)
+            # Update Polyscope structure (mesh or point cloud, per registration)
+            self.update_fns[i](new_verts)
 
 
     def update_arm(self, joint_angles_deg):
