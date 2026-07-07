@@ -20,9 +20,11 @@ class VisContent:
         self.transformation = np.eye(4)
         self.point_cloud_data = None
         self.mesh_data = None
-        
+
         # Initialise the scene
         self.create_coordinate_frame()
+        self.mesh_data = self.load_data()
+        self.apply_delta_transform([0, 0, 0, 0, 0, 0])
 
 
     def create_coordinate_frame(self, scale=1.0):
@@ -80,12 +82,51 @@ class VisContent:
 
 
     def load_data(self):
-        """Load all 7 FR5 link meshes (Robot0..Robot6) from assets/fr5_meshes/.
+        """Load all 7 FR5 link meshes (Robot0..Robot6), register them with
+        Polyscope, and cache the zero-pose data needed for the Delta
+        transform (see docs/FR5_Mesh_Convention.md).
 
         Returns a list of trimesh.Trimesh, index i == Robot{i}.obj. Robot0 is the
         static base; Robot1..Robot6 correspond to T_0_1..T_0_6 from compute_fk().
         """
-        return [self.load_mesh(os.path.join(MESH_DIR, fname)) for fname in MESH_FILES]
+        meshes = [self.load_mesh(os.path.join(MESH_DIR, fname)) for fname in MESH_FILES]
+
+        # Compute zero-pose transforms
+        zero_joints = [0, 0, 0, 0, 0, 0]
+        self.T_zero = self.compute_fk(zero_joints)
+
+        # Store the rest-pose vertices for each list
+        self.rest_verts = [m.vertices.copy() for m in meshes[1:]]  # List of Nx3 arrays, one per link (Robot1..Robot6)
+        self.mesh_handles = []
+
+        ps.register_surface_mesh("Robot0", meshes[0].vertices, meshes[0].faces)  # Fixed base, no transforms
+
+        for i, m in enumerate(meshes[1:]):
+            handle = ps.register_surface_mesh(f"Robot{i+1}", m.vertices, m.faces)
+            self.mesh_handles.append(handle)
+
+        return meshes
+
+
+    def apply_delta_transform(self, joint_angles_deg):
+        """Update link mesh vertex positions for the given joint angles.
+
+        Delta_i = T_0_i(q) @ inv(T_0_i(0)) -- see docs/FR5_Mesh_Convention.md.
+        Robot0 is the fixed base and is never updated.
+        """
+        T_current = self.compute_fk(joint_angles_deg)
+        for i in range(6):
+            Delta = T_current[i] @ np.linalg.inv(self.T_zero[i])
+
+            # Convert rest verts to homogenous [x,y,z,1]
+            N = self.rest_verts[i].shape[0]
+            homo = np.hstack([self.rest_verts[i], np.ones((N, 1))])
+
+            # Apply delta
+            new_verts = (Delta @ homo.T).T[:, :3]
+
+            # Update Polyscope mesh
+            self.mesh_handles[i].update_vertex_positions(new_verts)
 
 
     def update_transformation(self, rotation, translation):
@@ -123,6 +164,5 @@ if __name__ == "__main__":
     ps.init()
     vis = VisContent()
     vis.end_effector_position([0, 0, 0, 0, 0, 0])
-    meshes = vis.load_data()
-    print(f"[Backend] Loaded {len(meshes)} link meshes")
+    print(f"[Backend] Loaded {len(vis.mesh_data)} link meshes")
 
