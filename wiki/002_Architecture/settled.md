@@ -35,3 +35,28 @@ previous layout at
 (not currently planned).
 
 **Verified on:** 2026-07-07
+
+## S1.2 Static workpiece geometry uses a stored user-frame transform, not the Delta pipeline
+
+**Decision:** The build plate (`assets/buildPlate/BambuLab_BuildPlate.obj`)
+is placed by translating its raw vertices by `USER_FRAME_ORIGIN_MM` once,
+in `load_build_plate()`, and is never touched again per-frame. The
+translation is also stored as a full 4x4 homogeneous matrix,
+`self.T_user_frame`, even though only its translation column is populated
+today.
+
+**Reason:** The plate has no joints, so unlike the arm links/nozzle/TCP it
+does not need `apply_delta_transform`'s `Delta_i = T_0_i(q) @ inv(T_0_i(0))`
+machinery — that pipeline exists specifically to re-pose meshes baked at a
+non-zero joint configuration on every frame. A one-time static translation
+is the simplest correct placement. Storing the transform as a 4x4 matrix
+(vs. a bare xyz vector) keeps it representationally consistent with every
+other frame in the codebase (`T_0_i`, `Delta_i`) and leaves room to add a
+rotation later without changing the storage shape.
+
+**Non-revertible unless:** the user frame needs a real orientation (e.g. a
+3-point calibration against the physical plate), at which point
+`T_user_frame` gains a rotation submatrix and the plate vertices must be
+transformed with the full matrix instead of a raw vector add.
+
+**Verified on:** 2026-07-08

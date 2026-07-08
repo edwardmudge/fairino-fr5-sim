@@ -17,6 +17,16 @@ TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP traje
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
 TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
 
+BUILD_PLATE_DIR = "assets/buildPlate"
+BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
+
+# User frame: base-frame -> build-plate corner. Translation-only for now.
+# Placed in the (-X, -Y) quadrant to match the arm's natural zero/home-pose
+# reach direction -- the opposite quadrant only reaches via a near-limit J1
+# rotation, leaving little margin for the wrist to also orient freely
+USER_FRAME_ORIGIN_MM = np.array([-600.0, -300.0, 0.0])
+USER_FRAME_SCALE_MM = 50.0  # Fixed axes drawn at the user frame, world units (mm)
+
 
 class VisContent:
     """
@@ -41,6 +51,7 @@ class VisContent:
 
         # Initialise the scene
         self.create_coordinate_frame()
+        self.load_build_plate()
         self.mesh_data = self.load_data()
         self.update_arm([0, 0, 0, 0, 0, 0])
 
@@ -63,7 +74,23 @@ class VisContent:
 
         return ps_net, nodes
 
-    
+
+    def load_build_plate(self):
+        """Place the build plate at the user frame (base-frame -> plate
+        corner). Translation-only for now -- see GLOSSARY.md 'User frame'.
+        Static geometry: registered once, never updated per-frame -- unlike
+        the arm links, the plate isn't driven by any joint, so it needs no
+        Delta transform, just a one-time translation."""
+        self.T_user_frame = np.eye(4)
+        self.T_user_frame[:3, 3] = USER_FRAME_ORIGIN_MM
+
+        plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
+        plate_verts_world = plate.vertices + USER_FRAME_ORIGIN_MM  # mesh origin == plate corner
+        ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
+
+        self.create_coordinate_frame(scale=USER_FRAME_SCALE_MM, origin=USER_FRAME_ORIGIN_MM, name="User Frame")
+
+
     # FR5 standard DH parameters: (a_mm, alpha_rad, d_mm, theta_offset_rad)
     # Source: docs/FR5_DH_Table.md
     DH_PARAMS = [
@@ -80,7 +107,7 @@ class VisContent:
         """
         joint_angles_deg: sequence of 6 joint angles in degrees [J1..J6]
         Returns [T_0_1, ..., T_0_6], each a 4x4 np.ndarray. T_0_6 (base->flange)
-        is the last element
+        is the last element.
         """
         T = np.eye(4)
         T_0_i = []

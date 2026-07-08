@@ -29,6 +29,7 @@ robotics dictionary.
 | **TCP (Tool Centre Point)** | The functional tip of whatever's mounted on the flange (here: the nozzle tip), not the flange centre itself. | Coordinate in `assets/printerHead/TCP.txt`, transformed with `Delta_6` |
 | **Flange** | The mounting face at the end of Link 6, where tools attach. | Frame = `T_0_6` |
 | **Home position** | `[0, 0, 0, 0, 90, 0]` degrees — J5=90° points the tool straight down. | `docs/FR5_Joint_Limits.md` |
+| **User frame** | A reference frame (translation, and eventually rotation) from the base frame to a workpiece origin — here, the build-plate corner. Standard industrial-robot term (FANUC/UR/ABB all have one); Craig's *Introduction to Robotics* calls the same concept a **station frame**. Currently translation-only, stored as `self.T_user_frame`. | `USER_FRAME_ORIGIN_MM`, `load_build_plate()` in `geometry_backend.py`; see `settled.md` S1.2 |
 
 ## 4. Degrees of freedom
 
