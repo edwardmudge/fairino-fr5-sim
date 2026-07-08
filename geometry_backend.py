@@ -198,6 +198,132 @@ class VisContent:
         print(T_0_6[:3, 3])
 
 
+    def solve_ik(self, T_0_6_target):
+        """
+        Closed-form analytical IK for the FR5's specific DH geometry --
+        NOT a literal port of a PUMA-style spherical wrist, since d4 and
+        d5 are both nonzero here (same family as a UR5/UR10 wrist). Full
+        derivation: docs/FR5_IK_Derivation.md.
+
+        T_0_6_target: 4x4 np.ndarray, target flange pose (base frame).
+        Returns a list of (joint_angles_deg: np.ndarray[6], is_wrist_singular: bool),
+        one per geometrically valid branch (up to 8; branches that fail an
+        acos/sqrt domain check -- pose unreachable along that branch -- are
+        silently skipped).
+        """
+        d1 = self.DH_PARAMS[0][2]
+        a2 = self.DH_PARAMS[1][0]
+        a3 = self.DH_PARAMS[2][0]
+        d4 = self.DH_PARAMS[3][2]
+        d5 = self.DH_PARAMS[4][2]
+        d6 = self.DH_PARAMS[5][2]
+
+        R = T_0_6_target[:3, :3]
+        p = T_0_6_target[:3, 3]
+        P5 = p - d6 * R[:, 2]  # frame-5 origin, backing off the approach vector
+
+        solutions = []
+        R_xy_sq = P5[0] ** 2 + P5[1] ** 2
+        if R_xy_sq < d4 ** 2:
+            return solutions  # P5 can't reach the fixed shoulder-perpendicular offset
+
+        for sign1 in (1, -1):
+            theta1 = np.arctan2(P5[1], P5[0]) + np.arctan2(d4, sign1 * np.sqrt(R_xy_sq - d4 ** 2))
+            c1, s1 = np.cos(theta1), np.sin(theta1)
+
+            wrist_arg = (p[0] * s1 - p[1] * c1 - d4) / d6
+            if abs(wrist_arg) > 1:
+                continue
+
+            R_0_1 = dh_transform(0, np.pi / 2, d1, theta1)[:3, :3]
+            R_1_6 = R_0_1.T @ R
+
+            for sign2 in (1, -1):
+                theta5 = sign2 * np.arccos(wrist_arg)
+                is_singular = abs(np.sin(theta5)) < 1e-6
+
+                if is_singular:
+                    theta6 = 0.0  # axes 4/6 aligned -- theta4/theta6 split is ambiguous
+                else:
+                    theta6 = np.arctan2(-R_1_6[2, 1] / np.sin(theta5), R_1_6[2, 0] / np.sin(theta5))
+
+                K = rot_y(-theta5) @ rot_z(theta6)
+                Rz_psi = R_1_6 @ K.T
+                psi = np.arctan2(Rz_psi[1, 0], Rz_psi[0, 0])  # psi = theta2+theta3+theta4
+
+                X_p = P5[0] * c1 + P5[1] * s1
+                Y_p = P5[2] - d1
+                X = X_p - d5 * np.sin(psi)
+                Y = Y_p + d5 * np.cos(psi)
+
+                cos_theta3 = (X ** 2 + Y ** 2 - a2 ** 2 - a3 ** 2) / (2 * a2 * a3)
+                if abs(cos_theta3) > 1:
+                    continue
+
+                for sign3 in (1, -1):
+                    theta3 = sign3 * np.arccos(cos_theta3)
+                    theta2 = np.arctan2(Y, X) - np.arctan2(a3 * np.sin(theta3), a2 + a3 * np.cos(theta3))
+                    theta4 = psi - theta2 - theta3
+
+                    angles_rad = np.array([theta1, theta2, theta3, theta4, theta5, theta6])
+                    solutions.append((np.rad2deg(angles_rad), is_singular))
+
+        return solutions
+
+
+    def solve_ik_tcp(self, target_pos_mm, target_rpy_deg, joint_limits):
+        """
+        GUI-facing IK entry point: the target is the TCP's pose, not the
+        flange's, matching how the rest of the app already tracks
+        tcp_world. Converts to a flange target via self.T_flange_to_tcp,
+        solves, discards branches outside joint_limits, then picks the
+        branch closest to the arm's current configuration (Craig's stated
+        practice for a multi-solution IK).
+
+        target_rpy_deg: [roll, pitch, yaw] degrees, fixed-angle convention
+        (R = Rz(yaw) @ Ry(pitch) @ Rx(roll)).
+        Returns (joint_angles_deg or None, status_message).
+        """
+        roll, pitch, yaw = np.deg2rad(target_rpy_deg)
+        R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+
+        T_target_tcp = np.eye(4)
+        T_target_tcp[:3, :3] = R_target
+        T_target_tcp[:3, 3] = target_pos_mm
+        T_target_flange = T_target_tcp @ np.linalg.inv(self.T_flange_to_tcp)
+
+        branches = self.solve_ik(T_target_flange)
+        if not branches:
+            return None, "Unreachable: no geometric solution for this pose"
+
+        def wrap_into_limits(angle_deg, lo, hi):
+            # atan2-built angles come back in (-180,180]-ish ranges, but joints
+            # like J2/J4 have physical limits past that (e.g. -264 deg) -- the
+            # same physical angle can be +/-360 off and only one representation
+            # falls inside the asymmetric limit window, so all three are tried.
+            for k in (0, 360, -360):
+                candidate = angle_deg + k
+                if lo <= candidate <= hi:
+                    return candidate
+            return None
+
+        valid = []
+        for angles, singular in branches:
+            adjusted = [wrap_into_limits(a, lo, hi) for a, (lo, hi) in zip(angles, joint_limits)]
+            if all(a is not None for a in adjusted):
+                valid.append((np.array(adjusted), singular))
+        if not valid:
+            return None, f"Reachable but outside joint limits ({len(branches)} branch(es), none valid)"
+
+        def wrapped_dist(angles):
+            diff = (angles - self.current_joint_angles + 180) % 360 - 180
+            return np.sum(np.abs(diff))
+
+        best_angles, best_singular = min(valid, key=lambda pair: wrapped_dist(pair[0]))
+        status = "Solved" + (" (near wrist singularity)" if best_singular else "")
+        return best_angles, status
+
+
     def load_mesh(self, filepath):
         """Load a single OBJ mesh with trimesh.
 
@@ -242,6 +368,16 @@ class VisContent:
         self.update_fns.append(nozzle_handle.update_vertex_positions)
 
         self.tcp_local = np.loadtxt(os.path.join(PRINTER_HEAD_DIR, TCP_FILE))  # Zero-pose world frame [x, y, z]
+
+        # Fixed flange->TCP pose offset for IK (see docs/FR5_IK_Derivation.md).
+        # tcp_local is a zero-pose *world* point with no orientation of its own,
+        # so the rotation part is taken from inv(T_zero[5]) directly -- this is
+        # exactly the rotation the rendered "TCP Frame" triad inherits, since its
+        # axis-tip points are defined in world coords and driven by the same
+        # Delta_6 as everything else. Only the translation needs tcp_local baked in.
+        T_zero_flange_inv = np.linalg.inv(self.T_zero[5])
+        self.T_flange_to_tcp = T_zero_flange_inv.copy()
+        self.T_flange_to_tcp[:3, 3] = (T_zero_flange_inv @ np.append(self.tcp_local, 1.0))[:3]
 
         # TCP point, also Delta_6, but a Polyscope point cloud -- update_point_positions,
         # not update_vertex_positions, hence the per-object self.update_fns lookup
@@ -371,6 +507,23 @@ def dh_transform(a, alpha, d, theta):
         [0,   sa,       ca,      d],
         [0,   0,        0,       1],
     ])
+
+
+# Bare rotation matrices used by solve_ik/solve_ik_tcp -- pure stateless
+# helpers, same footing as dh_transform (see settled.md S1.1).
+def rot_x(theta):
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+
+def rot_y(theta):
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+
+def rot_z(theta):
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
 
 # Validation

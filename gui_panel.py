@@ -33,6 +33,9 @@ class UI_Menu:
         self.rot_vec = np.array([0.0, 0.0, 0.0])
         self.joint_angles = np.zeros(6)
         self.trajectory_enabled = True
+        self.ik_target_pos = np.zeros(3)
+        self.ik_target_rpy = np.zeros(3)
+        self.ik_status = ""
 
     def render(self):
         """This function needs to be called by Polyscope every frame"""
@@ -72,7 +75,24 @@ class UI_Menu:
 
             psim.TreePop()
 
-        # 5. Transformation control section
+        # 5. Inverse kinematics section -- target is the TCP pose, not the
+        # flange (see docs/FR5_IK_Derivation.md); RPY reuses the same
+        # -180..180 slider convention as the Transformation section below.
+        if psim.TreeNode("Inverse Kinematics"):
+            _, self.ik_target_pos = psim.InputFloat3("Target Position (mm)", self.ik_target_pos)
+            _, self.ik_target_rpy = psim.SliderFloat3("Target RPY (deg)", self.ik_target_rpy, -180, 180)
+
+            if psim.Button("Solve IK"):
+                solution, self.ik_status = self.content.solve_ik_tcp(
+                    self.ik_target_pos, self.ik_target_rpy, JOINT_LIMITS)
+                if solution is not None:
+                    self.joint_angles = solution
+                    self.content.update_arm(self.joint_angles)
+
+            psim.TextUnformatted(self.ik_status)
+            psim.TreePop()
+
+        # 6. Transformation control section
         if psim.TreeNode("Transformation"):
             changed_t, self.trans_vec = psim.InputFloat3("Translate", self.trans_vec)
             changed_r, self.rot_vec = psim.SliderFloat3("Rotate", self.rot_vec, -180, 180)
@@ -83,7 +103,7 @@ class UI_Menu:
             
             psim.TreePop()
 
-        # 6. Algorithm parameters section
+        # 7. Algorithm parameters section
         if psim.TreeNode("Algorithm Settings"):
             _, self.show_settings = psim.Checkbox("Enable Advanced", self.show_settings)
             

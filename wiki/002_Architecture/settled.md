@@ -86,3 +86,58 @@ one-time static preview (e.g. live streaming during a simulated print), at
 which point it needs its own per-frame update pipeline.
 
 **Verified on:** 2026-07-08
+
+## S1.4 IK targets the TCP via a derived flange->TCP pose offset, not the flange directly
+
+**Decision:** `solve_ik` solves for the flange pose (`T_0_6`), matching
+Craig's worked example directly. `solve_ik_tcp` is a thin wrapper that
+converts a TCP-pose target into a flange-pose target using a new cached
+transform, `self.T_flange_to_tcp`, built once in `load_data()`. Its
+rotation part is taken from `inv(T_zero[5])` (not assumed to be
+identity/pure-translation) and its translation is `tcp_local` expressed
+in that same rotated frame. See `docs/FR5_IK_Derivation.md`.
+
+**Reason:** The project's actual purpose is a tool/printer simulator, so
+IK naturally targets the TCP (nozzle tip), not the flange -- confirmed
+with the user rather than assumed. No flange-relative TCP transform
+existed before this; only `tcp_local`, a bare zero-pose *world* point
+moved at render time via the Delta-transform trick (mesh-rendering-only
+machinery, not reusable for IK). Deriving the rotation from
+`inv(T_zero[5])` rather than assuming pure translation was necessary
+because the FR5's zero-pose flange orientation is not identity (it comes
+out to `Rot_x(-90°)` for this robot's actual mesh data) -- assuming
+translation-only would have silently produced a TCP frame rotated 90°
+from the one already rendered on screen (the "TCP Frame" triad).
+
+**Non-revertible unless:** the TCP mount point changes to something with
+its own independently-calibrated orientation not derivable from the
+flange's zero-pose frame (e.g. a tool-changer with multiple swappable
+heads), at which point `T_flange_to_tcp` would need to come from a
+per-tool calibration file instead of being derived from `T_zero[5]`.
+
+**Verified on:** 2026-07-08
+
+## S1.5 IK multi-solution branches are filtered by joint limits, then chosen by proximity to the current pose
+
+**Decision:** `solve_ik` returns every geometrically valid branch (up to
+8, from 3 independent sign choices). `solve_ik_tcp` discards any branch
+with a joint outside the caller-supplied `joint_limits`, then picks the
+remaining branch minimizing summed wrapped-angle distance to
+`self.current_joint_angles`.
+
+**Reason:** This is standard practice for redundant/multi-solution IK
+(explicitly stated in Craig's text) and reuses the arm's existing
+`current_joint_angles` state (already tracked by `update_arm`) rather
+than introducing a new "preferred configuration" concept. Failing to
+distinguish "no branch survived the limit filter" from "no branch was
+geometrically valid at all" would conflate two different failure modes a
+user needs to tell apart, so `solve_ik_tcp` reports them with distinct
+status messages.
+
+**Non-revertible unless:** a specific application (e.g. G-code path
+following, once built) needs continuity between consecutive solved
+poses rather than just proximity to whatever the arm's current pose
+happens to be -- at which point branch selection would need to consider
+the previous *target* in a path, not just the arm's live state.
+
+**Verified on:** 2026-07-08
