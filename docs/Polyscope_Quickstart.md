@@ -112,6 +112,16 @@ if psim.Button("Click Me"):
 # Checkbox
 changed, is_on = psim.Checkbox("Enable Feature", is_on)
 
+# List box (all items visible inline, no popup); returns (changed, new_index)
+changed, idx = psim.ListBox("Name", current_index, ["Item A", "Item B"], height_in_items=8)
+
+# Radio button group -- call once per item with the shared selection variable
+# `v` and that item's own value `v_button`; clicking sets v = v_button.
+# Returns (changed, v), not a bare bool (that's the single-button overload,
+# RadioButton(label, active) -> bool, for a standalone toggle).
+for i, item_label in enumerate(["Item A", "Item B"]):
+    changed, current_index = psim.RadioButton(item_label, current_index, i)
+
 # Text
 psim.TextUnformatted("Hello")
 

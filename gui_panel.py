@@ -36,6 +36,8 @@ class UI_Menu:
         self.ik_target_pos = np.zeros(3)
         self.ik_target_rpy = np.zeros(3)
         self.ik_status = ""
+        self.ik_solutions = []       # list of (angles, is_singular, raw_branch_index) from solve_ik_tcp
+        self.ik_selected_index = 0
 
     def render(self):
         """This function needs to be called by Polyscope every frame"""
@@ -83,13 +85,32 @@ class UI_Menu:
             _, self.ik_target_rpy = psim.SliderFloat3("Target RPY (deg)", self.ik_target_rpy, -180, 180)
 
             if psim.Button("Solve IK"):
-                solution, self.ik_status = self.content.solve_ik_tcp(
+                self.ik_solutions, self.ik_status = self.content.solve_ik_tcp(
                     self.ik_target_pos, self.ik_target_rpy, JOINT_LIMITS)
-                if solution is not None:
-                    self.joint_angles = solution
+                self.ik_selected_index = 0
+                if self.ik_solutions:
+                    self.joint_angles = self.ik_solutions[0][0]
                     self.content.update_arm(self.joint_angles)
 
+            psim.Spacing()
+            psim.Spacing()
             psim.TextUnformatted(self.ik_status)
+
+            if self.ik_solutions:
+                # No verified anatomical naming (shoulder/elbow/wrist left-right)
+                # for this arm's branches -- label with ordinal + the three
+                # sign-driven joints (J1/J3/J5) as a numeric fingerprint instead.
+                n = len(self.ik_solutions)
+                for i, (angles, singular, _) in enumerate(self.ik_solutions):
+                    label = (
+                        f"Solution {i + 1}/{n}: J1={angles[0]:6.1f} J3={angles[2]:6.1f} J5={angles[4]:6.1f}"
+                        f"{'  [near singularity]' if singular else ''}"
+                    )
+                    changed, self.ik_selected_index = psim.RadioButton(label, self.ik_selected_index, i)
+                    if changed:
+                        self.joint_angles = angles
+                        self.content.update_arm(self.joint_angles)
+
             psim.TreePop()
 
         # 6. Transformation control section

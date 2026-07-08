@@ -117,27 +117,45 @@ per-tool calibration file instead of being derived from `T_zero[5]`.
 
 **Verified on:** 2026-07-08
 
-## S1.5 IK multi-solution branches are filtered by joint limits, then chosen by proximity to the current pose
+## S1.5 IK multi-solution branches are filtered by joint limits, then ranked by proximity to the current pose -- all valid branches are returned, not just the closest
 
 **Decision:** `solve_ik` returns every geometrically valid branch (up to
 8, from 3 independent sign choices). `solve_ik_tcp` discards any branch
-with a joint outside the caller-supplied `joint_limits`, then picks the
-remaining branch minimizing summed wrapped-angle distance to
-`self.current_joint_angles`.
+with a joint outside the caller-supplied `joint_limits`, then **sorts**
+the rest by summed wrapped-angle distance to `self.current_joint_angles`
+(closest first) and returns the **whole ranked list** (each entry tagged
+with `raw_branch_index`, `solve_ik`'s own enumeration position) rather
+than collapsing it to a single winner. `gui_panel.py`'s "Inverse
+Kinematics" panel applies index 0 by default (reproducing the original
+auto-pick behavior) but renders every valid branch in a `psim.ListBox` so
+the user can select any other one, which immediately re-applies via
+`update_arm`. See `docs/FR5_IK_Derivation.md` "Branch selection". Prior
+single-winner behavior archived at
+[`_historical/2026-07-08_ik_single_branch_autopick.md`](../005_AgentMgmt/_historical/2026-07-08_ik_single_branch_autopick.md).
 
-**Reason:** This is standard practice for redundant/multi-solution IK
-(explicitly stated in Craig's text) and reuses the arm's existing
-`current_joint_angles` state (already tracked by `update_arm`) rather
-than introducing a new "preferred configuration" concept. Failing to
-distinguish "no branch survived the limit filter" from "no branch was
-geometrically valid at all" would conflate two different failure modes a
-user needs to tell apart, so `solve_ik_tcp` reports them with distinct
-status messages.
+**Reason:** Filtering by joint limits and ranking by proximity to
+`self.current_joint_angles` is still standard practice for
+redundant/multi-solution IK (explicitly stated in Craig's text) and still
+reuses the arm's existing state rather than introducing a new "preferred
+configuration" concept -- that part of the original decision holds.
+What changed: the simulator's purpose includes letting the user inspect
+and compare valid configurations, not just reach *a* pose, so
+auto-collapsing to one branch and discarding the rest was throwing away
+information the user explicitly wants. Branch labels use the ordinal
+`raw_branch_index` plus the three sign-driven joint values (J1/J3/J5) as
+a fingerprint rather than an anatomical name, since no "shoulder
+left/right"-style naming has been geometrically verified for this arm.
+Distinguishing "no branch survived the limit filter" from "no branch was
+geometrically valid at all" is unchanged -- `solve_ik_tcp` still reports
+them with distinct status messages, now alongside an empty list instead
+of `None`.
 
 **Non-revertible unless:** a specific application (e.g. G-code path
 following, once built) needs continuity between consecutive solved
 poses rather than just proximity to whatever the arm's current pose
-happens to be -- at which point branch selection would need to consider
-the previous *target* in a path, not just the arm's live state.
+happens to be -- at which point the *default* (index 0) would need to
+consider the previous *target* in a path, not just the arm's live state;
+this wouldn't require removing the full-list return, only changing which
+entry is pre-selected.
 
 **Verified on:** 2026-07-08

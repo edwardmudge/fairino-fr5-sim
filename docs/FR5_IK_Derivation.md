@@ -109,10 +109,22 @@ rotation, not pure translation.
 ## Branch selection
 
 `solve_ik_tcp` discards branches with any joint outside the caller-
-supplied `joint_limits`, then picks the remaining branch minimizing
-summed wrapped-angle distance to `self.current_joint_angles` -- standard
-practice per Craig's text (prefer the solution closest to the arm's
-present configuration).
+supplied `joint_limits`, then **ranks** (not picks) the rest by summed
+wrapped-angle distance to `self.current_joint_angles`, closest first, and
+returns the whole ranked list -- standard practice per Craig's text
+(prefer the solution closest to the arm's present configuration), but
+choosing *which* branch to actually apply is left to the caller rather
+than decided inside `solve_ik_tcp`. `gui_panel.py`'s "Inverse Kinematics"
+panel defaults to index 0 (reproducing the old auto-pick behavior) but
+lets the user pick any other valid branch from a list.
+
+Each returned entry carries `raw_branch_index` -- `solve_ik`'s own
+enumeration position -- purely as a stable ordinal for disambiguating
+branches in a UI label. No anatomical naming ("shoulder left/right",
+"elbow up/down") has been geometrically verified against this arm's
+actual poses, so the GUI labels branches with that ordinal plus the
+three sign-driven joint values (J1, J3, J5 -- the joints whose sign
+choices `solve_ik` branches over) instead of guessing a name.
 
 ## Verification
 

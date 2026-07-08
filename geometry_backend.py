@@ -276,13 +276,19 @@ class VisContent:
         GUI-facing IK entry point: the target is the TCP's pose, not the
         flange's, matching how the rest of the app already tracks
         tcp_world. Converts to a flange target via self.T_flange_to_tcp,
-        solves, discards branches outside joint_limits, then picks the
-        branch closest to the arm's current configuration (Craig's stated
-        practice for a multi-solution IK).
+        solves, discards branches outside joint_limits, then ranks the
+        rest by closeness to the arm's current configuration (Craig's
+        stated practice for a multi-solution IK) -- ranking rather than
+        picking one lets the GUI offer every valid branch, not just the
+        closest.
 
         target_rpy_deg: [roll, pitch, yaw] degrees, fixed-angle convention
         (R = Rz(yaw) @ Ry(pitch) @ Rx(roll)).
-        Returns (joint_angles_deg or None, status_message).
+        Returns (solutions, status_message). solutions: list of
+        (joint_angles_deg, is_wrist_singular, raw_branch_index), sorted
+        closest-to-current first; raw_branch_index is solve_ik's own
+        enumeration position (an ordinal, not an anatomical name -- see
+        docs/FR5_IK_Derivation.md). Empty list on failure.
         """
         roll, pitch, yaw = np.deg2rad(target_rpy_deg)
         R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
@@ -294,7 +300,7 @@ class VisContent:
 
         branches = self.solve_ik(T_target_flange)
         if not branches:
-            return None, "Unreachable: no geometric solution for this pose"
+            return [], "Unreachable: no geometric solution for this pose"
 
         def wrap_into_limits(angle_deg, lo, hi):
             # atan2-built angles come back in (-180,180]-ish ranges, but joints
@@ -308,20 +314,20 @@ class VisContent:
             return None
 
         valid = []
-        for angles, singular in branches:
+        for i, (angles, singular) in enumerate(branches):
             adjusted = [wrap_into_limits(a, lo, hi) for a, (lo, hi) in zip(angles, joint_limits)]
             if all(a is not None for a in adjusted):
-                valid.append((np.array(adjusted), singular))
+                valid.append((np.array(adjusted), singular, i))
         if not valid:
-            return None, f"Reachable but outside joint limits ({len(branches)} branch(es), none valid)"
+            return [], f"Reachable but outside joint limits ({len(branches)} branch(es), none valid)"
 
         def wrapped_dist(angles):
             diff = (angles - self.current_joint_angles + 180) % 360 - 180
             return np.sum(np.abs(diff))
 
-        best_angles, best_singular = min(valid, key=lambda pair: wrapped_dist(pair[0]))
-        status = "Solved" + (" (near wrist singularity)" if best_singular else "")
-        return best_angles, status
+        valid.sort(key=lambda item: wrapped_dist(item[0]))
+        status = f"Solved ({len(valid)} valid solution{'s' if len(valid) != 1 else ''})"
+        return valid, status
 
 
     def load_mesh(self, filepath):
