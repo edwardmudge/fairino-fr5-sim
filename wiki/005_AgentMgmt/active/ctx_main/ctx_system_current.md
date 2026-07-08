@@ -1,7 +1,7 @@
 ---
 status: active
 scope: current-truth
-last_verified_against_code: 2026-07-04
+last_verified_against_code: 2026-07-08
 ---
 
 # Agent Boot File — FR5 Simulator (Current State)
@@ -23,12 +23,14 @@ corresponding FR5 arm configuration in an interactive 3D window.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Polyscope app skeleton | done | `main.py` opens a window with just a coordinate frame |
-| FK maths (`compute_fk`) | not started | Stage 1 — see `docs/FR5_DH_Table.md` |
-| Mesh loading + rendering | not started | Stage 2 — see `docs/FR5_Mesh_Convention.md` (Delta transform) |
-| Joint sliders | not started | Stage 2 |
-| Tool head + TCP tracking | not started | Stage 3 |
-| Analytical IK | not started | Stage 4 |
+| Polyscope app skeleton | done | `main.py` wires `VisContent`/`UI_Menu` into Polyscope's per-frame callback |
+| FK maths (`compute_fk`) | done | See `docs/FR5_DH_Table.md` |
+| Mesh loading + rendering | done | Delta-transform pipeline — see `docs/FR5_Mesh_Convention.md` |
+| Joint sliders | done | "Forward Kinematics" panel, `gui_panel.py` |
+| Tool head + TCP tracking | done | See `wiki/003_Guides/TCP_Frame.md` |
+| Analytical IK | done | Closed-form solver, multi-solution — see `settled.md` S1.4/S1.5 |
+| TCP trajectory recording | done | See `wiki/003_Guides/TCP_Trajectory.md` |
+| G-code toolpath preview | done | See `wiki/003_Guides/Gcode_Toolpath.md` |
 
 ## Directory Structure
 
@@ -37,9 +39,9 @@ corresponding FR5 arm configuration in an interactive 3D window.
 ├── assets/          FR5 link meshes, nozzle, build plate
 ├── docs/            DH table, joint limits, mesh convention, Polyscope API
 ├── wiki/            you are here
-├── main.py          entry point, already working
-├── gui_panel.py      UI panel — stub, add sliders here
-├── geometry_backend.py  backend — stub, add FK/IK here
+├── main.py          entry point, wires backend + UI together
+├── gui_panel.py      UI panel — joint sliders, IK controls, I/O buttons
+├── geometry_backend.py  backend — FK/IK, mesh rendering, TCP/trajectory, G-code
 └── requirements.txt
 ```
 
@@ -59,4 +61,4 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-None yet — see `wiki/002_Architecture/settled.md`.
+See `wiki/002_Architecture/settled.md` (S1.1–S1.5).

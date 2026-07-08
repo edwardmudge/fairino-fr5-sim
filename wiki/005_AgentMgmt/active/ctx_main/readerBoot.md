@@ -13,8 +13,9 @@ short version:
    makes sense?). **`docs/`** holds the ground-truth reference tables you'd
    otherwise have to memorise. **The AI agent** helps implement and debug,
    but doesn't decide for you.
-3. Nothing is built yet except a blank 3D window — start at Stage 1 (FK
-   maths) using `docs/FR5_DH_Table.md`.
+3. The 4-stage roadmap (FK maths → mesh rendering → tool head/TCP → IK) is
+   complete, plus G-code toolpath preview and TCP trajectory recording —
+   see `ctx_system_current.md` for the per-feature status.
 4. Before touching mesh rendering code, read
    `docs/FR5_Mesh_Convention.md` — skipping it guarantees broken rendering.
 5. `wiki/002_Architecture/settled.md` will fill up with decisions as you

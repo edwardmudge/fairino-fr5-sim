@@ -12,7 +12,7 @@ robotics dictionary.
 | Term | Definition | Notes |
 |------|-----------|-------|
 | **FK (Forward Kinematics)** | Joint angles → end-effector pose. One unique answer. | `docs/FR5_DH_Table.md`, implemented in `geometry_backend.py` |
-| **IK (Inverse Kinematics)** | Target end-effector pose → joint angles. Up to 8 valid solutions for the FR5 (redundancy). | Not implemented yet (Stage 4) |
+| **IK (Inverse Kinematics)** | Target end-effector pose → joint angles. Up to 8 valid solutions for the FR5 (redundancy). | Implemented — `solve_ik`/`solve_ik_tcp` in `geometry_backend.py`; see `settled.md` S1.4/S1.5 |
 
 ## 2. Transform frames — the mesh-rendering trap
 

@@ -21,7 +21,6 @@ TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
 BUILD_PLATE_DIR = "assets/buildPlate"
 BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
 
-# User frame: base-frame -> build-plate corner. Translation-only for now.
 # Placed in the (-X, -Y) quadrant to match the arm's natural zero/home-pose
 # reach direction -- the opposite quadrant only reaches via a near-limit J1
 # rotation, leaving little margin for the wrist to also orient freely
@@ -46,8 +45,6 @@ class VisContent:
     """
     def __init__(self):
         # State data
-        self.transformation = np.eye(4)
-        self.point_cloud_data = None
         self.mesh_data = None
         self.current_joint_angles = None
 
@@ -84,11 +81,11 @@ class VisContent:
 
 
     def load_build_plate(self):
-        """Place the build plate at the user frame (base-frame -> plate
-        corner). Translation-only for now -- see GLOSSARY.md 'User frame'.
-        Static geometry: registered once, never updated per-frame -- unlike
-        the arm links, the plate isn't driven by any joint, so it needs no
-        Delta transform, just a one-time translation."""
+        """Place the build plate at the user frame -- see GLOSSARY.md 'User
+        frame' and settled.md S1.2. Static geometry: registered once, never
+        updated per-frame -- unlike the arm links, the plate isn't driven by
+        any joint, so it needs no Delta transform, just a one-time
+        translation."""
         self.T_user_frame = np.eye(4)
         self.T_user_frame[:3, 3] = USER_FRAME_ORIGIN_MM
 
@@ -100,15 +97,12 @@ class VisContent:
 
 
     def parse_gcode(self, filepath):
-        """Parse G0/G1 linear moves, tracking modal position (an axis word
-        missing from a line keeps its last value; the very first line
-        defaults missing axes to 0). Comments (';...' and '(...)') and
-        everything except G0/G1 are ignored. Returns a list of
-        ([x, y, z], is_feed_move) pairs, plate-local mm -- G0 travel moves
-        still update position (needed as the anchor for the next drawn
-        edge) but are flagged is_feed_move=False so load_gcode() skips
-        drawing them. Scoped to the square test fixture, not a general
-        G-code interpreter."""
+        """Parse G0/G1 linear moves. Returns a list of ([x, y, z],
+        is_feed_move) pairs, plate-local mm -- G0 travel moves update
+        position but are flagged is_feed_move=False so load_gcode() skips
+        drawing them. Modal position handling: see GLOSSARY.md 'G-code
+        toolpath'. Scoped to the square test fixture, not a general G-code
+        interpreter."""
         x, y, z = 0.0, 0.0, 0.0
         points = []
         with open(filepath) as f:
@@ -273,22 +267,16 @@ class VisContent:
 
     def solve_ik_tcp(self, target_pos_mm, target_rpy_deg, joint_limits):
         """
-        GUI-facing IK entry point: the target is the TCP's pose, not the
-        flange's, matching how the rest of the app already tracks
-        tcp_world. Converts to a flange target via self.T_flange_to_tcp,
-        solves, discards branches outside joint_limits, then ranks the
-        rest by closeness to the arm's current configuration (Craig's
-        stated practice for a multi-solution IK) -- ranking rather than
-        picking one lets the GUI offer every valid branch, not just the
-        closest.
+        GUI-facing IK entry point, targeting the TCP pose rather than the
+        flange -- see settled.md S1.4. Converts via self.T_flange_to_tcp,
+        solves, filters by joint_limits, then ranks every valid branch by
+        closeness to self.current_joint_angles -- see settled.md S1.5.
 
         target_rpy_deg: [roll, pitch, yaw] degrees, fixed-angle convention
         (R = Rz(yaw) @ Ry(pitch) @ Rx(roll)).
-        Returns (solutions, status_message). solutions: list of
+        Returns (solutions, status_message); solutions is a list of
         (joint_angles_deg, is_wrist_singular, raw_branch_index), sorted
-        closest-to-current first; raw_branch_index is solve_ik's own
-        enumeration position (an ordinal, not an anatomical name -- see
-        docs/FR5_IK_Derivation.md). Empty list on failure.
+        closest-to-current first. Empty list on failure.
         """
         roll, pitch, yaw = np.deg2rad(target_rpy_deg)
         R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
@@ -375,12 +363,8 @@ class VisContent:
 
         self.tcp_local = np.loadtxt(os.path.join(PRINTER_HEAD_DIR, TCP_FILE))  # Zero-pose world frame [x, y, z]
 
-        # Fixed flange->TCP pose offset for IK (see docs/FR5_IK_Derivation.md).
-        # tcp_local is a zero-pose *world* point with no orientation of its own,
-        # so the rotation part is taken from inv(T_zero[5]) directly -- this is
-        # exactly the rotation the rendered "TCP Frame" triad inherits, since its
-        # axis-tip points are defined in world coords and driven by the same
-        # Delta_6 as everything else. Only the translation needs tcp_local baked in.
+        # Fixed flange->TCP transform for IK; rotation comes from inv(T_zero[5]),
+        # not assumed identity -- see settled.md S1.4 for why.
         T_zero_flange_inv = np.linalg.inv(self.T_zero[5])
         self.T_flange_to_tcp = T_zero_flange_inv.copy()
         self.T_flange_to_tcp[:3, 3] = (T_zero_flange_inv @ np.append(self.tcp_local, 1.0))[:3]
@@ -389,9 +373,9 @@ class VisContent:
         # not update_vertex_positions, hence the per-object self.update_fns lookup
         tcp_point = self.tcp_local.reshape(1, 3)
         self.rest_verts.append(tcp_point)
-        self.point_cloud_data = ps.register_point_cloud("TCP", tcp_point)
-        self.mesh_handles.append(self.point_cloud_data)
-        self.update_fns.append(self.point_cloud_data.update_point_positions)
+        point_cloud = ps.register_point_cloud("TCP", tcp_point)
+        self.mesh_handles.append(point_cloud)
+        self.update_fns.append(point_cloud.update_point_positions)
 
         # TCP orientation triad, also Delta_6 -- axis tips defined in the zero-pose
         # world frame around tcp_local, so they rotate with the tool via the same
@@ -483,23 +467,6 @@ class VisContent:
         self.trajectory_points = []
         self.trajectory_handle = None
         ps.remove_curve_network("Trajectory", error_if_absent=False)
-
-
-    def update_transformation(self, rotation, translation):
-        """
-        Handle the transformation logic
-        :param rotation: np.array [3] (degrees)
-        :param translation: np.array [3]
-        """
-        # The actual matrix computation logic goes here
-        # self.transformation = ... 
-        print(f"[Backend] Matrix Updated | Rot: {rotation} | Trans: {translation}")
-        
-
-    def run_algorithm(self, param_a, param_b):
-        """Example algorithm interface"""
-        print(f"[Backend] Running Algorithm with params: {param_a}, {param_b}")
-        # Once the time-consuming computation is finished, call ps.register_... to update the display
 
 
 

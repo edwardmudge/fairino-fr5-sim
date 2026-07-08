@@ -22,12 +22,13 @@ pure helper (stateless, no dependency on instance state). `MESH_DIR` and
 `MESH_FILES` stay module-level constants (static path config, not instance
 state).
 
-**Reason:** `load_data` is about to start populating `self.mesh_data`
-(currently an unused slot set in `__init__`), and `update_transformation`
-already reads/writes `self.transformation` — consolidating all stateful
-geometry operations behind the one object `gui_panel.py` already holds a
-reference to avoids mixing bare module functions with class methods for
-what is fundamentally the same backend responsibility. See the archived
+**Reason:** `load_data` was about to start populating `self.mesh_data`
+(then an unused slot set in `__init__`), and `update_transformation` (a
+template placeholder, since removed along with the `self.transformation`
+slot it used) already read/wrote instance state — consolidating all
+stateful geometry operations behind the one object `gui_panel.py` already
+holds a reference to avoids mixing bare module functions with class methods
+for what is fundamentally the same backend responsibility. See the archived
 previous layout at
 [`_historical/2026-07-07_end_effector_position_reorg.md`](../005_AgentMgmt/_historical/2026-07-07_end_effector_position_reorg.md).
 
@@ -127,8 +128,8 @@ the rest by summed wrapped-angle distance to `self.current_joint_angles`
 with `raw_branch_index`, `solve_ik`'s own enumeration position) rather
 than collapsing it to a single winner. `gui_panel.py`'s "Inverse
 Kinematics" panel applies index 0 by default (reproducing the original
-auto-pick behavior) but renders every valid branch in a `psim.ListBox` so
-the user can select any other one, which immediately re-applies via
+auto-pick behavior) but renders every valid branch as a `psim.RadioButton`
+row so the user can select any other one, which immediately re-applies via
 `update_arm`. See `docs/FR5_IK_Derivation.md` "Branch selection". Prior
 single-winner behavior archived at
 [`_historical/2026-07-08_ik_single_branch_autopick.md`](../005_AgentMgmt/_historical/2026-07-08_ik_single_branch_autopick.md).

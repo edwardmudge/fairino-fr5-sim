@@ -27,10 +27,6 @@ class UI_Menu:
         self.content = content_instance
         
         # UI internal state (View State)
-        self.show_settings = True
-        self.slider_val = 0.0
-        self.trans_vec = np.array([0.0, 0.0, 0.0])
-        self.rot_vec = np.array([0.0, 0.0, 0.0])
         self.joint_angles = np.zeros(6)
         self.trajectory_enabled = True
         self.ik_target_pos = np.zeros(3)
@@ -44,7 +40,7 @@ class UI_Menu:
         self.content.record_trajectory_point()
 
         # 1. Panel title
-        psim.TextUnformatted("GeoProc Template Control")
+        psim.TextUnformatted("Fairino FR5 Arm Control")
         psim.Separator()
 
         # 2. Trajectory section
@@ -57,10 +53,13 @@ class UI_Menu:
         if psim.TreeNode("I/O Operations"):
             if psim.Button("Load G-code"):
                 self.content.load_gcode()
+            
+            psim.Spacing()
+            psim.Spacing()
             psim.TreePop()
 
-        # 4. Joint angle control section
-        if psim.TreeNode("Joint Angles"):
+        # 4. Forward kinematics section
+        if psim.TreeNode("Forward Kinematics"):
             changed_any = False
             for i in range(6):
                 lo, hi = JOINT_LIMITS[i]
@@ -75,11 +74,12 @@ class UI_Menu:
                 self.content.update_arm(self.joint_angles)
                 self.content.clear_trajectory()
 
+            psim.Spacing()
+            psim.Spacing()
             psim.TreePop()
 
         # 5. Inverse kinematics section -- target is the TCP pose, not the
-        # flange (see docs/FR5_IK_Derivation.md); RPY reuses the same
-        # -180..180 slider convention as the Transformation section below.
+        # flange (see docs/FR5_IK_Derivation.md).
         if psim.TreeNode("Inverse Kinematics"):
             _, self.ik_target_pos = psim.InputFloat3("Target Position (mm)", self.ik_target_pos)
             _, self.ik_target_rpy = psim.SliderFloat3("Target RPY (deg)", self.ik_target_rpy, -180, 180)
@@ -111,27 +111,4 @@ class UI_Menu:
                         self.joint_angles = angles
                         self.content.update_arm(self.joint_angles)
 
-            psim.TreePop()
-
-        # 6. Transformation control section
-        if psim.TreeNode("Transformation"):
-            changed_t, self.trans_vec = psim.InputFloat3("Translate", self.trans_vec)
-            changed_r, self.rot_vec = psim.SliderFloat3("Rotate", self.rot_vec, -180, 180)
-            
-            # If the user has interacted with the UI, notify the backend immediately
-            if changed_t or changed_r:
-                self.content.update_transformation(self.rot_vec, self.trans_vec)
-            
-            psim.TreePop()
-
-        # 7. Algorithm parameters section
-        if psim.TreeNode("Algorithm Settings"):
-            _, self.show_settings = psim.Checkbox("Enable Advanced", self.show_settings)
-            
-            if self.show_settings:
-                _, self.slider_val = psim.SliderFloat("Smoothness", self.slider_val, 0.0, 1.0)
-                
-                if psim.Button("Run Processing"):
-                    self.content.run_algorithm(self.slider_val, "method_A")
-            
             psim.TreePop()
