@@ -60,3 +60,29 @@ rotation later without changing the storage shape.
 transformed with the full matrix instead of a raw vector add.
 
 **Verified on:** 2026-07-08
+
+## S1.3 G-code toolpath points transform via T_user_frame, not the Delta pipeline
+
+**Decision:** `load_gcode()` parses waypoints in plate-local mm
+(`parse_gcode()`) and maps them to world coordinates with a full
+homogeneous multiply, `T_user_frame @ [x,y,z,1]`, once at load time — not
+the per-frame Delta transform pipeline, and not a raw vector add. Only
+`G1` (feed) segments are drawn as curve-network edges; `G0` (travel)
+moves still update the parser's modal position but are not rendered.
+
+**Reason:** The toolpath is static workpiece geometry fixed to the plate,
+same as the plate mesh itself (S1.2) — it has no joints and never moves,
+so `apply_delta_transform` doesn't apply. Unlike the plate mesh's current
+raw `+ USER_FRAME_ORIGIN_MM` vector add, the toolpath uses the actual
+matrix multiply because S1.2 already commits to `T_user_frame` eventually
+gaining a rotation submatrix; doing the multiply now means `load_gcode()`
+needs no changes when that happens, while the plate mesh's vector add
+would need revisiting anyway. Drawing only `G1` segments keeps the
+preview focused on the printed/cut path rather than incidental
+repositioning moves.
+
+**Non-revertible unless:** G-code loading becomes something other than a
+one-time static preview (e.g. live streaming during a simulated print), at
+which point it needs its own per-frame update pipeline.
+
+**Verified on:** 2026-07-08

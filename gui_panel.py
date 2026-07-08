@@ -48,8 +48,8 @@ class UI_Menu:
 
         # 3. Data loading section
         if psim.TreeNode("I/O Operations"):
-            if psim.Button("Load Test Data"):
-                self.content.load_dummy_data()
+            if psim.Button("Load G-code"):
+                self.content.load_gcode()
             psim.TreePop()
 
         # 4. Joint angle control section

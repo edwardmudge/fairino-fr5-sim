@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import polyscope as ps
 import numpy as np
@@ -26,6 +27,13 @@ BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
 # rotation, leaving little margin for the wrist to also orient freely
 USER_FRAME_ORIGIN_MM = np.array([-600.0, -300.0, 0.0])
 USER_FRAME_SCALE_MM = 50.0  # Fixed axes drawn at the user frame, world units (mm)
+
+GCODE_DIR = "assets/gcode"
+GCODE_FILE = "square_test.gcode"
+GCODE_RADIUS_MM = 1.5  # Toolpath curve thickness, world units (mm) -- distinct from TRAJECTORY_RADIUS_MM
+GCODE_COLOR = (1.0, 0.55, 0.0)  # Orange, so it doesn't visually merge with the Trajectory curve
+
+GCODE_MOVE_RE = re.compile(r"([A-Za-z])\s*(-?\d+\.?\d*)")
 
 
 class VisContent:
@@ -89,6 +97,73 @@ class VisContent:
         ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
 
         self.create_coordinate_frame(scale=USER_FRAME_SCALE_MM, origin=USER_FRAME_ORIGIN_MM, name="User Frame")
+
+
+    def parse_gcode(self, filepath):
+        """Parse G0/G1 linear moves, tracking modal position (an axis word
+        missing from a line keeps its last value; the very first line
+        defaults missing axes to 0). Comments (';...' and '(...)') and
+        everything except G0/G1 are ignored. Returns a list of
+        ([x, y, z], is_feed_move) pairs, plate-local mm -- G0 travel moves
+        still update position (needed as the anchor for the next drawn
+        edge) but are flagged is_feed_move=False so load_gcode() skips
+        drawing them. Scoped to the square test fixture, not a general
+        G-code interpreter."""
+        x, y, z = 0.0, 0.0, 0.0
+        points = []
+        with open(filepath) as f:
+            for line in f:
+                line = line.split(';', 1)[0]
+                line = re.sub(r"\([^)]*\)", "", line)
+                words = GCODE_MOVE_RE.findall(line)
+                if not words:
+                    continue
+
+                letter0, value0 = words[0]
+                if letter0.upper() != 'G':
+                    continue
+                try:
+                    code = int(float(value0))
+                except ValueError:
+                    continue
+                if code not in (0, 1):
+                    continue
+
+                for letter, value in words[1:]:
+                    letter = letter.upper()
+                    if letter == 'X':
+                        x = float(value)
+                    elif letter == 'Y':
+                        y = float(value)
+                    elif letter == 'Z':
+                        z = float(value)
+                points.append(([x, y, z], code == 1))
+        return points
+
+
+    def load_gcode(self):
+        """Register the G1 feed-move segments of the parsed G-code as a
+        static curve network on the plate -- G0 travel moves are parsed
+        (for position tracking) but not drawn, see parse_gcode(). Points
+        are plate-local (mm) and mapped to world with the full
+        T_user_frame matrix multiply, not a raw vector add -- see
+        settled.md S1.3. Safe to call repeatedly; Polyscope replaces the
+        prior structure of the same name, same as _update_trajectory_curve."""
+        waypoints = self.parse_gcode(os.path.join(GCODE_DIR, GCODE_FILE))
+        if len(waypoints) < 2:
+            return
+
+        points_local = np.array([p for p, _ in waypoints])
+        homo = np.hstack([points_local, np.ones((len(points_local), 1))])
+        nodes = (self.T_user_frame @ homo.T).T[:, :3]
+
+        edges = np.array([[i, i + 1] for i in range(len(nodes) - 1) if waypoints[i + 1][1]])
+        if len(edges) == 0:
+            return
+
+        handle = ps.register_curve_network("G-code Toolpath", nodes, edges)
+        handle.set_radius(GCODE_RADIUS_MM, relative=False)
+        handle.set_color(GCODE_COLOR)
 
 
     # FR5 standard DH parameters: (a_mm, alpha_rad, d_mm, theta_offset_rad)
@@ -294,4 +369,8 @@ if __name__ == "__main__":
     vis = VisContent()
     vis.end_effector_position([0, 0, 0, 0, 0, 0])
     print(f"[Backend] Loaded {len(vis.mesh_data)} link meshes")
+
+    gcode_waypoints = vis.parse_gcode(os.path.join(GCODE_DIR, GCODE_FILE))
+    print(f"[Backend] Parsed {len(gcode_waypoints)} G-code waypoints")
+    vis.load_gcode()
 

@@ -30,6 +30,7 @@ robotics dictionary.
 | **Flange** | The mounting face at the end of Link 6, where tools attach. | Frame = `T_0_6` |
 | **Home position** | `[0, 0, 0, 0, 90, 0]` degrees — J5=90° points the tool straight down. | `docs/FR5_Joint_Limits.md` |
 | **User frame** | A reference frame (translation, and eventually rotation) from the base frame to a workpiece origin — here, the build-plate corner. Standard industrial-robot term (FANUC/UR/ABB all have one); Craig's *Introduction to Robotics* calls the same concept a **station frame**. Currently translation-only, stored as `self.T_user_frame`. | `USER_FRAME_ORIGIN_MM`, `load_build_plate()` in `geometry_backend.py`; see `settled.md` S1.2 |
+| **G-code toolpath** | Preview curve of a parsed G-code file's `G1` (feed) moves, registered once per "Load G-code" click (not live per-frame like the TCP trajectory). Modal position convention: an axis omitted from a line keeps its *last* value, not 0 — only the very first line defaults omitted axes to 0. `G0` (travel) moves update this modal position but are not drawn. | `parse_gcode()`/`load_gcode()` in `geometry_backend.py`, fixture at `assets/gcode/square_test.gcode`; see `settled.md` S1.3 and `wiki/003_Guides/Gcode_Toolpath.md` |
 
 ## 4. Degrees of freedom
 
