@@ -12,6 +12,8 @@ JOINT_LIMITS = [
     (-170, 170),  # J6
 ]
 
+HOME_JOINT_ANGLES = [0, 0, 0, 0, 90, 0]  # docs/FR5_Joint_Limits.md "Home Position"
+
 class UI_Menu:
     """
     [Frontend Interaction Layer]
@@ -62,6 +64,11 @@ class UI_Menu:
 
             if changed_any:
                 self.content.update_arm(self.joint_angles)
+
+            if psim.Button("Reset"):
+                self.joint_angles = np.array(HOME_JOINT_ANGLES, dtype=float)
+                self.content.update_arm(self.joint_angles)
+                self.content.clear_trajectory()
 
             psim.TreePop()
 

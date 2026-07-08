@@ -333,6 +333,16 @@ class VisContent:
             self.trajectory_handle.set_enabled(enabled)
 
 
+    def clear_trajectory(self):
+        """Discard recorded TCP trajectory points and remove the curve, if
+        any -- emptying trajectory_points alone isn't enough, since
+        _update_trajectory_curve() only re-registers when there are >=2
+        points, which would otherwise leave the stale curve on screen."""
+        self.trajectory_points = []
+        self.trajectory_handle = None
+        ps.remove_curve_network("Trajectory", error_if_absent=False)
+
+
     def update_transformation(self, rotation, translation):
         """
         Handle the transformation logic
