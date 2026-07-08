@@ -15,6 +15,7 @@ TCP_FILE = "TCP.txt"
 
 TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
+TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
 
 
 class VisContent:
@@ -44,16 +45,23 @@ class VisContent:
         self.update_arm([0, 0, 0, 0, 0, 0])
 
 
-    def create_coordinate_frame(self, scale=1.0):
-        """Initialise a basic coordinate frame, to prevent an empty scene"""
-        nodes = np.array([[0,0,0], [scale,0,0], [0,scale,0], [0,0,scale]])
+    def create_coordinate_frame(self, scale=1.0, origin=(0, 0, 0), name="Coordinate Frame"):
+        """Register an XYZ axis triad. Reused for the static world-origin
+        frame (defaults) and, with an origin/scale/name override, for the
+        TCP frame -- see load_data() and docs/FR5_Mesh_Convention.md.
+        Returns (handle, nodes) so callers can drive the nodes through the
+        Delta transform like any other zero-pose-frame geometry."""
+        origin = np.asarray(origin, dtype=float)
+        nodes = np.array([origin, origin + [scale,0,0], origin + [0,scale,0], origin + [0,0,scale]])
         edges = np.array([[0,1], [0,2], [0,3]])
-        
-        ps_net = ps.register_curve_network("Coordinate Frame", nodes, edges)
-        
+
+        ps_net = ps.register_curve_network(name, nodes, edges)
+
         # X=red, Y=green, Z=blue
         colors = np.array([[1,0,0], [0,1,0], [0,0,1]])
         ps_net.add_color_quantity("axis_colors", colors, defined_on='edges', enabled=True)
+
+        return ps_net, nodes
 
     
     # FR5 standard DH parameters: (a_mm, alpha_rad, d_mm, theta_offset_rad)
@@ -141,6 +149,15 @@ class VisContent:
         self.mesh_handles.append(self.point_cloud_data)
         self.update_fns.append(self.point_cloud_data.update_point_positions)
 
+        # TCP orientation triad, also Delta_6 -- axis tips defined in the zero-pose
+        # world frame around tcp_local, so they rotate with the tool via the same
+        # Delta transform (curve network -> update_node_positions)
+        tcp_frame_handle, tcp_frame_rest_nodes = self.create_coordinate_frame(
+            scale=TCP_FRAME_SCALE_MM, origin=self.tcp_local, name="TCP Frame")
+        self.rest_verts.append(tcp_frame_rest_nodes)
+        self.mesh_handles.append(tcp_frame_handle)
+        self.update_fns.append(tcp_frame_handle.update_node_positions)
+
         return meshes
 
 
@@ -148,11 +165,12 @@ class VisContent:
         """Update link mesh vertex positions for the given joint angles.
 
         Delta_i = T_0_i(q) @ inv(T_0_i(0)) -- see docs/FR5_Mesh_Convention.md.
-        Robot0 is the fixed base and is never updated. The nozzle (index 6)
-        and TCP (index 7) ride on the flange, reusing Delta_6 (index 5).
+        Robot0 is the fixed base and is never updated. The nozzle (index 6),
+        TCP point (index 7), and TCP frame (index 8) ride on the flange,
+        reusing Delta_6 (index 5).
         """
         T_current = self.compute_fk(joint_angles_deg)
-        for i in range(8):
+        for i in range(9):
             src = min(i, 5)
             Delta = T_current[src] @ np.linalg.inv(self.T_zero[src])
 
