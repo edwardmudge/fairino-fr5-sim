@@ -56,7 +56,7 @@ class UI_Menu:
 
         # 3. Data loading section
         if psim.TreeNode("I/O Operations"):
-            if psim.Button("Load G-code"):
+            if psim.Button("Load G-code preview"):
                 self.content.load_gcode()
             
             psim.Spacing()
@@ -125,7 +125,8 @@ class UI_Menu:
 
             if psim.Button("Move"):
                 self.content.load_build_plate(self.bp_target_pos, self.bp_target_rpy)
-                self.bp_status = "Moved"
+                self.content.load_gcode()  # keep the toolpath preview in sync with the new pose
+                self.bp_status = "Build plate moved"
 
             psim.SameLine()
 
@@ -133,6 +134,7 @@ class UI_Menu:
                 self.bp_target_pos = np.array(USER_FRAME_ORIGIN_MM, dtype=float)
                 self.bp_target_rpy = np.zeros(3)
                 self.content.load_build_plate()
+                self.content.load_gcode()
                 self.bp_status = "Reset to default"
 
             psim.Spacing()
@@ -149,8 +151,11 @@ class UI_Menu:
                 if pos is not None:
                     self.bp_target_pos = pos
                     self.bp_target_rpy = rpy
+                    self.content.load_gcode()
                 else:
                     self.bp_status = status
 
+            psim.Spacing()
+            psim.Spacing()
             psim.TextUnformatted(self.bp_status)
             psim.TreePop()

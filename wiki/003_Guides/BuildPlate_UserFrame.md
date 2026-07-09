@@ -79,15 +79,15 @@ pattern) — position/RPY are plain `InputFloat3` fields, not sliders:
 | **Move** | `load_build_plate(bp_target_pos, bp_target_rpy)` with the current field values. |
 | **Reset** | Resets the fields to `USER_FRAME_ORIGIN_MM`/zero-rotation, then calls `load_build_plate()` argument-free — back to the exact original placement. |
 | **Save Position** | `save_build_plate_position(...)` writes the current field values to `assets/buildPlate/saved_position.json`. |
-| **Load Saved Position** | `load_saved_build_plate_position()` reads that file (if present), applies it immediately, and syncs the input fields; shows a status message either way. |
+| **Load Saved Position** | `load_saved_build_plate_position()` reads that file (if present), applies it immediately, and syncs the input fields; on failure (no saved file yet) shows a status message, but leaves `bp_status` unchanged on success (`gui_panel.py`). |
 
 Loading a saved position only ever happens on that explicit click —
 `__init__` never reads the saved-position file automatically, so every
 fresh start still begins from `USER_FRAME_ORIGIN_MM`/zero-rotation.
 
-G-code loaded before a Move/Reset/Load click does **not** currently
-re-transform with the plate — a known gap, deferred to roadmap Stage 5.3
-(`wiki/001_Inbox/2026-07-09_2d3d_printing_roadmap.md`).
+Move, Reset, and Load Saved Position all also call `load_gcode()` again,
+so an already-loaded G-code toolpath stays in sync with the plate's new
+pose instead of going stale (`settled.md` S1.8).
 
 ## How to tune it
 

@@ -13,6 +13,7 @@ Task type → required reading. Load only what's relevant, not everything.
 | Tool head / TCP | `docs/FR5_Mesh_Convention.md` (Nozzle and TCP section) | `GLOSSARY.md` §3 | `assets/printerHead/TCP.txt` | — |
 | IK | `docs/FR5_DH_Table.md`, `docs/FR5_Joint_Limits.md`, `docs/FR5_IK_Derivation.md` | `GLOSSARY.md` §1 | `geometry_backend.py` (`solve_ik`, `solve_ik_tcp`) | Anything describing IK as "not started" or "no IK code exists yet" |
 | UI / sliders | `docs/Polyscope_Quickstart.md` (ImGui widgets section) | `docs/FR5_Joint_Limits.md` (slider ranges) | `gui_panel.py` | — |
+| Build plate / G-code | `wiki/003_Guides/BuildPlate_UserFrame.md`, `wiki/003_Guides/Gcode_Toolpath.md` | `GLOSSARY.md` §3, `settled.md` S1.2/S1.3/S1.6/S1.7/S1.8 | `geometry_backend.py` (`load_build_plate`, `save_build_plate_position`, `load_saved_build_plate_position`, `parse_gcode`, `load_gcode`), `gui_panel.py` ("Build Plate Orientation" panel) | Anything describing the build plate as translation-only, or the G-code toolpath as not staying in sync when the plate moves |
 
 ★ = Getting this wrong renders the whole arm incorrectly — always read
 before touching mesh transform code, per the warning in

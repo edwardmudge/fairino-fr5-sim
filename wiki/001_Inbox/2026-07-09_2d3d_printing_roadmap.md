@@ -2,7 +2,7 @@
 status: draft
 ---
 
-# Roadmap: Stage 5 (2D Printing) & Stage 6 (3D Printing)
+# Roadmap: Stage 5 (Flat-Bed Printing: 2D & Multi-Layer) & Stage 6 (Curved-Surface 3D Printing)
 
 Non-authoritative plan draft — see
 [`TRUTH_LADDER.md`](../005_AgentMgmt/active/ctx_main/TRUTH_LADDER.md). As
@@ -35,6 +35,13 @@ ingredients were given:
 3. Use the G-code toolpath on the (now tiltable) plate to find a good
    orientation by printing on the surface.
 
+Stage 5 is scoped to printing on a **flat** build plate — this covers
+both a single 2D layer and a full multi-layer 3D print (e.g. the
+benchy): the plate itself stays flat/planar throughout either way, so
+multi-layer is a natural extension of Stage 5, not a separate stage.
+Stage 6 is the genuinely different, harder problem — printing on a
+**curved** (non-planar) plate/surface; see Stage 6 below.
+
 ## Scope decisions already made (confirm before implementing if this file goes stale)
 
 - **Stays a simulation.** The supervisor's longer-term intent is for this
@@ -46,141 +53,138 @@ ingredients were given:
 - **Cura integration is manual export/import.** Slice in the standalone
   Cura GUI, export a `.gcode` file. This codebase never shells out to
   Cura or CuraEngine.
-- **Build plate orientation is full roll/pitch/yaw** (3 sliders), not a
-  single tilt axis.
-- **"Best location" search is manual exploration.** Drag the orientation
-  sliders, watch the toolpath, judge by eye. No automated
-  reachability-scoring or optimizer function is planned.
+- **Build plate pose is full position + roll/pitch/yaw**, applied via
+  click-to-apply `InputFloat3` fields and Move/Reset/Save/Load Position
+  buttons (`settled.md` S1.6) — not live-drag sliders.
+- **"Best location" search is manual exploration.** Reposition the plate,
+  watch the toolpath, judge by eye. No automated reachability-scoring or
+  optimizer function is planned.
 
 ---
 
-## Stage 5 — 2D Printing on the Build Plate
+## Stage 5 — Flat-Bed Printing (2D & Multi-Layer)
 
-### 5.1 Build-plate orientation slider (roll, pitch, yaw)
+### 5.1 Build-plate position & orientation — done
 
-**Goal:** Let the build plate be rotated in the scene, not just
-translated.
+**Shipped:** `T_user_frame` is a full 4x4 pose (position + rotation),
+built each call from `load_build_plate(position_mm, rpy_deg)` using the
+**XYZ fixed-angle convention** (`R = Rz(yaw) @ Ry(pitch) @ Rx(roll)`,
+`settled.md` S1.6 — same convention `solve_ik_tcp` already used). The
+"Build Plate Orientation" panel (`gui_panel.py`) exposes `InputFloat3`
+position/RPY fields and four click-to-apply buttons:
 
-This is the trigger condition
-[`settled.md` S1.2](../002_Architecture/settled.md) already named as its
-own future amendment: `T_user_frame` was deliberately stored as a full 4x4
-matrix, even while only translation-populated, "to leave room to add a
-rotation later without changing the storage shape." Implementing this
-step means:
+- **Move** — apply the current fields.
+- **Reset** — back to `USER_FRAME_ORIGIN_MM` / zero rotation exactly.
+- **Save Position** — write the current pose to
+  `assets/buildPlate/saved_position.json`.
+- **Load Saved Position** — read it back and apply it.
 
-1. `T_user_frame` gains a populated rotation submatrix, built from three
-   new slider values (roll, pitch, yaw) in `gui_panel.py`.
-2. The build plate mesh's placement in `load_build_plate()`
-   (`geometry_backend.py`) must switch from the current raw
-   `+ USER_FRAME_ORIGIN_MM` vector add
-   ([`BuildPlate_UserFrame.md`](../003_Guides/BuildPlate_UserFrame.md))
-   to a full homogeneous matrix multiply — exactly the switch S1.2's own
-   "non-revertible unless" clause anticipated.
-3. **Open question, not decided here:** which Euler convention/rotation
-   order combines roll, pitch, yaw into one matrix. Pick one when
-   implementing and record it as a new dated entry in `settled.md`
-   (e.g. S1.6), the same way every other transform convention in this
-   project is on record.
+See `settled.md` S1.6 and
+[`BuildPlate_UserFrame.md`](../003_Guides/BuildPlate_UserFrame.md) for
+the full record.
 
-**Files:** `geometry_backend.py` (`load_build_plate()`, rotation matrix
-construction), `gui_panel.py` (3 new sliders). No new files — consistent
-with `CLAUDE.md`'s Surgical Changes rule.
+### 5.2 G-code toolpath: parser, loading, and live preview — done
 
-**Verify:** Dragging each of the three new sliders visibly tilts the
-plate mesh and its User Frame triad together, independent of the other
-two axes; setting all three back to zero returns the plate to its exact
-current (translation-only) placement.
+**Shipped:**
 
-### 5.2 Generalize the G-code parser; Cura for slicing
+- A custom G0/G1-only parser (`parse_gcode()`/`load_gcode()`,
+  `geometry_backend.py`) — a third-party tokenizer
+  (`AndyEveritt/GcodeParser`) was evaluated and rejected (generic
+  tokenizer only, no modal-position/arc/relative-positioning handling).
+  Arcs (`G2`/`G3`) and relative positioning (`G91`) are discarded **in
+  software** by decision, not assumed absent from the input file
+  (`settled.md` S1.7).
+- A fixed load path, `assets/models/gcode/model.gcode` — every Cura
+  export overwrites the same file; no file-picker UI.
+- The toolpath preview stays in sync with the plate: Move, Reset, and
+  Load Saved Position each reload and re-transform the curve against the
+  plate's current pose, instead of only updating on a separate "Load
+  G-code" click (`settled.md` S1.8).
+- **Tried and reverted:** translucent rendering (`GCODE_TRANSPARENCY`)
+  caused a constant frame-rate regression on a real multi-layer print's
+  toolpath (~180,000 `G0`/`G1` segments — alpha-blending that many
+  overlapping segments is expensive). Reverted to opaque; revisiting
+  translucency needs a plan for the segment-count/rendering-cost problem
+  itself, not just re-adding it.
+- **Multi-layer already works, no code change needed.** `parse_gcode()`
+  tracks Z modally with no single-layer assumption, so a full multi-layer
+  3D print loads and previews correctly today — proven directly by the
+  benchy (~180,000 `G0`/`G1` lines across many layers) rendering
+  correctly. This was already true before this stage's scope was
+  explicitly widened to include multi-layer; it just wasn't previously
+  called out.
 
-**Goal:** Load a real Cura-exported `.gcode` file instead of the one
-hardcoded test fixture.
+See [`Gcode_Toolpath.md`](../003_Guides/Gcode_Toolpath.md) for the full
+record, including gaps that are genuinely still unbuilt (not decisions):
+unit switching (`G20`/`G21`) and malformed-line reporting.
 
-Cura itself is external and out of scope for this codebase — the user
-slices standalone and exports a file. What's in scope is turning
-`parse_gcode()` / `load_gcode()` (`geometry_backend.py`) from what
-[`Gcode_Toolpath.md`](../003_Guides/Gcode_Toolpath.md) already documents
-as a deliberately minimal, single-fixture parser into something that
-survives a real slicer's output. That doc's own "Current scope and
-limitations" section is effectively a pre-written gap list for this step
-— work through it directly rather than re-deriving requirements:
+### 5.3 Toolpath execution — drive the arm through the print (not started)
 
-- Arc support (`G2`/`G3`) — interpolate into short line-segment chains.
-- Unit switching (`G20`/`G21`) — currently mm is assumed always.
-- Relative positioning (`G90`/`G91`) — currently absolute is assumed
-  always.
-- Dynamic file loading — replace the hardcoded `GCODE_DIR`/`GCODE_FILE`
-  constants with a real file picker. Check
-  [`Polyscope_Quickstart.md`](../../docs/Polyscope_Quickstart.md) for
-  what ImGui file-dialog options actually exist before assuming one —
-  per `CLAUDE.md`'s SDK Investigation Rule, don't guess an unfamiliar
-  `psim.*` widget's behavior.
-- Malformed-line reporting — currently unparseable/unsupported lines are
-  silently skipped.
+**Goal:** Take the already-loaded, already-positioned G-code toolpath —
+a single flat layer *or* a full multi-layer print (e.g. the full benchy,
+~180,000 waypoints) — and actually move the FR5 through it via IK,
+rather than only previewing it, with a **playback speed slider** running
+anywhere from real-time (paced to the G-code's `F` feedrate) up to as
+fast as the sim can solve/render. This is the step that makes this a
+printer instead of a viewer, and the thing to get working before Stage 6
+starts.
 
-**Open question, flagged not decided:** Cura's FDM export includes
-extrusion (`E`) and temperature (`M104`/`M109`) words that a 2D
-single-layer preview doesn't need numerically. These should be
-**parsed-but-ignored** for Stage 5 — recognized and retained on each
-waypoint rather than silently dropped the way unsupported G/M-codes are
-today — so Stage 6 (which does need `E`) doesn't require a second parser
-rewrite.
+**Open questions to resolve when implementing** (not decided here):
 
-**Files:** `geometry_backend.py` only.
+1. **Tool orientation during printing.** `parse_gcode()` only carries
+   X/Y/Z; `solve_ik_tcp` needs a full 6-DOF target (`settled.md` S1.4).
+   Natural default: hold the TCP orientation constant, normal to the
+   plate (derived from `T_user_frame`'s rotation), since the plate
+   doesn't tilt mid-print — true for a single layer and for every layer
+   of a multi-layer print alike (unlike Stage 6's curved surface, which
+   would need the orientation to actually vary).
+2. **Per-waypoint IK + continuity.** `solve_ik_tcp` already ranks
+   branches by proximity to `self.current_joint_angles` (`settled.md`
+   S1.4/S1.5) — this is exactly the "path following" trigger S1.5's
+   "Non-revertible unless" clause anticipated, and should work as-is
+   per-waypoint (each solve continues from wherever the previous one
+   left the arm). Worth adding: a whole-path reachability pre-check
+   (solve every waypoint before moving anything, report the first
+   unreachable one) reusing the same solver — no new reachability-
+   checking code.
+3. **Speed-slider animation control that doesn't exist yet.** Every
+   current `gui_panel.py` control is an immediate one-shot action;
+   this needs new Play/Pause state plus a speed slider spanning
+   real-time (derive timing from each waypoint's most recent `F` value)
+   to as-fast-as-possible (advance every waypoint each frame, no timing
+   delay), and a per-frame advance through the waypoint list driven by
+   whichever pace is selected.
+4. **Unverified at ~180,000-waypoint scale: is per-waypoint IK-solving
+   actually fast enough?** Even at the "as fast as possible" end of the
+   slider, solving IK ~180,000 times has a real cost that hasn't been
+   measured. Benchmark `solve_ik_tcp`'s per-call cost against the full
+   benchy waypoint count early during implementation, before committing
+   to the rest of the animation-control design — if it's too slow, that
+   changes the design (e.g. batching, a coarser IK-solve stride with
+   interpolation between solved points, etc.), so it needs an answer
+   first, not last.
 
-**Verify:** Load an actual Cura-exported `.gcode` file (not the
-`square_test.gcode` fixture) for a simple flat 2D shape and confirm the
-toolpath preview renders correctly — including any arcs, and regardless
-of whether the file uses relative or absolute positioning or explicit
-units.
+**Files:** `geometry_backend.py` (new driver logic, reusing
+`solve_ik_tcp`), `gui_panel.py` (new Play/Pause + speed slider controls).
 
-### 5.3 Print on the surface; use orientation to find the best fit
-
-**Goal:** Combine 5.1 and 5.2 into the actual workflow the supervisor
-described — tilt the plate under a loaded toolpath and visually judge fit.
-
-Per the manual-exploration decision above, this isn't a new feature so
-much as composing what 5.1 and 5.2 already provide: load G-code, tilt the
-plate with the new sliders, watch the toolpath move with it, and manually
-cross-check a few points against the existing IK panel if reachability is
-in doubt (reusing the existing multi-branch solver and ranking from
-`settled.md` S1.4/S1.5 — no new reachability-checking code).
-
-**One real gap to resolve when implementing 5.1+5.2 together:**
-[`settled.md` S1.3](../002_Architecture/settled.md) transforms the G-code
-toolpath through `T_user_frame` **once, at load time** — correct for a
-static plate, but it means tilting the plate *after* G-code is already
-loaded won't move the already-drawn curve. This needs a decision: either
-re-run the toolpath transform whenever the orientation sliders change, or
-move the G-code curve onto a per-frame update path (S1.3's own
-"non-revertible unless" clause already flags "live streaming" as the
-trigger for needing a per-frame pipeline — this is a milder version of
-that same trigger). Record whichever is chosen as a `settled.md` update
-to S1.3.
-
-**Files:** `geometry_backend.py` (whichever of the two options above is
-chosen), `gui_panel.py` if the slider callback needs to trigger a
-re-transform.
-
-**Verify:** With a G-code file already loaded, drag any orientation
-slider and confirm the drawn toolpath tilts with the plate in real time
-(not just on the next "Load G-code" click).
+**Verify:** With a toolpath loaded (both a flat single-layer shape and
+the full benchy) and the plate positioned, starting playback moves the
+arm's TCP through the waypoints in sequence and the nozzle visibly
+traces the loaded curve; dragging the speed slider from real-time to
+as-fast-as-possible visibly changes playback pace.
 
 ---
 
-## Stage 6 — 3D Printing
+## Stage 6 — Curved-Surface 3D Printing
 
-Kept intentionally lighter and more general here — mirroring how the
-original kit's Stage 4 "Advanced Extensions" was a looser grab-bag than
-Stages 1–3 — since this depends on how Stage 5 actually lands.
+Intentionally left blank for now — to be filled in once Stage 5 lands.
 
-Builds on Stage 5's parser handling multiple Z-layers rather than one
-flat pass, and is where the Stage 5.2 parsed-but-ignored `E` value
-actually gets used (e.g. only rendering an edge where `E` increases, to
-distinguish print moves from travel at a finer grain than `G0`/`G1`
-already does). Layer-height changes are a natural place to add the
-per-layer/Z-height color-coding `Gcode_Toolpath.md` already names as a
-gap.
+**Goal (stated, not designed):** printing on a **curved** (non-planar)
+surface, sliced by a **proprietary slicer**, not Cura — Cura only
+produces flat-layer G-code, so a genuinely different slicing approach is
+needed here. This is a harder, different problem than a straightforward
+"add more Z-layers to a flat print," which an earlier draft of this
+section assumed; that framing no longer applies.
 
 No hardware-control design is proposed here — the point of keeping
 `T_user_frame` as a clean matrix and the parser decoupled from rendering
@@ -195,10 +199,16 @@ and however that gets decided.
 Not doing yet, until the above is actually implemented and these
 decisions are actually made:
 
-- New `GLOSSARY.md` terms (slicer, layer, build-plate orientation).
-- A new `BOOT_MATRIX.md` row routing future G-code/slicing tasks to this
-  document and to `Gcode_Toolpath.md`.
+- Dedicated `GLOSSARY.md` terms for **slicer** and **layer** — genuinely
+  still not needed; nothing in the codebase names either concept
+  directly yet. (Build-plate orientation is already covered by the
+  existing "User frame" entry, and a "G-code toolpath" entry already
+  exists too — those were done alongside 5.1/5.2, not deferred.)
 
-Per `CLAUDE.md`'s Documentation Updates rule, these get added once the
-vocabulary is actually in use, not speculatively for a plan that hasn't
-been built yet.
+Already done, no longer deferred: a `BOOT_MATRIX.md` row routing
+build-plate/G-code tasks to this document, `BuildPlate_UserFrame.md`, and
+`Gcode_Toolpath.md` now exists.
+
+Per `CLAUDE.md`'s Documentation Updates rule, the remaining item above
+gets added once that vocabulary is actually in use, not speculatively for
+a plan that hasn't been built yet.

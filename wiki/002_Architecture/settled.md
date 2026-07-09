@@ -186,7 +186,7 @@ always begins from `USER_FRAME_ORIGIN_MM`/zero-rotation.
 
 **Reason:** Roadmap Stage 5.1 (2D printing) needed the plate to tilt so a
 G-code toolpath's fit against the plate surface can be judged by eye --
-see `wiki/001_Inbox/2026-07-09_2d3d_printing_roadmap.md`. The user asked
+see `tutorials/Stage5_README.md`. The user asked
 to generalize position alongside rotation (one parameterized placement
 function, not two separate mechanisms) and to make the applied pose
 persistable across sessions once a good orientation is found by manual
@@ -196,5 +196,71 @@ exploration, without forcing every future startup to load it silently.
 does not currently re-transform with the plate (deferred to roadmap 5.3)
 -- if live toolpath-follows-plate is added, `load_build_plate()` (or its
 callers) would need to also re-run `load_gcode()`'s transform.
+
+**Verified on:** 2026-07-09
+
+## S1.7 G-code scope is G0/G1 motion only, enforced in software, not by constraining Cura's output
+
+**Decision:** `parse_gcode()`/`load_gcode()` (`geometry_backend.py`)
+stay the project's general-purpose G-code loader -- no third-party
+tokenizer (`AndyEveritt/GcodeParser` was evaluated and rejected: it's a
+generic line tokenizer with no modal-position tracking, `G90`/`G91`
+handling, or arc interpolation, so it would replace the ~5-line regex
+tokenizing step this project already has working, at the cost of a new
+dependency, without touching any of the actually hard parts). Scope is
+**G0/G1 motion only**: any `G2`/`G3` (arcs), `G91` (relative
+positioning), `G20` (inch units), or any other G/M/T-code is discarded
+by the existing `if code not in (0, 1): continue` filter in
+`parse_gcode()` -- a software-side filter, not an assumption that Cura
+will never emit them. `GCODE_DIR`/`GCODE_FILE` remain hardcoded
+constants, now `assets/models/gcode/model.gcode` -- a **fixed**
+name/location every Cura export is saved to, not hand-edited per
+session; no file-picker/text-input was added.
+
+**Reason:** The supervisor ruled G0/G1-only sufficient for this
+application. Configuring Cura to never emit `G2`/`G3` turned out to be
+impractical, so rather than depend on slicer configuration, unsupported
+codes are filtered in software -- which the parser already did (this
+formalizes existing behavior as intentional rather than an unexamined
+gap). See `wiki/003_Guides/Gcode_Toolpath.md` "Current scope and
+limitations" for the full up-to-date gap list.
+
+**Non-revertible unless:** the application later needs arcs, relative
+positioning, or unit switching after all (e.g. a different slicer/export
+path than Cura), at which point `parse_gcode()` would need real
+interpolation/accumulation logic for whichever codes are reintroduced,
+not just removing the discard.
+
+**Verified on:** 2026-07-09
+
+## S1.8 G-code toolpath re-transforms on plate reposition via a button-triggered reload, not a per-frame pipeline
+
+**Decision:** `gui_panel.py`'s Build Plate Orientation panel now calls
+`self.content.load_gcode()` again immediately after each of its
+**Move**, **Reset**, and **Load Saved Position** buttons (all three
+change `self.T_user_frame` via `load_build_plate()`). `load_gcode()`
+re-parses the file from disk and re-registers the curve against the
+current `T_user_frame`, so the already-drawn toolpath jumps to match the
+plate's new pose without a separate "Load G-code" click. To make this
+safe to call unconditionally (these buttons are reachable before any
+G-code has ever been loaded), `load_gcode()` now no-ops if
+`GCODE_DIR`/`GCODE_FILE` doesn't exist, instead of letting
+`parse_gcode()`'s `open()` raise `FileNotFoundError`.
+
+**Reason:** This is the gap S1.3's "Non-revertible unless" clause and
+the roadmap's Stage 5.3 flagged in advance: a toolpath loaded once,
+transformed once, doesn't follow the plate if it's repositioned
+afterward. Of the two fixes that section anticipated (re-run the
+transform on pose change, or move the curve onto a full per-frame update
+pipeline), the button-triggered re-run is the one actually needed here —
+the plate only ever changes pose on an explicit click (Move/Reset/Load),
+never continuously, so there's no live-dragging case that would require
+a real per-frame pipeline.
+
+**Non-revertible unless:** plate repositioning becomes continuous/live
+(e.g. a live-drag slider is added back for RPY/position, or live
+streaming through the arm is built), at which point the toolpath would
+need the per-frame pipeline S1.3 originally deferred, not just another
+reload call.
 
 **Verified on:** 2026-07-09

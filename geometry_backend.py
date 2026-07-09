@@ -29,8 +29,8 @@ USER_FRAME_ORIGIN_MM = np.array([-600.0, -300.0, 0.0])
 USER_FRAME_SCALE_MM = 50.0  # Fixed axes drawn at the user frame, world units (mm)
 BUILD_PLATE_POSITION_FILE = os.path.join(BUILD_PLATE_DIR, "saved_position.json")  # GUI Save/Load Position buttons
 
-GCODE_DIR = "assets/gcode"
-GCODE_FILE = "square_test.gcode"
+GCODE_DIR = "assets/models/gcode"
+GCODE_FILE = "model.gcode"  # Fixed name -- overwritten by each new Cura export, never hand-edited
 GCODE_RADIUS_MM = 1.5  # Toolpath curve thickness, world units (mm) -- distinct from TRAJECTORY_RADIUS_MM
 GCODE_COLOR = (1.0, 0.55, 0.0)  # Orange, so it doesn't visually merge with the Trajectory curve
 
@@ -150,8 +150,9 @@ class VisContent:
         is_feed_move) pairs, plate-local mm -- G0 travel moves update
         position but are flagged is_feed_move=False so load_gcode() skips
         drawing them. Modal position handling: see GLOSSARY.md 'G-code
-        toolpath'. Scoped to the square test fixture, not a general G-code
-        interpreter."""
+        toolpath'. G0/G1-only by design (see settled.md S1.7) -- any other
+        G/M-code, and any line that isn't G0/G1, is discarded in software
+        here, not assumed absent from the input file."""
         x, y, z = 0.0, 0.0, 0.0
         points = []
         with open(filepath) as f:
@@ -190,9 +191,18 @@ class VisContent:
         (for position tracking) but not drawn, see parse_gcode(). Points
         are plate-local (mm) and mapped to world with the full
         T_user_frame matrix multiply, not a raw vector add -- see
-        settled.md S1.3. Safe to call repeatedly; Polyscope replaces the
-        prior structure of the same name, same as _update_trajectory_curve."""
-        waypoints = self.parse_gcode(os.path.join(GCODE_DIR, GCODE_FILE))
+        settled.md S1.3. Safe to call repeatedly -- including from the
+        Build Plate Orientation panel's Move/Reset/Load Saved Position
+        buttons, to re-transform the curve against the plate's new pose
+        (settled.md S1.8) -- Polyscope replaces the prior structure of the
+        same name, same as _update_trajectory_curve. No-ops (instead of
+        raising) if the G-code file doesn't exist yet, since it's now
+        reachable before any G-code has ever been loaded."""
+        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
+        if not os.path.exists(filepath):
+            return
+
+        waypoints = self.parse_gcode(filepath)
         if len(waypoints) < 2:
             return
 

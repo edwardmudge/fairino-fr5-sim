@@ -46,11 +46,14 @@ visually confirm an orientation error, not just a position error.
 
 ## How it's computed
 
-`VisContent.create_coordinate_frame(scale, origin, name)`
+`VisContent.create_coordinate_frame(scale, origin, rotation, name)`
 (`geometry_backend.py`) builds an axis triad — the same node/edge/color
 logic used for the static world-origin frame, generalised to take a
-custom `origin`, `scale`, and Polyscope structure `name`, and to return
-the raw `nodes` array alongside the handle.
+custom `origin`, `scale`, optional `rotation` (3x3, added for the build
+plate's tiltable "User Frame" triad — see `settled.md` S1.6; defaults to
+identity/axis-aligned for every other caller including this one), and
+Polyscope structure `name`, and to return the raw `nodes` array alongside
+the handle.
 
 `load_data()` calls it once with `origin=self.tcp_local` (the same
 zero-pose point the "TCP" point cloud uses) to register the "TCP Frame"
