@@ -11,4 +11,4 @@ Ideas here may later be rejected or superseded; if this contradicts
 
 ## Entries
 
-_(none yet — add dated entries as `YYYY-MM-DD_topic.md` as the build starts)_
+- [`2026-07-09_2d3d_printing_roadmap.md`](2026-07-09_2d3d_printing_roadmap.md) — Stage 5 (2D printing on the build plate) & Stage 6 (3D printing) plan draft
