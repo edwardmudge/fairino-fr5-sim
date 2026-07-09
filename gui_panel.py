@@ -1,6 +1,8 @@
 import polyscope.imgui as psim
 import numpy as np
 
+from geometry_backend import USER_FRAME_ORIGIN_MM
+
 # FR5 practical joint slider ranges (degrees), asymmetric per joint.
 # Source: docs/FR5_Joint_Limits.md "Practical Slider Ranges"
 JOINT_LIMITS = [
@@ -34,6 +36,9 @@ class UI_Menu:
         self.ik_status = ""
         self.ik_solutions = []       # list of (angles, is_singular, raw_branch_index) from solve_ik_tcp
         self.ik_selected_index = 0
+        self.bp_target_pos = np.array(USER_FRAME_ORIGIN_MM, dtype=float)
+        self.bp_target_rpy = np.zeros(3)
+        self.bp_status = ""
 
     def render(self):
         """This function needs to be called by Polyscope every frame"""
@@ -92,8 +97,6 @@ class UI_Menu:
                     self.joint_angles = self.ik_solutions[0][0]
                     self.content.update_arm(self.joint_angles)
 
-            psim.Spacing()
-            psim.Spacing()
             psim.TextUnformatted(self.ik_status)
 
             if self.ik_solutions:
@@ -111,4 +114,43 @@ class UI_Menu:
                         self.joint_angles = angles
                         self.content.update_arm(self.joint_angles)
 
+            psim.Spacing()
+            psim.Spacing()
+            psim.TreePop()
+
+        # 6. Build plate orientation section -- see settled.md S1.6.
+        if psim.TreeNode("Build Plate Orientation"):
+            _, self.bp_target_pos = psim.InputFloat3("Target Position (mm)", self.bp_target_pos)
+            _, self.bp_target_rpy = psim.InputFloat3("Target RPY (deg)", self.bp_target_rpy)
+
+            if psim.Button("Move"):
+                self.content.load_build_plate(self.bp_target_pos, self.bp_target_rpy)
+                self.bp_status = "Moved"
+
+            psim.SameLine()
+
+            if psim.Button("Reset"):
+                self.bp_target_pos = np.array(USER_FRAME_ORIGIN_MM, dtype=float)
+                self.bp_target_rpy = np.zeros(3)
+                self.content.load_build_plate()
+                self.bp_status = "Reset to default"
+
+            psim.Spacing()
+            psim.Spacing()
+
+            if psim.Button("Save Position"):
+                self.content.save_build_plate_position(self.bp_target_pos, self.bp_target_rpy)
+                self.bp_status = "Position saved"
+
+            psim.SameLine()
+
+            if psim.Button("Load Saved Position"):
+                pos, rpy, status = self.content.load_saved_build_plate_position()
+                if pos is not None:
+                    self.bp_target_pos = pos
+                    self.bp_target_rpy = rpy
+                else:
+                    self.bp_status = status
+
+            psim.TextUnformatted(self.bp_status)
             psim.TreePop()

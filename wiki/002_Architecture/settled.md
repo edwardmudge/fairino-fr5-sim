@@ -160,3 +160,41 @@ this wouldn't require removing the full-list return, only changing which
 entry is pre-selected.
 
 **Verified on:** 2026-07-08
+
+## S1.6 Build plate is fully re-posable (position + rotation), XYZ fixed-angle convention, via click-to-apply GUI buttons
+
+**Decision:** `load_build_plate(position_mm, rpy_deg)` now takes both a
+position and an `[roll, pitch, yaw]` (degrees) rotation, superseding S1.2's
+translation-only description -- this is S1.2's own anticipated trigger
+firing ("the user frame needs a real orientation"). Rotation uses the
+**XYZ fixed-angle convention**, `R = Rz(yaw) @ Ry(pitch) @ Rx(roll)`,
+reusing the existing module-level `rot_x`/`rot_y`/`rot_z` helpers -- the
+same convention `solve_ik_tcp` already uses for its target RPY, not a
+second one invented for the plate. The plate mesh and its "User Frame"
+triad (`create_coordinate_frame`'s new optional `rotation` param) are
+placed via one full homogeneous multiply of `self.T_user_frame`, replacing
+the old raw `+ USER_FRAME_ORIGIN_MM` vector add. `gui_panel.py`'s "Build
+Plate Orientation" panel exposes `InputFloat3` fields (not sliders --
+accuracy over drag-feel) plus **Move**/**Reset** buttons: click-to-apply,
+matching the "Solve IK" button pattern rather than the Forward Kinematics
+panel's live-drag `changed_any` pattern. A pose can also be persisted with
+**Save Position** (writes `assets/buildPlate/saved_position.json` via
+`save_build_plate_position`) and recalled with **Load Saved Position**
+(`load_saved_build_plate_position`) -- loading is only ever triggered by
+that explicit button click, never automatically at startup, which still
+always begins from `USER_FRAME_ORIGIN_MM`/zero-rotation.
+
+**Reason:** Roadmap Stage 5.1 (2D printing) needed the plate to tilt so a
+G-code toolpath's fit against the plate surface can be judged by eye --
+see `wiki/001_Inbox/2026-07-09_2d3d_printing_roadmap.md`. The user asked
+to generalize position alongside rotation (one parameterized placement
+function, not two separate mechanisms) and to make the applied pose
+persistable across sessions once a good orientation is found by manual
+exploration, without forcing every future startup to load it silently.
+
+**Non-revertible unless:** G-code loaded before a Move/Reset/Load click
+does not currently re-transform with the plate (deferred to roadmap 5.3)
+-- if live toolpath-follows-plate is added, `load_build_plate()` (or its
+callers) would need to also re-run `load_gcode()`'s transform.
+
+**Verified on:** 2026-07-09

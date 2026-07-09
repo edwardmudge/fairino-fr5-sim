@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import polyscope as ps
 import numpy as np
@@ -26,6 +27,7 @@ BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
 # rotation, leaving little margin for the wrist to also orient freely
 USER_FRAME_ORIGIN_MM = np.array([-600.0, -300.0, 0.0])
 USER_FRAME_SCALE_MM = 50.0  # Fixed axes drawn at the user frame, world units (mm)
+BUILD_PLATE_POSITION_FILE = os.path.join(BUILD_PLATE_DIR, "saved_position.json")  # GUI Save/Load Position buttons
 
 GCODE_DIR = "assets/gcode"
 GCODE_FILE = "square_test.gcode"
@@ -61,14 +63,19 @@ class VisContent:
         self.update_arm([0, 0, 0, 0, 0, 0])
 
 
-    def create_coordinate_frame(self, scale=1.0, origin=(0, 0, 0), name="Coordinate Frame"):
+    def create_coordinate_frame(self, scale=1.0, origin=(0, 0, 0), rotation=None, name="Coordinate Frame"):
         """Register an XYZ axis triad. Reused for the static world-origin
         frame (defaults) and, with an origin/scale/name override, for the
-        TCP frame -- see load_data() and docs/FR5_Mesh_Convention.md.
-        Returns (handle, nodes) so callers can drive the nodes through the
-        Delta transform like any other zero-pose-frame geometry."""
+        TCP frame -- see load_data() and docs/FR5_Mesh_Convention.md. An
+        optional rotation (3x3) tilts the triad's axes -- used by
+        load_build_plate() so the "User Frame" triad matches the plate's
+        orientation; defaults to identity (axis-aligned) for every other
+        caller. Returns (handle, nodes) so callers can drive the nodes
+        through the Delta transform like any other zero-pose-frame
+        geometry."""
         origin = np.asarray(origin, dtype=float)
-        nodes = np.array([origin, origin + [scale,0,0], origin + [0,scale,0], origin + [0,0,scale]])
+        R = np.eye(3) if rotation is None else rotation
+        nodes = np.array([origin, origin + R @ [scale,0,0], origin + R @ [0,scale,0], origin + R @ [0,0,scale]])
         edges = np.array([[0,1], [0,2], [0,3]])
 
         ps_net = ps.register_curve_network(name, nodes, edges)
@@ -80,20 +87,62 @@ class VisContent:
         return ps_net, nodes
 
 
-    def load_build_plate(self):
+    def load_build_plate(self, position_mm=USER_FRAME_ORIGIN_MM, rpy_deg=(0.0, 0.0, 0.0)):
         """Place the build plate at the user frame -- see GLOSSARY.md 'User
-        frame' and settled.md S1.2. Static geometry: registered once, never
-        updated per-frame -- unlike the arm links, the plate isn't driven by
-        any joint, so it needs no Delta transform, just a one-time
-        translation."""
+        frame' and settled.md S1.2/S1.6. Static geometry: registered once
+        per call, never updated per-frame -- unlike the arm links, the
+        plate isn't driven by any joint, so it needs no Delta transform,
+        just a homogeneous transform applied here. Defaults reproduce the
+        original translation-only placement exactly. rpy_deg is [roll,
+        pitch, yaw] degrees, XYZ fixed-angle convention (R = Rz(yaw) @
+        Ry(pitch) @ Rx(roll)) -- same convention as solve_ik_tcp. Safe to
+        call repeatedly (e.g. from the GUI's Move/Reset buttons); Polyscope
+        replaces the prior structures of the same names."""
+        roll, pitch, yaw = np.deg2rad(rpy_deg)
+        R = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+
         self.T_user_frame = np.eye(4)
-        self.T_user_frame[:3, 3] = USER_FRAME_ORIGIN_MM
+        self.T_user_frame[:3, :3] = R
+        self.T_user_frame[:3, 3] = position_mm
 
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
-        plate_verts_world = plate.vertices + USER_FRAME_ORIGIN_MM  # mesh origin == plate corner
+        homo = np.hstack([plate.vertices, np.ones((len(plate.vertices), 1))])
+        plate_verts_world = (self.T_user_frame @ homo.T).T[:, :3]
         ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
 
-        self.create_coordinate_frame(scale=USER_FRAME_SCALE_MM, origin=USER_FRAME_ORIGIN_MM, name="User Frame")
+        self.create_coordinate_frame(scale=USER_FRAME_SCALE_MM, origin=position_mm, rotation=R, name="User Frame")
+
+
+    def save_build_plate_position(self, position_mm, rpy_deg):
+        """Write the given build-plate pose to assets/buildPlate/ so it can
+        be recalled later via load_saved_build_plate_position() -- see the
+        GUI's "Save Position" button. Only ever called on explicit user
+        action, never automatically."""
+        data = {
+            "position_mm": np.asarray(position_mm, dtype=float).tolist(),
+            "rpy_deg": np.asarray(rpy_deg, dtype=float).tolist(),
+        }
+        with open(BUILD_PLATE_POSITION_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+
+    def load_saved_build_plate_position(self):
+        """Read a previously saved build-plate pose (if any) and apply it
+        immediately via load_build_plate(). Only ever called on explicit
+        user action (the GUI's "Load Saved Position" button), never
+        automatically at startup -- see settled.md S1.6. Returns
+        (position_mm, rpy_deg, status_message); position_mm/rpy_deg are
+        None on failure so the GUI knows not to update its input fields."""
+        if not os.path.exists(BUILD_PLATE_POSITION_FILE):
+            return None, None, "No saved position found"
+
+        with open(BUILD_PLATE_POSITION_FILE) as f:
+            data = json.load(f)
+
+        position_mm = np.array(data["position_mm"], dtype=float)
+        rpy_deg = np.array(data["rpy_deg"], dtype=float)
+        self.load_build_plate(position_mm, rpy_deg)
+        return position_mm, rpy_deg, "Loaded saved position"
 
 
     def parse_gcode(self, filepath):
