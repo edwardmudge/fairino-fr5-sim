@@ -44,22 +44,27 @@ one-time setup call (see `settled.md` S1.6):
    convention, the same one `solve_ik_tcp` already uses for its target
    RPY, reusing the shared `rot_x`/`rot_y`/`rot_z` helpers.
 2. Builds `self.T_user_frame`, a full 4x4 matrix: rotation submatrix `R`,
-   translation column `position_mm`.
+   translation column `position_mm + R @ [0, 0, BUILD_PLATE_THICKNESS_MM]`.
+   `position_mm` is where the plate's underside rests; the local-Z offset
+   places the mesh's top/print surface above that by the plate's measured
+   thickness.
 3. Loads the plate OBJ via the shared `load_mesh()` helper and maps its
    raw vertices to world coordinates with the full homogeneous multiply
    `T_user_frame @ [x,y,z,1]` (same pattern `load_gcode()` uses, S1.3) —
    no longer a raw vector add, since there's now a rotation to apply too.
    The mesh's local origin `(0,0,0)` still sits almost exactly at the
    plate's front-left-top corner (checked directly with `trimesh` bounds:
-   X:[0,258], Y:[-10,266], Z:[-0.75,0]), so `position_mm` alone (at
-   zero rotation) reproduces the old placement exactly.
-4. Registers the mesh (`ps.register_surface_mesh("Build Plate", ...)`) —
-   Polyscope replaces any prior structure of the same name, so calling
-   this repeatedly (e.g. from GUI buttons) is safe.
+   X:[0,258], Y:[-10,266], Z:[-0.75,0]), so the transformed mesh body
+   spans from `position_mm` up to the corrected print surface.
+4. Registers the mesh (`ps.register_surface_mesh("Build Plate", ...)`) and
+   sets `BUILD_PLATE_COLOR` explicitly — Polyscope replaces any prior
+   structure of the same name, so calling this repeatedly (e.g. from GUI
+   buttons) is safe.
 5. Calls `create_coordinate_frame(scale=USER_FRAME_SCALE_MM,
-   origin=position_mm, rotation=R, name="User Frame")` — the same
-   generalised triad helper used for the TCP frame (`TCP_Frame.md`), now
-   passing `rotation` so the triad tilts with the plate.
+   origin=self.T_user_frame[:3, 3], rotation=R, name="User Frame")` — the
+   same generalised triad helper used for the TCP frame (`TCP_Frame.md`),
+   now passing `rotation` so the triad tilts with the plate and sits on the
+   corrected print surface.
 
 `load_build_plate()` is defined directly below `create_coordinate_frame()`
 in `geometry_backend.py`. `__init__` still calls it once, argument-free,
@@ -77,7 +82,7 @@ pattern) — position/RPY are plain `InputFloat3` fields, not sliders:
 | Button | Effect |
 |---|---|
 | **Move** | `load_build_plate(bp_target_pos, bp_target_rpy)` with the current field values. |
-| **Reset** | Resets the fields to `USER_FRAME_ORIGIN_MM`/zero-rotation, then calls `load_build_plate()` argument-free — back to the exact original placement. |
+| **Reset** | Resets the fields to `USER_FRAME_ORIGIN_MM`/zero-rotation, then calls `load_build_plate()` argument-free — back to the default resting pose. |
 | **Save Position** | `save_build_plate_position(...)` writes the current field values to `assets/buildPlate/saved_position.json`. |
 | **Load Saved Position** | `load_saved_build_plate_position()` reads that file (if present), applies it immediately, and syncs the input fields; on failure (no saved file yet) shows a status message, but leaves `bp_status` unchanged on success (`gui_panel.py`). |
 
@@ -97,6 +102,8 @@ Module-level constants in `geometry_backend.py`:
 |---|---|
 | `USER_FRAME_ORIGIN_MM` | Default base-frame `[x, y, z]` translation to the plate's corner, used when `load_build_plate()` is called argument-free (startup, Reset). Keep it in the same quadrant as the zero/home-pose TCP direction (see above) and within the ~830–1124mm reach envelope. |
 | `USER_FRAME_SCALE_MM` | Length of the fixed axis triad drawn at the corner, world units (mm). |
+| `BUILD_PLATE_COLOR` | Explicit RGB color for the plate, kept visually distinct from the orange deposited-bead mesh. |
+| `BUILD_PLATE_THICKNESS_MM` | Measured mesh thickness (0.75mm), used to lift the plate's local top surface so the underside rests on `position_mm`. |
 | `BUILD_PLATE_POSITION_FILE` | Path to the saved-position JSON (`assets/buildPlate/saved_position.json`) read/written by the Save/Load Position buttons. |
 
 ## Code anchors
@@ -104,6 +111,7 @@ Module-level constants in `geometry_backend.py`:
 - `geometry_backend.py`: `load_build_plate()`, `save_build_plate_position()`,
   `load_saved_build_plate_position()`, `create_coordinate_frame()`
   (`rotation` param), `USER_FRAME_ORIGIN_MM`, `USER_FRAME_SCALE_MM`,
+  `BUILD_PLATE_COLOR`, `BUILD_PLATE_THICKNESS_MM`,
   `BUILD_PLATE_POSITION_FILE`, `self.T_user_frame`.
 - `gui_panel.py`: "Build Plate Orientation" panel (`bp_target_pos`,
   `bp_target_rpy`, `bp_status`).

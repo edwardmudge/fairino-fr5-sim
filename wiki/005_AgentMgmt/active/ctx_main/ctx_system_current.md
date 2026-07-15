@@ -30,7 +30,8 @@ corresponding FR5 arm configuration in an interactive 3D window.
 | Tool head + TCP tracking | done | See `wiki/003_Guides/TCP_Frame.md` |
 | Analytical IK | done | Closed-form solver, multi-solution — see `settled.md` S1.4/S1.5 |
 | TCP trajectory recording | done | See `wiki/003_Guides/TCP_Trajectory.md` |
-| G-code toolpath preview | done | G0/G1-only parser, fixed `model.gcode` path, reloads on plate reposition — see `wiki/003_Guides/Gcode_Toolpath.md`, `settled.md` S1.7/S1.8 |
+| G-code print preview | done | G0/G1-only parser, fixed `model.gcode` path; rendered as a swept **bead surface mesh** (width from extrusion `E`, height from layer height), reloads on plate reposition — see `wiki/003_Guides/Gcode_Toolpath.md`, `settled.md` S1.7/S1.8/S1.10/S1.11 |
+| Toolpath execution / playback | done | Precomputed continuous IK path (chunked, pause/resume) driven by Run/Pause/Reset + speed slider; the printed shape grows as the arm traces it — see `settled.md` S1.9/S1.11, `tutorials/Stage5_README.md` §5.3 |
 | Build-plate position/orientation | done | Re-posable via Move/Reset/Save/Load Position buttons — see `wiki/003_Guides/BuildPlate_UserFrame.md`, `settled.md` S1.6 |
 
 ## Directory Structure
@@ -62,4 +63,4 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-See `wiki/002_Architecture/settled.md` (S1.1–S1.8).
+See `wiki/002_Architecture/settled.md` (S1.1–S1.11).

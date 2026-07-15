@@ -15,6 +15,7 @@ JOINT_LIMITS = [
 ]
 
 HOME_JOINT_ANGLES = [0, 0, 0, 0, 90, 0]  # docs/FR5_Joint_Limits.md "Home Position"
+TOOLPATH_PRECOMPUTE_STEPS_PER_FRAME = 5
 
 class UI_Menu:
     """
@@ -40,14 +41,13 @@ class UI_Menu:
         self.bp_target_rpy = np.zeros(3)
         self.bp_status = ""
         self.is_playing = False
-        self.playback_waypoint_index = 0
         self.playback_speed = 1.0
-        self.toolpath_ik_solutions = []   # list of angle arrays, indexed [0]/[2]/[4] by the radio button loop
-        self.selected_solution = 0
 
     def render(self):
         """This function needs to be called by Polyscope every frame"""
         self.content.record_trajectory_point()
+        if self.content.toolpath_precompute_active and not self.content.toolpath_precompute_paused:
+            self.content.step_toolpath_ik_precompute(TOOLPATH_PRECOMPUTE_STEPS_PER_FRAME)
 
         # 1. Panel title
         psim.TextUnformatted("Fairino FR5 Arm Control")
@@ -68,7 +68,17 @@ class UI_Menu:
             psim.Spacing()
 
             if psim.Button("Run"):
-                self.is_playing = True
+                if self.content.toolpath_precompute_active:
+                    self.content.toolpath_status = "Toolpath playback blocked: precompute still running"
+                    self.is_playing = False
+                elif len(self.content.toolpath_joint_path) == 0:
+                    self.content.toolpath_status = "Toolpath playback blocked: no precomputed path"
+                    self.is_playing = False
+                else:
+                    self.content.clear_trajectory()
+                    self.content.load_gcode()  # ensure the bead mesh exists to reveal
+                    self.content.set_print_reveal(self.content.toolpath_current_index)
+                    self.is_playing = True
 
             psim.SameLine()
 
@@ -79,22 +89,45 @@ class UI_Menu:
 
             if psim.Button("Reset"):
                 self.is_playing = False
-                self.playback_waypoint_index = 0
+                self.content.reset_toolpath_playback()
+                self.content.clear_trajectory()
 
             psim.SameLine()
             psim.TextUnformatted(f"Playback: {'Running' if self.is_playing else 'Paused'}")
 
             if psim.TreeNode("Toolpath Settings"):
-                _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 0.1, 5.0)
+                _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 1.0, 100)
 
                 psim.Spacing()
-                for i, sol in enumerate(self.toolpath_ik_solutions):
-                    changed, self.selected_solution = psim.RadioButton(
-                        f"Solution {i+1}/{len(self.toolpath_ik_solutions)}: J1={sol[0]:.1f} J3={sol[2]:.1f} J5={sol[4]:.1f}",
-                        self.selected_solution, i
-                    )
+                if self.content.toolpath_precompute_active:
+                    if self.content.toolpath_precompute_paused:
+                        if psim.Button("Resume Precompute"):
+                            self.content.resume_toolpath_ik_precompute()
+                    else:
+                        if psim.Button("Pause Precompute"):
+                            self.content.pause_toolpath_ik_precompute()
+
+                    psim.SameLine()
+
+                    if psim.Button("Cancel Precompute"):
+                        self.content.cancel_toolpath_ik_precompute()
+                        self.content.toolpath_status = "Toolpath IK precompute cancelled"
+                elif psim.Button("Precompute Toolpath IK"):
+                    self.is_playing = False
+                    self.content.start_toolpath_ik_precompute(JOINT_LIMITS)
+
+                psim.ProgressBar(
+                    self.content.toolpath_progress,
+                    (-1.0, 0.0),
+                    f"{self.content.toolpath_progress * 100:.0f}%"
+                )
+                psim.TextUnformatted(self.content.toolpath_status)
                 psim.TreePop()
             psim.TreePop()
+
+        if self.is_playing and not self.content.toolpath_precompute_active:
+            step_count = max(1, int(self.playback_speed))
+            self.is_playing = self.content.advance_toolpath_playback(step_count)
 
         # 4. Build plate orientation section -- see settled.md S1.6.
         if psim.TreeNode("Build Plate Orientation"):

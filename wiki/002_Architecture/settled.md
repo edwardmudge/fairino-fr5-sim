@@ -197,6 +197,10 @@ does not currently re-transform with the plate (deferred to roadmap 5.3)
 -- if live toolpath-follows-plate is added, `load_build_plate()` (or its
 callers) would need to also re-run `load_gcode()`'s transform.
 
+**Refined by:** S1.15 -- the plate pose now includes the measured
+thickness offset, while `position_mm` keeps meaning "where the plate
+rests."
+
 **Verified on:** 2026-07-09
 
 ## S1.7 G-code scope is G0/G1 motion only, enforced in software, not by constraining Cura's output
@@ -264,3 +268,284 @@ need the per-frame pipeline S1.3 originally deferred, not just another
 reload call.
 
 **Verified on:** 2026-07-09
+
+## S1.9 Toolpath execution precomputes a continuous IK path before playback
+
+**Decision:** Stage 5.3 toolpath execution uses the existing G-code parser
+but treats the parsed waypoint list differently from the preview. Playback
+execution includes both `G0` travel moves and `G1` feed moves so the arm
+can reposition continuously between printed segments; the preview remains
+`G1`-only so it shows the deposited/tool-contact pattern rather than
+incidental travel.
+
+Before playback starts, `geometry_backend.py` precomputes the whole IK
+path in GUI-visible chunks, so Polyscope can repaint a progress bar
+instead of appearing frozen during long solves. The chunked job can also
+be paused/resumed without discarding progress. Each parsed plate-local
+waypoint is transformed through the current `T_user_frame`, then solved
+as a TCP target whose rotation is fixed to `T_user_frame[:3, :3]` for the
+full run. That keeps the TCP normal to the build plate while the plate
+itself stays static during playback.
+
+Branch selection is continuity-driven and ground-filtered: each waypoint
+starts from the valid IK branches ranked closest to the previous accepted
+joint solution, then chooses the first branch whose moving physical
+geometry (Robot1-Robot6 plus nozzle, transformed with the same Delta
+pipeline used for rendering) has no vertex below `z=0`. For speed, branch
+clearance is staged: a cheap transformed bounding-box check rejects
+obviously below-ground branches before the exact full-mesh vertex check
+runs. Static Robot0, the TCP point, and TCP frame axes are not part of the
+clearance check. The first unreachable, out-of-limits, or
+all-branches-below-ground waypoint aborts the precompute and reports its
+index; no partial motion starts.
+
+Playback itself is a simple cached-joint-path stepper for now. The GUI
+decides how many cached waypoints to advance per frame; real feedrate
+timing remains a later refinement.
+
+**Reason:** This separates three concerns cleanly for the first working
+version: parsing/placement stays shared with the preview, reachability and
+basic ground clearance are known before motion begins, and playback does
+not pay the IK solve cost on every render frame. Including `G0` in
+execution avoids impossible jumps between disconnected `G1` drawing
+segments, while keeping the preview focused on the visible print path.
+
+**Non-revertible unless:** full-path precompute proves too slow or too
+memory-heavy for representative multi-layer prints, at which point the
+same continuity rule should be preserved in a chunked or streaming solver
+rather than reverting to independent per-waypoint branch choices.
+
+**Refined by:** S1.12 — the precompute hot path (ground clearance via the
+bbox lower bound; adaptive keyframe IK + joint interpolation) was made ~6×
+faster within this same macro-architecture.
+
+**Verified on:** 2026-07-09
+
+## S1.10 G-code preview draws positive extrusion, not raw G1 motion
+
+**Decision:** The G-code preview is a deposited-material visual. The parser
+still preserves every real `G0`/`G1` motion waypoint for Stage 5.3
+playback, but preview edges are drawn only when the destination `G1` move
+increases extrusion (`E`). `M82`/`M83` and `G92 E...` are tracked only so
+that positive extrusion is classified correctly; they do not broaden the
+motion scope beyond S1.7's G0/G1 line-segment parser. The bead preview is
+offset by half the detected layer height along negative build-plate normal
+and uses `GCODE_RADIUS_MM = 0.16` for a 0.28 mm nozzle visual.
+
+**Reason:** Cura can emit non-extruding `G1` moves for travel,
+retraction/unretraction, or repositioning. Drawing every `G1` therefore
+creates false material across windows/openings. Positive extrusion is the
+smallest reliable signal already present in the file for "material is
+being deposited", while preserving all motion waypoints keeps robot
+playback continuous.
+
+**Non-revertible unless:** the project starts consuming slicer metadata or
+a richer path format that explicitly labels printed, travel, bridge, and
+support spans more accurately than extrusion deltas.
+
+**Verified on:** 2026-07-09
+
+## S1.11 G-code preview is a swept rectangular bead surface mesh sized by extrusion, revealed progressively during playback
+
+**Decision:** The G-code preview renders deposited material as a **surface
+mesh** (`register_surface_mesh("G-code Print", ...)`), not a curve network.
+Each positive-extrusion `G1` segment (`is_print_move`, per S1.10) becomes a
+swept rectangular box: **width** derived per-segment from the deposited volume
+`width = (dE · π(D/2)²) / (L · layer_height)` (clamped by
+`GCODE_BEAD_MIN_WIDTH_MM`/`GCODE_BEAD_MAX_WIDTH_MM`, `D = FILAMENT_DIAMETER_MM`),
+**height** = layer height, oriented with width in the plate plane and the body
+hanging below the toolpath Z so the bead top sits at the nozzle. This
+supersedes the *rendering mechanism* of S1.3/S1.10 (curve-network edges,
+`GCODE_RADIUS_MM`, both removed); their **parsing and `T_user_frame`
+placement** decisions still stand — the mesh is still placed by one
+`T_user_frame` multiply and reloaded on plate reposition (S1.8). Detection is
+purely extrusion-based with **no `;TYPE:` filtering**, so bridge/overhang spans
+(which this Cura export emits as untagged extruding SKIN/WALL moves — it
+contains no `;BRIDGE` markers) render as solid bars, not gaps.
+
+`parse_gcode()` now stores the **per-move** extrusion `deposit = e - previous_e`
+(not cumulative `E`) at tuple index 2, because retraction/un-retract happen on
+non-motion lines that create no waypoint; a cumulative-E difference across the
+preceding travel would fold the whole retract distance into the first bead of
+each region and inflate it to the max clamp.
+
+Plate-local bead geometry is built once per file (`build_print_beads` via
+`_ensure_print_beads`, cached by file+mtime); a plate reposition only re-runs
+the world matmul (~0.08 s for the full print), not the parse/build (~1.6 s).
+During playback the shape **grows**: `set_print_reveal(waypoint_index)`
+re-registers a growing prefix of the cached mesh (`searchsorted` on the
+per-bead completion index), throttled by `GCODE_REVEAL_CHUNK` so the
+near-complete ~1.0M-vertex mesh is not re-uploaded every frame. `Run` reveals
+from the current index, `Reset` empties it, and playback advance grows it.
+
+**Reason:** The curve network was a constant-radius centerline tube with no real
+bead width or layer height, so it read as thin wires rather than a printed
+object. A swept rectangular bead is how slicers model deposited material and is
+the smallest change that makes the preview represent the real 3D printed shape,
+including bridges. Deriving width from `E` (rather than a constant) makes
+over/under-extrusion and thin bridge spans visible. Progressive reveal was the
+user's explicit request ("show the printed shape as it would be printed"); the
+prefix-reupload approach is used because Polyscope has no native
+show-first-N-faces, and the throttle is the same segment-count/render-cost lever
+`Gcode_Toolpath.md` already flags for the ~180k-segment print.
+
+**Non-revertible unless:** the reveal's per-frame re-upload proves too heavy at
+full print scale even with `GCODE_REVEAL_CHUNK` (then reveal needs a
+transparency/visibility mechanism that doesn't re-send geometry), or the project
+adopts a rounded/stadium bead cross-section or slicer-metadata-driven widths.
+
+**Refined by:** S1.15 -- first-layer bead height now uses the actual initial
+layer Z so the bead reaches the plate-local top surface.
+
+**Verified on:** 2026-07-09
+
+## S1.12 Toolpath IK precompute is keyframed and joint-interpolated; ground clearance uses the bbox lower bound
+
+**Decision:** Refines S1.9's precompute step (macro-architecture unchanged:
+whole path solved before motion, chunked, pausable, then cheap cached
+playback). Two changes to the hot path, prompted by a measured ~220 s
+full-benchy (179,070-waypoint) precompute:
+
+1. **Ground clearance is decided by the bounding-box check alone in the common
+   case.** The transformed bbox min-z is a *guaranteed lower bound* on the exact
+   full-mesh min-z (a linear map sends the mesh inside the transformed box, and
+   z is linear so its extreme is at a box corner). So `bbox_min_z >= 0` already
+   guarantees clearance — accept the branch with no exact check. The exact
+   `moving_geometry_min_z` runs only to *adjudicate* a branch whose bbox dips
+   below ground (it may still clear). The previous code had this inverted (ran
+   the exact check only after bbox already passed, where it is guaranteed to
+   pass, and rejected any branch whose bbox dipped without ever consulting the
+   exact geometry). The fix is both correct and removes ~80% of precompute cost.
+
+2. **IK is solved at adaptive keyframes and interpolated for the waypoints
+   between.** Along a print the selected IK branch is near-constant and segments
+   are ~0.65 mm (median), so per-waypoint solving is redundant for a
+   visualization. `_compute_keyframe_indices` places a keyframe every
+   `GCODE_IK_KEYFRAME_STEP_MM` (2.5) of arc length and at any vertex turning
+   more than `GCODE_IK_KEYFRAME_ANGLE_DEG` (15°), so corners and long `G0`
+   travels keep their exact pose while gentle curves and straights subsample.
+   Keyframes are solved (with the continuity + ground rule above); the dense
+   per-waypoint `toolpath_joint_path` is filled at finish by interpolating each
+   joint against cumulative arc length. Playback and reveal are unchanged —
+   they still index the dense path by waypoint.
+
+Result on the benchy: ~220 s → ~37 s (5.9×), with faithful tracking — nozzle
+TCP error at interpolated waypoints is ~0.05 mm median (worst ~1.3 mm only at
+sub-millimetre-radius fillets), and the printed bead mesh is exact because
+reveal stays per-segment.
+
+**Accepted simplifications:** intermediate (non-keyframe) waypoints are not
+individually reachability- or ground-checked, and joint-space interpolation
+traces a slightly curved Cartesian path between keyframes rather than the exact
+segment. Both are invisible at 2.5 mm spacing and appropriate for a
+visualization.
+
+**Non-revertible unless:** driving a real arm (not a sim) makes the
+between-keyframe path deviation or the un-checked intermediate poses
+unacceptable, at which point tighten `GCODE_IK_KEYFRAME_STEP_MM`/`ANGLE_DEG`
+toward per-waypoint solving rather than abandoning keyframing; or a future
+non-plate (curved, Stage 6) surface needs a varying TCP orientation, which
+changes what is being interpolated.
+
+**Verified on:** 2026-07-10
+
+## S1.13 Toolpath IK precompute is cached to disk and auto-loaded when identical
+
+**Decision:** A completed precompute (the dense per-waypoint joint path, S1.12)
+is saved to `assets/models/gcode/model.precompute.npz` — one cache beside the
+one fixed `model.gcode` (S1.7) — and reloaded instead of re-solving whenever an
+*identical* precompute is requested, both at startup (`VisContent.__init__`) and
+when the "Precompute Toolpath IK" button is pressed. The joint path is stored as
+`float32` (halves the ~8.6 MB; 0.001° resolution is ample) alongside a JSON key.
+
+A cached path is used only when its stored key equals the key rebuilt from the
+current inputs. The key is everything the path depends on: the **SHA-256 of the
+`model.gcode` bytes** (content hash, so an identical re-export still hits and a
+different object misses), the **build-plate pose** `T_user_frame` (the path is
+only valid for the pose it was solved at — moving the plate correctly misses),
+the keyframe params (`GCODE_IK_KEYFRAME_STEP_MM`/`ANGLE_DEG`) and
+`GROUND_Z_MIN_MM`, and `PRECOMPUTE_CACHE_VERSION` (bumped by hand when the
+IK/ground-check/joint-limit/robot-geometry code changes, since those are not in
+the runtime key). Save and load are best-effort: any write error, missing file,
+or corruption falls back to a normal solve.
+
+The runtime seed (`current_joint_angles`) is deliberately **excluded** from the
+key: it only nudges the waypoint-0 branch, both branches are valid
+ground-clearing paths, and playback snaps to `joint_path[0]` regardless.
+Including it would make the cache brittle (a startup at the default pose could
+never match a path solved from a HOME pose) for no correctness gain.
+
+**Reason:** The keyframed solve is ~37 s for a full multi-layer print; for an
+unchanged object that is pure repeated work. Content-hash + pose + params keying
+guarantees a loaded path is actually valid for the current scene, so the reuse
+is safe rather than a stale shortcut.
+
+**Consequences (correct by design, not bugs):** moving the plate invalidates the
+cache; startup auto-load only fires at the default plate pose, because S1.6
+forbids auto-restoring a saved position at startup — the moved-plate case is
+served by the Precompute button, which loads from cache on a hit too.
+
+**Non-revertible unless:** the fixed single-`model.gcode` convention (S1.7) is
+replaced by a file picker / multiple concurrent objects, at which point the
+single fixed cache filename should become per-object (e.g. keyed by the gcode
+hash) rather than reverting to no cache.
+
+**Verified on:** 2026-07-10
+
+## S1.14 Build-plate color is explicit and distinct from the print
+
+**Decision:** `load_build_plate()` sets the registered "Build Plate" surface
+mesh to `BUILD_PLATE_COLOR = (0.75, 0.77, 0.80)`. The deposited G-code bead
+mesh keeps `GCODE_COLOR = (1.0, 0.55, 0.0)`.
+
+**Reason:** Leaving the build plate on Polyscope's automatic color assignment
+made it depend on registration order. In the real app's current init sequence
+that produced approximately `(0.89, 0.61, 0.11)`, visually close to the orange
+print color; a captured screenshot showed the plate and print blending into the
+same gold/olive hue. An explicit cool gray keeps the bed readable against the
+warm deposited material.
+
+**Non-revertible unless:** the app grows a deliberate material/theme system
+that assigns both plate and print colors explicitly from one palette.
+
+**Verified on:** 2026-07-10
+
+## S1.15 The build plate accounts for physical thickness, and the first layer reaches its top surface
+
+**Decision:** The Bambu Lab build-plate mesh is treated as a 0.75mm-thick
+object whose local origin is on the top/print surface. `load_build_plate()`
+keeps `position_mm` as the place where the plate rests, but stores
+`T_user_frame[:3, 3] = position_mm + R @ [0, 0, BUILD_PLATE_THICKNESS_MM]`,
+so the mesh's local bottom (`Z=-0.75`) lands on the shared floor and local
+top (`Z=0`) becomes the corrected print surface. The User Frame triad uses
+that corrected `T_user_frame` origin.
+
+`build_print_beads()` also treats the first layer specially: beads whose
+toolpath top Z matches the first printed layer hang down by that first-layer
+Z, not by the general Cura layer height. Later layers still hang down by the
+general layer height, so their stacking behavior is unchanged.
+
+**Reason:** Direct `trimesh` measurement of `BambuLab_BuildPlate.obj` showed
+local bounds `Z in [-0.75, 0]`: the mesh's material extends downward from its
+local top surface. Placing local `Z=0` at world `position_mm.z` therefore sunk
+the plate body below the shared floor. The same measurement pass showed the
+first real print moves in `model.gcode` are at `Z=0.3`, while the general layer
+height header is `0.1`; using only the general height made the first bead span
+`Z=[0.2, 0.3]` in plate-local coordinates, leaving a visible gap above the
+plate-local `Z=0` surface.
+
+**Known simplification:** `GROUND_Z_MIN_MM` remains the shared-floor clearance
+check at world `Z=0`. It does not yet model arm-vs-plate-body collision against
+the plate footprint and 0.75mm thickness; that is a separate future collision
+problem.
+
+**Cache note:** This intentionally changes `T_user_frame`. Any S1.13
+precompute cache made before this decision misses automatically because the
+cache key includes the full user-frame matrix; no special invalidation code is
+needed.
+
+**Non-revertible unless:** the build-plate mesh is replaced by one whose local
+origin and measured thickness are different, or slicer metadata becomes rich
+enough to provide per-layer bead heights more directly.
+
+**Verified on:** 2026-07-10

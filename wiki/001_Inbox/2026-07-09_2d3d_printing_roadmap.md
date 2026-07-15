@@ -79,6 +79,14 @@ position/RPY fields and four click-to-apply buttons:
   `assets/buildPlate/saved_position.json`.
 - **Load Saved Position** — read it back and apply it.
 
+**Fix (2026-07-10):** The build plate now sets an explicit cool-gray
+`BUILD_PLATE_COLOR`, so it no longer collides visually with the warm-orange
+deposited-bead mesh (`settled.md` S1.14). Its measured 0.75mm thickness is
+also accounted for: `position_mm` remains the place where the plate rests,
+while `T_user_frame` is lifted along the plate's local Z axis so the plate's
+underside lands on that shared floor and the print surface sits above it
+(`settled.md` S1.15).
+
 See `settled.md` S1.6 and
 [`BuildPlate_UserFrame.md`](../003_Guides/BuildPlate_UserFrame.md) for
 the full record.
@@ -114,64 +122,123 @@ the full record.
   explicitly widened to include multi-layer; it just wasn't previously
   called out.
 
+**Fix (2026-07-10):** The first deposited layer now hangs down by the
+actual first-layer toolpath Z instead of the general Cura layer height, so
+it reaches the plate-local top surface at `Z=0`. Later layers still use the
+general layer height and remain stacked flush on the layer below
+(`settled.md` S1.15).
+
 See [`Gcode_Toolpath.md`](../003_Guides/Gcode_Toolpath.md) for the full
 record, including gaps that are genuinely still unbuilt (not decisions):
 unit switching (`G20`/`G21`) and malformed-line reporting.
 
-### 5.3 Toolpath execution — drive the arm through the print (not started)
+**Toolpath execution — drive the arm through the print.** Subsections
+5.3–5.8 below are the ordered build sequence for Stage 5.3: take the
+already-loaded, already-positioned G-code toolpath — a single flat layer
+*or* a full multi-layer print (e.g. the full benchy, ~180,000 waypoints) —
+and actually move the FR5 through it via IK, not just preview it. This is
+the step that makes this a printer instead of a viewer. Each subsection is
+one small piece you build and verify before starting the next; together
+they're the template Stage 6 (curved-surface printing) reuses. Built and
+verified in this order; full decisions on record in `settled.md`
+S1.9–S1.11.
 
-**Goal:** Take the already-loaded, already-positioned G-code toolpath —
-a single flat layer *or* a full multi-layer print (e.g. the full benchy,
-~180,000 waypoints) — and actually move the FR5 through it via IK,
-rather than only previewing it, with a **playback speed slider** running
-anywhere from real-time (paced to the G-code's `F` feedrate) up to as
-fast as the sim can solve/render. This is the step that makes this a
-printer instead of a viewer, and the thing to get working before Stage 6
-starts.
+### 5.3 Matrix IK target with a reference pose — done
 
-**Open questions to resolve when implementing** (not decided here):
+**Build:** Add `solve_ik_tcp_matrix(target_pos, rotation, joint_limits,
+reference_joint_angles)` taking the TCP orientation as a rotation matrix
+plus an explicit reference pose, and make the existing `solve_ik_tcp`
+delegate to it. This lets the toolpath solver hand IK a matrix directly
+(no matrix→RPY→matrix round-trip) and rank branches against the *previous
+waypoint's* accepted pose rather than the live arm pose.
 
-1. **Tool orientation during printing.** `parse_gcode()` only carries
-   X/Y/Z; `solve_ik_tcp` needs a full 6-DOF target (`settled.md` S1.4).
-   Natural default: hold the TCP orientation constant, normal to the
-   plate (derived from `T_user_frame`'s rotation), since the plate
-   doesn't tilt mid-print — true for a single layer and for every layer
-   of a multi-layer print alike (unlike Stage 6's curved surface, which
-   would need the orientation to actually vary).
-2. **Per-waypoint IK + continuity.** `solve_ik_tcp` already ranks
-   branches by proximity to `self.current_joint_angles` (`settled.md`
-   S1.4/S1.5) — this is exactly the "path following" trigger S1.5's
-   "Non-revertible unless" clause anticipated, and should work as-is
-   per-waypoint (each solve continues from wherever the previous one
-   left the arm). Worth adding: a whole-path reachability pre-check
-   (solve every waypoint before moving anything, report the first
-   unreachable one) reusing the same solver — no new reachability-
-   checking code.
-3. **Speed-slider animation control that doesn't exist yet.** Every
-   current `gui_panel.py` control is an immediate one-shot action;
-   this needs new Play/Pause state plus a speed slider spanning
-   real-time (derive timing from each waypoint's most recent `F` value)
-   to as-fast-as-possible (advance every waypoint each frame, no timing
-   delay), and a per-frame advance through the waypoint list driven by
-   whichever pace is selected.
-4. **Unverified at ~180,000-waypoint scale: is per-waypoint IK-solving
-   actually fast enough?** Even at the "as fast as possible" end of the
-   slider, solving IK ~180,000 times has a real cost that hasn't been
-   measured. Benchmark `solve_ik_tcp`'s per-call cost against the full
-   benchy waypoint count early during implementation, before committing
-   to the rest of the animation-control design — if it's too slow, that
-   changes the design (e.g. batching, a coarser IK-solve stride with
-   interpolation between solved points, etc.), so it needs an answer
-   first, not last.
+**Verify:** `solve_ik_tcp` returns the same solutions it did before the
+refactor — the RPY entry point is unchanged from the outside.
 
-**Files:** `geometry_backend.py` (new driver logic, reusing
-`solve_ik_tcp`), `gui_panel.py` (new Play/Pause + speed slider controls).
+### 5.4 Fix the print orientation and place waypoints in the world — done
 
-**Verify:** With a toolpath loaded (both a flat single-layer shape and
-the full benchy) and the plate positioned, starting playback moves the
-arm's TCP through the waypoints in sequence and the nozzle visibly
-traces the loaded curve; dragging the speed slider from real-time to
-as-fast-as-possible visibly changes playback pace.
+**Build:** Snapshot `T_user_frame[:3, :3]` once at the start of a run as a
+constant TCP rotation (normal to the plate — the plate doesn't tilt
+mid-print), and transform every plate-local waypoint through `T_user_frame`
+into world coordinates. Execution parses both `G0` travel and `G1` feed
+moves so the arm can reposition continuously between deposited segments —
+unlike the `G1`-only preview (`settled.md` S1.9/S1.10).
+
+**Verify:** A hand-checked waypoint solves to a pose whose TCP sits where
+the preview bead is, held flat to the plate.
+
+### 5.5 Ground-clearance branch filter — done
+
+**Build:** For each waypoint, walk the continuity-ranked IK branches and
+pick the first one whose moving geometry clears the plate. The transformed
+bounding-box min-z (`moving_geometry_bbox_min_z`) is a *guaranteed lower
+bound* on the exact full-mesh min-z, so `bbox ≥ 0` accepts the branch
+outright; the exact `moving_geometry_min_z` runs only to adjudicate a branch
+whose bbox dips below `z=0` (it may still clear). This bbox-first ordering is
+both correct and ~5× cheaper than checking every branch's exact mesh
+(`settled.md` S1.12).
+
+**Verify:** A branch that would drive the arm or nozzle through the plate
+is skipped in favour of one that clears; a waypoint where *every* branch
+crosses `z=0` is reported as a failure.
+
+### 5.6 Chunked, pausable IK precompute — done
+
+**Build:** Precompute the whole IK path *before* any motion, in small
+per-frame batches driven from `render()`, via `start_/step_/pause_/resume_/
+cancel_toolpath_ik_precompute`. A live progress bar advances instead of the
+window freezing; the first unreachable / out-of-limits / all-branches-
+below-ground waypoint aborts the job and reports its index, with no partial
+motion (`settled.md` S1.9). To keep the ~180k-waypoint solve to tens of
+seconds, IK is solved only at adaptive keyframes (every ~2.5 mm of arc, plus
+every real corner) and the dense per-waypoint joint path is interpolated at
+finish; playback then replays cached joints and never pays the solve cost per
+frame (`settled.md` S1.12).
+
+**Verify:** The full benchy precomputes in ~40 s (down from ~220 s) with the
+progress bar climbing; Pause/Resume holds and continues without losing
+progress; Cancel stops it; the arm still traces the path with no visible
+change.
+
+### 5.7 Progressive-reveal playback — done
+
+**Build:** Reuse the swept-bead preview mesh and `set_print_reveal`
+(`settled.md` S1.11). `reset_toolpath_playback` snaps to the first pose and
+empties the shape; `advance_toolpath_playback(step_count)` steps the cached
+joint path and grows the revealed beads to match progress.
+
+**Verify:** During playback the printed shape grows bead-by-bead in step
+with the nozzle; Reset empties it back to nothing.
+
+### 5.8 GUI wiring — done
+
+**Build:** Wire Run / Pause / Reset plus the precompute Pause/Resume/Cancel
+controls, a progress bar + status line, and a speed slider into
+`gui_panel.py`. The slider is a whole-steps-per-frame multiplier (1–100):
+playback advances `max(1, int(speed))` cached waypoints each frame.
+**Real-time feedrate pacing is deferred** (`settled.md` S1.9) — playback is
+a cached-joint stepper, not `F`-timed; `F` re-enters `parse_gcode` when that
+feature is actually built.
+
+**Verify:** With a flat shape and the full benchy loaded and the plate
+positioned, Precompute then Run drives the TCP through the waypoints as the
+shape reveals, and dragging Speed across 1–100 visibly changes the pace.
+
+### 5.9 Persist precompute across sessions — done
+
+**Build:** Cache the completed joint path to `model.precompute.npz` beside the
+G-code, tagged with a key = G-code **content hash** + build-plate pose +
+keyframe params + a version. At startup and when **Precompute** is pressed,
+rebuild the key from the current inputs and load the path instantly on a match
+instead of re-solving; any change to the object, plate pose, or keyframe
+settings changes the key, so a stale cache is ignored and re-solved
+(`settled.md` S1.13). Startup auto-load only fires at the default plate pose
+(S1.6 forbids auto-restoring a saved position); the moved-plate case is served
+by the button.
+
+**Verify:** Precompute once (~37 s, writes the cache); restart — the path is
+ready instantly ("loaded from cache"); move the plate and Precompute — it
+re-solves because the pose is part of the key.
 
 ---
 

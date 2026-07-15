@@ -17,6 +17,10 @@ venv/
 .polyscope.ini
 imgui.ini
 
+# Generated/local G-code assets
+assets/models/gcode/*.gcode
+assets/models/gcode/*.npz
+
 # OS cruft
 Thumbs.db
 .DS_Store

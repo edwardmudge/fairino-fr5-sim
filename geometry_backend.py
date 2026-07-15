@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import hashlib
 import polyscope as ps
 import numpy as np
 import trimesh
@@ -15,12 +16,14 @@ PRINTER_HEAD_DIR = "assets/printerHead"
 NOZZLE_FILE = "nozzle.obj"
 TCP_FILE = "TCP.txt"
 
-TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
-TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
+TRAJECTORY_SAMPLE_INTERVAL_S = 0.01  # Minimum seconds between recorded TCP trajectory points
+TRAJECTORY_RADIUS_MM = 0.28  # Trajectory curve line thickness, world units (mm)
 TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
 
 BUILD_PLATE_DIR = "assets/buildPlate"
 BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
+BUILD_PLATE_COLOR = (0.75, 0.77, 0.80)
+BUILD_PLATE_THICKNESS_MM = 0.75
 
 # Placed in the (-X, -Y) quadrant to match the arm's natural zero/home-pose
 # reach direction -- the opposite quadrant only reaches via a near-limit J1
@@ -31,8 +34,38 @@ BUILD_PLATE_POSITION_FILE = os.path.join(BUILD_PLATE_DIR, "saved_position.json")
 
 GCODE_DIR = "assets/models/gcode"
 GCODE_FILE = "model.gcode"  # Fixed name -- overwritten by each new Cura export, never hand-edited
-GCODE_RADIUS_MM = 1.5  # Toolpath curve thickness, world units (mm) -- distinct from TRAJECTORY_RADIUS_MM
 GCODE_COLOR = (1.0, 0.55, 0.0)  # Orange, so it doesn't visually merge with the Trajectory curve
+GCODE_DEFAULT_LAYER_HEIGHT_MM = 0.1
+
+# The G-code preview is a swept rectangular bead surface mesh, not a curve --
+# each positive-extrusion G1 segment becomes a box whose width comes from the
+# deposited volume (settled.md S1.11). Width = (dE * filament_area) / (L * h).
+FILAMENT_DIAMETER_MM = 1.75
+GCODE_BEAD_MIN_WIDTH_MM = 0.1   # Keep loose: bridge/overhang spans deposit thin, must not vanish
+GCODE_BEAD_MAX_WIDTH_MM = 2.0   # Guard against priming blobs / degenerate short segments
+# Progressive playback reveal re-registers a growing mesh prefix; only re-upload
+# once this many new beads have appeared, so the near-complete (~1.4M-vert) mesh
+# isn't re-sent every frame -- the segment-count/render-cost lever (S1.11).
+GCODE_REVEAL_CHUNK = 200
+
+GROUND_Z_MIN_MM = 0.0
+
+# Toolpath IK is solved only at adaptive keyframes and interpolated in joint
+# space for the ~0.65mm-median waypoints between them -- the selected IK branch
+# is near-constant along a print, so per-waypoint solving is redundant for a
+# visualization (settled.md S1.12). A keyframe is placed every STEP_MM of arc
+# length OR at any vertex that turns more than ANGLE_DEG, so corners and G0
+# travels stay crisp while straights are subsampled.
+GCODE_IK_KEYFRAME_STEP_MM = 2.5
+GCODE_IK_KEYFRAME_ANGLE_DEG = 15.0
+
+# A completed precompute is cached to disk beside the (fixed) model.gcode and
+# reloaded when an identical one is requested, rather than re-solving (~37s).
+# The cache is keyed on everything the joint path depends on -- gcode content,
+# plate pose, keyframe params -- plus a version that captures the IK/ground/
+# joint-limit/robot-geometry code (bump it when any of those change). See S1.13.
+PRECOMPUTE_CACHE_VERSION = 1
+GCODE_PRECOMPUTE_CACHE = os.path.join(GCODE_DIR, "model.precompute.npz")
 
 GCODE_MOVE_RE = re.compile(r"([A-Za-z])\s*(-?\d+\.?\d*)")
 
@@ -55,12 +88,41 @@ class VisContent:
         self._last_sample_time = time.time()
         self.trajectory_enabled = True
         self.trajectory_handle = None    # Set once a curve exists, see _update_trajectory_curve
+        self.toolpath_joint_path = []
+        self.toolpath_waypoints_world = []
+        self.toolpath_status = "Toolpath IK not computed"
+        self.toolpath_current_index = 0
+        self.toolpath_precompute_active = False
+        self.toolpath_precompute_paused = False
+        self.toolpath_progress = 0.0
+        self._toolpath_precompute_joint_limits = None
+        self._toolpath_precompute_tcp_rotation = None
+        self._toolpath_keyframe_indices = []      # waypoint indices IK is solved at (S1.12)
+        self._toolpath_keyframe_angles = []        # solved joint angles, one per keyframe
+        self._toolpath_precompute_previous_angles = None
+        self._toolpath_precompute_start_time = None
+        self._toolpath_precompute_user_frame = None  # plate pose the active job is solving for (cache key, S1.13)
+
+        # G-code bead mesh cache (see build_print_beads / load_gcode / set_print_reveal).
+        # Local geometry is built once per file; world verts are re-placed cheaply
+        # on each plate reposition. bead_end_waypoint[k] = parsed-waypoint index at
+        # which bead k finishes, so playback can reveal a growing prefix (S1.11).
+        self._print_beads_source = None      # (filepath, mtime) the cached local beads were built from
+        self._print_bead_verts_local = None  # (M*8, 3) plate-local box corners
+        self._print_bead_faces = None        # (M*12, 3) triangle indices
+        self._print_bead_end_waypoint = None # (M,) waypoint index each bead completes at
+        self._print_bead_verts_world = None  # local verts placed through T_user_frame
+        self._print_reveal_count = None      # beads currently uploaded (None = full mesh shown)
 
         # Initialise the scene
         self.create_coordinate_frame()
         self.load_build_plate()
         self.mesh_data = self.load_data()
         self.update_arm([0, 0, 0, 0, 0, 0])
+
+        # Reuse a matching precomputed toolpath from a previous session if the
+        # object + default plate pose + params are identical (S1.13). Best-effort.
+        self.load_toolpath_cache()
 
 
     def create_coordinate_frame(self, scale=1.0, origin=(0, 0, 0), rotation=None, name="Coordinate Frame"):
@@ -92,25 +154,36 @@ class VisContent:
         frame' and settled.md S1.2/S1.6. Static geometry: registered once
         per call, never updated per-frame -- unlike the arm links, the
         plate isn't driven by any joint, so it needs no Delta transform,
-        just a homogeneous transform applied here. Defaults reproduce the
-        original translation-only placement exactly. rpy_deg is [roll,
-        pitch, yaw] degrees, XYZ fixed-angle convention (R = Rz(yaw) @
-        Ry(pitch) @ Rx(roll)) -- same convention as solve_ik_tcp. Safe to
-        call repeatedly (e.g. from the GUI's Move/Reset buttons); Polyscope
-        replaces the prior structures of the same names."""
+        just a homogeneous transform applied here. position_mm marks where
+        the plate's underside rests; the print
+        surface is offset upward by the plate's own thickness. rpy_deg is
+        [roll, pitch, yaw] degrees, XYZ fixed-angle convention
+        (R = Rz(yaw) @ Ry(pitch) @ Rx(roll)) -- same convention as
+        solve_ik_tcp. Safe to call repeatedly (e.g. from the GUI's
+        Move/Reset buttons); Polyscope replaces the prior structures of
+        the same names."""
+        position_mm = np.asarray(position_mm, dtype=float)
         roll, pitch, yaw = np.deg2rad(rpy_deg)
         R = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
 
         self.T_user_frame = np.eye(4)
         self.T_user_frame[:3, :3] = R
-        self.T_user_frame[:3, 3] = position_mm
+        self.T_user_frame[:3, 3] = (
+            position_mm + R @ [0.0, 0.0, BUILD_PLATE_THICKNESS_MM]
+        )
 
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
         homo = np.hstack([plate.vertices, np.ones((len(plate.vertices), 1))])
         plate_verts_world = (self.T_user_frame @ homo.T).T[:, :3]
-        ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
+        handle = ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
+        handle.set_color(BUILD_PLATE_COLOR)
 
-        self.create_coordinate_frame(scale=USER_FRAME_SCALE_MM, origin=position_mm, rotation=R, name="User Frame")
+        self.create_coordinate_frame(
+            scale=USER_FRAME_SCALE_MM,
+            origin=self.T_user_frame[:3, 3],
+            rotation=R,
+            name="User Frame",
+        )
 
 
     def save_build_plate_position(self, position_mm, rpy_deg):
@@ -146,14 +219,20 @@ class VisContent:
 
 
     def parse_gcode(self, filepath):
-        """Parse G0/G1 linear moves. Returns a list of ([x, y, z],
-        is_feed_move) pairs, plate-local mm -- G0 travel moves update
-        position but are flagged is_feed_move=False so load_gcode() skips
-        drawing them. Modal position handling: see GLOSSARY.md 'G-code
-        toolpath'. G0/G1-only by design (see settled.md S1.7) -- any other
-        G/M-code, and any line that isn't G0/G1, is discarded in software
-        here, not assumed absent from the input file."""
+        """Parse linear motion waypoints and mark deposited-material spans.
+
+        Returns ([x, y, z], is_print_move, deposit) tuples in plate-local mm,
+        where deposit is the E extruded on *this* move (e - previous_e), not the
+        cumulative E. Using the per-move amount matters because retraction and
+        the following un-retract happen on non-motion lines that create no
+        waypoint, so a cumulative-E difference across the preceding travel move
+        would wrongly include the whole retract distance and inflate the first
+        bead of every region. All G0/G1 motion is preserved for execution
+        continuity; only G1 moves with positive extrusion are print moves.
+        """
         x, y, z = 0.0, 0.0, 0.0
+        e = 0.0
+        extrusion_absolute = True
         points = []
         with open(filepath) as f:
             for line in f:
@@ -164,58 +243,213 @@ class VisContent:
                     continue
 
                 letter0, value0 = words[0]
-                if letter0.upper() != 'G':
-                    continue
+                letter0 = letter0.upper()
                 try:
                     code = int(float(value0))
                 except ValueError:
                     continue
+
+                values = {}
+                for letter, value in words[1:]:
+                    values[letter.upper()] = float(value)
+
+                if letter0 == 'M':
+                    if code == 82:
+                        extrusion_absolute = True
+                    elif code == 83:
+                        extrusion_absolute = False
+                    continue
+
+                if letter0 != 'G':
+                    continue
+
+                if code == 92:
+                    if 'E' in values:
+                        e = values['E']
+                    continue
+
                 if code not in (0, 1):
                     continue
 
-                for letter, value in words[1:]:
-                    letter = letter.upper()
-                    if letter == 'X':
-                        x = float(value)
-                    elif letter == 'Y':
-                        y = float(value)
-                    elif letter == 'Z':
-                        z = float(value)
-                points.append(([x, y, z], code == 1))
+                if 'X' in values:
+                    x = values['X']
+                if 'Y' in values:
+                    y = values['Y']
+                if 'Z' in values:
+                    z = values['Z']
+
+                has_motion_axis = any(axis in values for axis in ('X', 'Y', 'Z'))
+                previous_e = e
+                if 'E' in values:
+                    if extrusion_absolute:
+                        e = values['E']
+                    else:
+                        e += values['E']
+
+                if not has_motion_axis:
+                    continue
+
+                is_print_move = code == 1 and e > previous_e
+                points.append(([x, y, z], is_print_move, e - previous_e))
         return points
 
 
-    def load_gcode(self):
-        """Register the G1 feed-move segments of the parsed G-code as a
-        static curve network on the plate -- G0 travel moves are parsed
-        (for position tracking) but not drawn, see parse_gcode(). Points
-        are plate-local (mm) and mapped to world with the full
-        T_user_frame matrix multiply, not a raw vector add -- see
-        settled.md S1.3. Safe to call repeatedly -- including from the
-        Build Plate Orientation panel's Move/Reset/Load Saved Position
-        buttons, to re-transform the curve against the plate's new pose
-        (settled.md S1.8) -- Polyscope replaces the prior structure of the
-        same name, same as _update_trajectory_curve. No-ops (instead of
-        raising) if the G-code file doesn't exist yet, since it's now
-        reachable before any G-code has ever been loaded."""
-        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
-        if not os.path.exists(filepath):
-            return
+    def gcode_layer_height_mm(self, filepath):
+        """Read Cura's layer-height header when present; fall back to 0.1 mm."""
+        with open(filepath) as f:
+            for line in f:
+                match = re.match(r";Layer height:\s*(-?\d+\.?\d*)", line)
+                if match:
+                    return float(match.group(1))
+                if line.lstrip().startswith(("G0", "G1")):
+                    break
+        return GCODE_DEFAULT_LAYER_HEIGHT_MM
+
+
+    def build_print_beads(self, waypoints, layer_height):
+        """Swept rectangular bead geometry for every deposited-material segment.
+
+        Returns (verts_local, faces, bead_end_waypoint) in plate-local mm, or
+        (None, None, None) if there is nothing to draw. A segment is deposited
+        material iff its destination G1 increased E (is_print_move) -- there is
+        deliberately no ;TYPE: filtering, so bridge/overhang spans across open
+        air become solid bars rather than gaps (settled.md S1.11). Bead width
+        comes from the deposited volume, height from the layer height. Fully
+        vectorised; each bead is an 8-vertex / 12-triangle box.
+        """
+        pts = np.array([p for p, _, _ in waypoints], dtype=float)
+        is_print = np.array([w[1] for w in waypoints], dtype=bool)
+        deposit = np.array([w[2] for w in waypoints], dtype=float)  # E extruded on each move (per-move, not cumulative)
+
+        end_idx = np.nonzero(is_print[1:])[0] + 1  # destination waypoint of each print segment
+        if len(end_idx) == 0:
+            return None, None, None
+
+        a = pts[end_idx - 1]
+        b = pts[end_idx]
+        vec = b - a
+        length = np.linalg.norm(vec, axis=1)
+
+        keep = length > 1e-9  # drop zero-length print moves (e.g. an unretract with no XYZ change)
+        end_idx, a, b, vec, length = end_idx[keep], a[keep], b[keep], vec[keep], length[keep]
+        if len(end_idx) == 0:
+            return None, None, None
+
+        # width * height ~= deposited cross-section = (filament_area * dE) / segment_length
+        filament_area = np.pi * (FILAMENT_DIAMETER_MM / 2.0) ** 2
+        width = np.clip((deposit[end_idx] * filament_area) / (length * layer_height),
+                        GCODE_BEAD_MIN_WIDTH_MM, GCODE_BEAD_MAX_WIDTH_MM)
+
+        tangent = vec / length[:, None]
+        up = np.array([0.0, 0.0, 1.0])              # plate-local build normal
+        side = np.cross(tangent, up)
+        side_norm = np.linalg.norm(side, axis=1)
+        vertical = side_norm < 1e-6                 # near-vertical segment: pick an arbitrary in-plane side
+        side[vertical] = np.array([1.0, 0.0, 0.0])
+        side_norm[vertical] = 1.0
+        side = side / side_norm[:, None]
+
+        w_off = (width / 2.0)[:, None] * side        # half bead width, in the plate plane
+        top_z = a[:, 2]
+        first_layer_z = top_z.min()
+        # Cura's initial layer can be thicker than the general layer height; hang
+        # the first layer down to local Z=0 so it reaches the plate surface (S1.15).
+        bead_height = np.where(np.isclose(top_z, first_layer_z), first_layer_z, layer_height)
+        down = np.column_stack([np.zeros(len(bead_height)),
+                                np.zeros(len(bead_height)),
+                                -bead_height])
+
+        a_tl, a_tr = a + w_off, a - w_off
+        b_tl, b_tr = b + w_off, b - w_off
+        verts = np.stack([
+            a_tl, a_tr, a_tr + down, a_tl + down,    # 0..3  start face (tl, tr, br, bl)
+            b_tl, b_tr, b_tr + down, b_tl + down,    # 4..7  end face
+        ], axis=1).reshape(-1, 3)
+
+        face_template = np.array([
+            [0, 3, 7], [0, 7, 4],   # left
+            [1, 2, 6], [1, 6, 5],   # right
+            [0, 1, 5], [0, 5, 4],   # top
+            [3, 2, 6], [3, 6, 7],   # bottom
+            [0, 1, 2], [0, 2, 3],   # start cap
+            [4, 5, 6], [4, 6, 7],   # end cap
+        ])
+        faces = (face_template[None] + (np.arange(len(end_idx)) * 8)[:, None, None]).reshape(-1, 3)
+        return verts, faces, end_idx
+
+
+    def _ensure_print_beads(self, filepath):
+        """Build and cache plate-local bead geometry for filepath unless it is
+        already cached for this file+mtime. Keeps a plate reposition cheap: the
+        heavy parse/build runs once per file, and only the T_user_frame placement
+        re-runs afterwards. Returns True if beads are available."""
+        source = (filepath, os.path.getmtime(filepath))
+        if self._print_beads_source == source and self._print_bead_verts_local is not None:
+            return True
 
         waypoints = self.parse_gcode(filepath)
         if len(waypoints) < 2:
+            return False
+        verts, faces, ends = self.build_print_beads(waypoints, self.gcode_layer_height_mm(filepath))
+        if verts is None:
+            return False
+
+        self._print_bead_verts_local = verts
+        self._print_bead_faces = faces
+        self._print_bead_end_waypoint = ends
+        self._print_beads_source = source
+        return True
+
+
+    def load_gcode(self):
+        """Register deposited material as a swept rectangular bead surface mesh.
+
+        Positive-extrusion G1 segments become solid beads sized by deposited
+        volume (width) and layer height, so the preview reads as the real
+        printed object -- bridge/overhang spans included (settled.md S1.11).
+        Plate-local geometry is built once per file (_ensure_print_beads) and
+        placed into world with the full T_user_frame multiply, same placement as
+        before (S1.3/S1.8). Shows the whole print; playback trims it via
+        set_print_reveal. Safe to call repeatedly; no-ops if the file is absent.
+        """
+        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
+        if not os.path.exists(filepath):
+            return
+        if not self._ensure_print_beads(filepath):
             return
 
-        points_local = np.array([p for p, _ in waypoints])
-        homo = np.hstack([points_local, np.ones((len(points_local), 1))])
-        nodes = (self.T_user_frame @ homo.T).T[:, :3]
+        homo = np.hstack([self._print_bead_verts_local,
+                          np.ones((len(self._print_bead_verts_local), 1))])
+        self._print_bead_verts_world = (self.T_user_frame @ homo.T).T[:, :3]
+        self._print_reveal_count = None  # full mesh currently shown
 
-        edges = np.array([[i, i + 1] for i in range(len(nodes) - 1) if waypoints[i + 1][1]])
-        if len(edges) == 0:
+        handle = ps.register_surface_mesh("G-code Print", self._print_bead_verts_world,
+                                          self._print_bead_faces)
+        handle.set_color(GCODE_COLOR)
+
+
+    def set_print_reveal(self, waypoint_index):
+        """Show only the beads deposited up to waypoint_index, for the playback
+        build-up. Re-registers a growing prefix of the cached bead mesh, throttled
+        by GCODE_REVEAL_CHUNK so the near-complete (~1.4M-vert) mesh is not
+        re-uploaded every frame (settled.md S1.11). The empty and fully-complete
+        endpoints are always honored exactly. No-op if no bead mesh is loaded."""
+        if self._print_bead_verts_world is None or self._print_bead_end_waypoint is None:
             return
 
-        handle = ps.register_curve_network("G-code Toolpath", nodes, edges)
-        handle.set_radius(GCODE_RADIUS_MM, relative=False)
+        n = int(np.searchsorted(self._print_bead_end_waypoint, waypoint_index, side='right'))
+        total = len(self._print_bead_end_waypoint)
+        if (self._print_reveal_count is not None and n not in (0, total)
+                and abs(n - self._print_reveal_count) < GCODE_REVEAL_CHUNK):
+            return
+        self._print_reveal_count = n
+
+        if n == 0:
+            ps.remove_surface_mesh("G-code Print", error_if_absent=False)
+            return
+        handle = ps.register_surface_mesh("G-code Print",
+                                          self._print_bead_verts_world[:n * 8],
+                                          self._print_bead_faces[:n * 12])
         handle.set_color(GCODE_COLOR)
 
 
@@ -340,8 +574,15 @@ class VisContent:
         roll, pitch, yaw = np.deg2rad(target_rpy_deg)
         R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
 
+        return self.solve_ik_tcp_matrix(target_pos_mm, R_target, joint_limits)
+
+
+    def solve_ik_tcp_matrix(self, target_pos_mm, target_rotation, joint_limits, reference_joint_angles=None):
+        """TCP IK entry point for callers that already have a rotation
+        matrix. Used by toolpath precompute so plate-normal orientation
+        does not need a matrix->RPY->matrix round trip."""
         T_target_tcp = np.eye(4)
-        T_target_tcp[:3, :3] = R_target
+        T_target_tcp[:3, :3] = np.asarray(target_rotation, dtype=float)
         T_target_tcp[:3, 3] = target_pos_mm
         T_target_flange = T_target_tcp @ np.linalg.inv(self.T_flange_to_tcp)
 
@@ -368,13 +609,336 @@ class VisContent:
         if not valid:
             return [], f"Reachable but outside joint limits ({len(branches)} branch(es), none valid)"
 
+        reference = self.current_joint_angles if reference_joint_angles is None else reference_joint_angles
+
         def wrapped_dist(angles):
-            diff = (angles - self.current_joint_angles + 180) % 360 - 180
+            diff = (angles - reference + 180) % 360 - 180
             return np.sum(np.abs(diff))
 
         valid.sort(key=lambda item: wrapped_dist(item[0]))
         status = f"Solved ({len(valid)} valid solution{'s' if len(valid) != 1 else ''})"
         return valid, status
+
+
+    def moving_geometry_min_z(self, joint_angles_deg):
+        """Minimum Z of Robot1-Robot6 plus nozzle after the Delta transform."""
+        T_current = self.compute_fk(joint_angles_deg)
+        min_z = np.inf
+        for verts, src in zip(self.ground_check_verts, self.ground_check_sources):
+            Delta = T_current[src] @ self.T_zero_inv[src]
+            z = verts @ Delta[2, :3] + Delta[2, 3]
+            min_z = min(min_z, float(np.min(z)))
+            if min_z < GROUND_Z_MIN_MM:
+                return min_z
+        return min_z
+
+
+    def moving_geometry_bbox_min_z(self, joint_angles_deg):
+        """Cheap conservative minimum Z of moving geometry bounding boxes."""
+        T_current = self.compute_fk(joint_angles_deg)
+        min_z = np.inf
+        for corners, src in zip(self.ground_check_bbox_corners, self.ground_check_sources):
+            Delta = T_current[src] @ self.T_zero_inv[src]
+            z = corners @ Delta[2, :3] + Delta[2, 3]
+            min_z = min(min_z, float(np.min(z)))
+            if min_z < GROUND_Z_MIN_MM:
+                return min_z
+        return min_z
+
+
+    def _reset_toolpath_precompute(self, progress):
+        """Clear the precomputed path and stop the job. Caller sets its own status."""
+        self.toolpath_joint_path = []
+        self.toolpath_current_index = 0
+        self.toolpath_progress = progress
+        self.toolpath_precompute_active = False
+        self.toolpath_precompute_paused = False
+
+    def _compute_keyframe_indices(self, world):
+        """Waypoint indices to solve IK at: adaptive by arc-length + heading.
+
+        A keyframe is placed every GCODE_IK_KEYFRAME_STEP_MM of arc length, and
+        at any interior vertex that turns more than GCODE_IK_KEYFRAME_ANGLE_DEG
+        so corners and long G0 travels keep their exact pose; the ~0.65mm-median
+        waypoints between keyframes are joint-interpolated at finish (S1.12).
+        """
+        n = len(world)
+        if n <= 2:
+            return np.arange(n, dtype=int)
+        seg = np.diff(world, axis=0)
+        d = np.linalg.norm(seg, axis=1)
+        unit = seg / np.where(d[:, None] > 1e-9, d[:, None], 1.0)
+        cos = np.clip(np.sum(unit[:-1] * unit[1:], axis=1), -1.0, 1.0)  # turn at vertex j+1
+        corner = np.degrees(np.arccos(cos)) > GCODE_IK_KEYFRAME_ANGLE_DEG
+        keys = [0]
+        accum = 0.0
+        for i in range(1, n - 1):
+            accum += d[i - 1]
+            if accum >= GCODE_IK_KEYFRAME_STEP_MM or corner[i - 1]:
+                keys.append(i)
+                accum = 0.0
+        keys.append(n - 1)
+        return np.array(keys, dtype=int)
+
+    def _finish_toolpath_precompute(self):
+        """Interpolate the solved keyframes into a dense per-waypoint path and stop.
+
+        Playback and reveal index toolpath_joint_path by waypoint, so the sparse
+        keyframe solves are expanded here to one pose per waypoint (S1.12). Each
+        joint is interpolated against cumulative arc length so motion tracks
+        distance travelled; a degenerate (non-increasing) arc coordinate falls
+        back to waypoint index.
+        """
+        world = self.toolpath_waypoints_world
+        n = len(world)
+        kf = self._toolpath_keyframe_indices
+        q = np.array(self._toolpath_keyframe_angles)  # (K, 6)
+        elapsed_s = time.time() - self._toolpath_precompute_start_time
+
+        s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(world, axis=0), axis=1))])
+        x, xp = (s, s[kf]) if np.all(np.diff(s[kf]) > 0) else (np.arange(n), kf.astype(float))
+        dense = np.empty((n, 6))
+        for j in range(6):
+            dense[:, j] = np.interp(x, xp, q[:, j])
+
+        self.toolpath_joint_path = dense
+        self.toolpath_current_index = 0
+        self.toolpath_progress = 1.0
+        self.toolpath_precompute_active = False
+        self.toolpath_precompute_paused = False
+        self.toolpath_status = f"Toolpath IK ready: {n} waypoints via {len(kf)} keyframes ({elapsed_s:.1f}s)"
+        self.save_toolpath_cache()
+
+    def _toolpath_cache_meta(self, user_frame):
+        """The cache key: everything the solved joint path depends on (S1.13).
+
+        gcode is hashed by content (not mtime) so an identical re-export still
+        hits; the plate pose is included because the path is only valid for the
+        pose it was solved at; keyframe params and a version tag cover the rest.
+        """
+        with open(os.path.join(GCODE_DIR, GCODE_FILE), "rb") as f:
+            gcode_sha256 = hashlib.sha256(f.read()).hexdigest()
+        return {
+            "version": PRECOMPUTE_CACHE_VERSION,
+            "gcode_sha256": gcode_sha256,
+            "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
+            "step_mm": GCODE_IK_KEYFRAME_STEP_MM,
+            "angle_deg": GCODE_IK_KEYFRAME_ANGLE_DEG,
+            "ground_z": GROUND_Z_MIN_MM,
+        }
+
+    def save_toolpath_cache(self):
+        """Write the completed joint path + its key to disk (S1.13). Best-effort:
+        a cache write must never break an otherwise-good precompute."""
+        try:
+            meta = self._toolpath_cache_meta(self._toolpath_precompute_user_frame)
+            np.savez(GCODE_PRECOMPUTE_CACHE,
+                     joint_path=self.toolpath_joint_path.astype(np.float32),
+                     meta=np.array(json.dumps(meta)))
+        except Exception:
+            pass
+
+    def load_toolpath_cache(self):
+        """Load a cached joint path iff its key matches the current inputs (S1.13).
+
+        Returns True on a hit (state left ready for playback), False on any miss,
+        missing file, or corruption -- the caller then solves normally.
+        """
+        if not (os.path.exists(GCODE_PRECOMPUTE_CACHE) and
+                os.path.exists(os.path.join(GCODE_DIR, GCODE_FILE))):
+            return False
+        try:
+            cached = np.load(GCODE_PRECOMPUTE_CACHE, allow_pickle=False)
+            if json.loads(cached["meta"].item()) != self._toolpath_cache_meta(self.T_user_frame):
+                return False
+            self.toolpath_joint_path = cached["joint_path"].astype(float)
+        except Exception:
+            return False
+        self.toolpath_current_index = 0
+        self.toolpath_progress = 1.0
+        self.toolpath_precompute_active = False
+        self.toolpath_precompute_paused = False
+        self.toolpath_status = f"Toolpath IK loaded from cache: {len(self.toolpath_joint_path)} waypoints"
+        return True
+
+    def start_toolpath_ik_precompute(self, joint_limits):
+        """Initialize a chunked toolpath IK precompute job."""
+        self.cancel_toolpath_ik_precompute()
+        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
+        if not os.path.exists(filepath):
+            self.toolpath_status = f"Toolpath IK failed: {filepath} not found"
+            self.toolpath_waypoints_world = []
+            self._reset_toolpath_precompute(0.0)
+            return False
+
+        if self.load_toolpath_cache():
+            return True
+
+        waypoints = self.parse_gcode(filepath)
+        if not waypoints:
+            self.toolpath_status = "Toolpath IK failed: no G0/G1 waypoints found"
+            self.toolpath_waypoints_world = []
+            self._reset_toolpath_precompute(0.0)
+            return False
+
+        points_local = np.array([p for p, _, _ in waypoints])
+        homo = np.hstack([points_local, np.ones((len(points_local), 1))])
+        self.toolpath_waypoints_world = (self.T_user_frame @ homo.T).T[:, :3]
+        self.toolpath_joint_path = []
+        self.toolpath_current_index = 0
+        self.toolpath_progress = 0.0
+        self.toolpath_precompute_active = True
+        self.toolpath_precompute_paused = False
+        self._toolpath_precompute_joint_limits = joint_limits
+        self._toolpath_precompute_tcp_rotation = self.T_user_frame[:3, :3].copy()
+        self._toolpath_precompute_user_frame = self.T_user_frame.copy()
+        self._toolpath_keyframe_indices = self._compute_keyframe_indices(self.toolpath_waypoints_world)
+        self._toolpath_keyframe_angles = []
+        self._toolpath_precompute_previous_angles = np.asarray(self.current_joint_angles, dtype=float)
+        self._toolpath_precompute_start_time = time.time()
+        self.toolpath_status = f"Toolpath IK precomputing: 0/{len(self._toolpath_keyframe_indices)} keyframes"
+        return True
+
+
+    def step_toolpath_ik_precompute(self, max_steps=10):
+        """Solve a small batch of keyframes for an active precompute job."""
+        if not self.toolpath_precompute_active:
+            return False
+
+        total = len(self._toolpath_keyframe_indices)
+        n_waypoints = len(self.toolpath_waypoints_world)
+        if self.toolpath_precompute_paused:
+            self.toolpath_status = f"Toolpath IK paused: {len(self._toolpath_keyframe_angles)}/{total} keyframes"
+            return True
+
+        steps = max(1, int(max_steps))
+
+        for _ in range(steps):
+            k = len(self._toolpath_keyframe_angles)
+            if k >= total:
+                self._finish_toolpath_precompute()
+                return False
+
+            wp = int(self._toolpath_keyframe_indices[k])
+            solutions, status = self.solve_ik_tcp_matrix(
+                self.toolpath_waypoints_world[wp],
+                self._toolpath_precompute_tcp_rotation,
+                self._toolpath_precompute_joint_limits,
+                self._toolpath_precompute_previous_angles)
+            if not solutions:
+                self.toolpath_status = f"Toolpath IK failed at waypoint {wp + 1}/{n_waypoints}: {status}"
+                self._reset_toolpath_precompute(wp / n_waypoints)
+                return False
+
+            # bbox min-z is a lower bound on the exact mesh min-z, so bbox >= 0
+            # is already a guarantee of ground clearance; only fall back to the
+            # expensive exact check to adjudicate a branch whose bbox dips below
+            # (it may still clear). See settled.md S1.12.
+            selected_angles = None
+            lowest_min_z = np.inf
+            for angles, _, _ in solutions:
+                if self.moving_geometry_bbox_min_z(angles) >= GROUND_Z_MIN_MM:
+                    selected_angles = angles
+                    break
+                exact_min_z = self.moving_geometry_min_z(angles)
+                lowest_min_z = min(lowest_min_z, exact_min_z)
+                if exact_min_z >= GROUND_Z_MIN_MM:
+                    selected_angles = angles
+                    break
+
+            if selected_angles is None:
+                self.toolpath_status = (
+                    f"Toolpath IK failed at waypoint {wp + 1}/{n_waypoints}: "
+                    f"all branches cross z={GROUND_Z_MIN_MM:g} (lowest min z {lowest_min_z:.1f} mm)"
+                )
+                self._reset_toolpath_precompute(wp / n_waypoints)
+                return False
+
+            self._toolpath_precompute_previous_angles = selected_angles
+            self._toolpath_keyframe_angles.append(selected_angles.copy())
+            self.toolpath_progress = (k + 1) / total
+
+        done = len(self._toolpath_keyframe_angles)
+        if done >= total:
+            self._finish_toolpath_precompute()
+            return False
+
+        self.toolpath_status = f"Toolpath IK precomputing: {done}/{total} keyframes"
+        return True
+
+
+    def cancel_toolpath_ik_precompute(self):
+        """Stop an active precompute job without clearing the last ready path."""
+        self.toolpath_precompute_active = False
+        self.toolpath_precompute_paused = False
+        self._toolpath_precompute_joint_limits = None
+        self._toolpath_precompute_tcp_rotation = None
+        self._toolpath_keyframe_indices = []
+        self._toolpath_keyframe_angles = []
+        self._toolpath_precompute_previous_angles = None
+        self._toolpath_precompute_start_time = None
+        self._toolpath_precompute_user_frame = None
+
+
+    def pause_toolpath_ik_precompute(self):
+        """Pause an active precompute job without discarding progress."""
+        if not self.toolpath_precompute_active:
+            return False
+        self.toolpath_precompute_paused = True
+        done = len(self._toolpath_keyframe_angles)
+        total = len(self._toolpath_keyframe_indices)
+        self.toolpath_status = f"Toolpath IK paused: {done}/{total} keyframes"
+        return True
+
+
+    def resume_toolpath_ik_precompute(self):
+        """Resume a paused precompute job."""
+        if not self.toolpath_precompute_active:
+            return False
+        self.toolpath_precompute_paused = False
+        done = len(self._toolpath_keyframe_angles)
+        total = len(self._toolpath_keyframe_indices)
+        self.toolpath_status = f"Toolpath IK precomputing: {done}/{total} keyframes"
+        return True
+
+
+    def reset_toolpath_playback(self):
+        """Return playback to the first precomputed waypoint."""
+        self.toolpath_current_index = 0
+        if len(self.toolpath_joint_path) == 0:
+            self.toolpath_status = "Toolpath playback reset: no precomputed path"
+            return False
+
+        self.update_arm(self.toolpath_joint_path[0])
+        self.set_print_reveal(0)  # empty the printed shape; it rebuilds as playback advances (S1.11)
+        self.toolpath_status = f"Toolpath playback reset: 1/{len(self.toolpath_joint_path)}"
+        return True
+
+
+    def advance_toolpath_playback(self, step_count=1):
+        """Apply cached toolpath joint poses in order."""
+        if len(self.toolpath_joint_path) == 0:
+            self.toolpath_status = "Toolpath playback failed: no precomputed path"
+            return False
+
+        if self.toolpath_current_index >= len(self.toolpath_joint_path):
+            self.toolpath_status = f"Toolpath playback complete: {len(self.toolpath_joint_path)} waypoints"
+            return False
+
+        steps = max(1, int(step_count))
+        next_index = min(self.toolpath_current_index + steps, len(self.toolpath_joint_path))
+        self.update_arm(self.toolpath_joint_path[next_index - 1])
+        self.toolpath_current_index = next_index
+        self.set_print_reveal(next_index)  # grow the printed shape to match progress (S1.11)
+
+        if self.toolpath_current_index >= len(self.toolpath_joint_path):
+            self.toolpath_status = f"Toolpath playback complete: {len(self.toolpath_joint_path)} waypoints"
+            return False
+
+        self.toolpath_status = (
+            f"Toolpath playback: {self.toolpath_current_index}/{len(self.toolpath_joint_path)}"
+        )
+        return True
 
 
     def load_mesh(self, filepath):
@@ -400,6 +964,7 @@ class VisContent:
         # Compute zero-pose transforms
         zero_joints = [0, 0, 0, 0, 0, 0]
         self.T_zero = self.compute_fk(zero_joints)
+        self.T_zero_inv = [np.linalg.inv(T) for T in self.T_zero]
 
         # Store the rest-pose vertices for each list
         self.rest_verts = [m.vertices.copy() for m in meshes[1:]]  # List of Nx3 arrays, one per link (Robot1..Robot6)
@@ -419,6 +984,23 @@ class VisContent:
         nozzle_handle = ps.register_surface_mesh("Nozzle", nozzle.vertices, nozzle.faces)
         self.mesh_handles.append(nozzle_handle)
         self.update_fns.append(nozzle_handle.update_vertex_positions)
+
+        self.ground_check_verts = self.rest_verts[:7]
+        self.ground_check_sources = [0, 1, 2, 3, 4, 5, 5]
+        self.ground_check_bbox_corners = []
+        for verts in self.ground_check_verts:
+            lo = np.min(verts, axis=0)
+            hi = np.max(verts, axis=0)
+            self.ground_check_bbox_corners.append(np.array([
+                [lo[0], lo[1], lo[2]],
+                [lo[0], lo[1], hi[2]],
+                [lo[0], hi[1], lo[2]],
+                [lo[0], hi[1], hi[2]],
+                [hi[0], lo[1], lo[2]],
+                [hi[0], lo[1], hi[2]],
+                [hi[0], hi[1], lo[2]],
+                [hi[0], hi[1], hi[2]],
+            ]))
 
         self.tcp_local = np.loadtxt(os.path.join(PRINTER_HEAD_DIR, TCP_FILE))  # Zero-pose world frame [x, y, z]
 

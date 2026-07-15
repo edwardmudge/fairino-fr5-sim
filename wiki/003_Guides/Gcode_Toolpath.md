@@ -6,25 +6,41 @@ status: active
 
 ## What it is
 
-A static preview curve of a parsed G-code file's path, drawn on the build
-plate. Clicking "Load G-code preview" (I/O Operations panel) parses
-`assets/models/gcode/model.gcode` — the fixed name/location every Cura
-export is saved to — maps its points into world space via the plate's
-`T_user_frame`, and registers an orange curve network showing only the
-`G1` (feed) segments — `G0` (travel) moves are tracked for position but
-not drawn, so the curve shows the printed/cut path, not incidental
-repositioning. The Build Plate Orientation panel's Move/Reset/Load Saved
-Position buttons each reload this curve too, so it stays in sync
-whenever the plate's pose changes (`settled.md` S1.8).
+A preview of the deposited G-code material as a **solid 3D shape**, drawn
+on the build plate — the printed object as it would come off a 3D printer,
+not just its centerline path. Clicking "Load G-code preview" (I/O
+Operations panel) parses `assets/models/gcode/model.gcode`, the fixed
+name/location every Cura export is saved to, builds a **swept rectangular
+bead** for every positive-extrusion `G1` segment, maps them into world
+space via the plate's `T_user_frame`, and registers them as one orange
+`register_surface_mesh("G-code Print", ...)` (`settled.md` S1.11).
 
-A translucent rendering mode (`GCODE_TRANSPARENCY`) was tried, as
-groundwork for an eventual layer-by-layer build-up preview, but was
-**reverted** — a real multi-layer print's toolpath is on the order of
-~180,000 `G0`/`G1` segments, and rendering that many overlapping
-translucent segments caused a constant (not just click-triggered) frame
-rate regression. The curve is opaque again; revisit translucency only
-alongside a plan for the segment-count/rendering-cost problem itself
-(e.g. decimation or a cheaper render path), not on its own.
+Each bead is a box whose **width** comes from the per-move extrusion volume
+and whose **height** is the layer height, so walls and layers read as solid
+material (over/under-extrusion shows as bead-width variation). `G0` travel
+moves, retractions, unretractions, and non-extruding `G1` moves are tracked
+for position but never become beads, so the mesh shows deposited material
+rather than incidental motion. Detection is purely extrusion-based (no
+`;TYPE:` filtering), so **bridge/overhang spans** — which this Cura export
+emits as untagged extruding SKIN/WALL moves; it contains no `;BRIDGE`
+markers — render as solid bars across the gap rather than disappearing.
+
+The Build Plate Orientation panel's Move/Reset/Load Saved Position buttons
+each reload the mesh too, so it stays in sync whenever the plate's pose
+changes (`settled.md` S1.8). The heavy parse/build runs once per file and
+is cached; a plate reposition only re-runs the world matmul.
+
+During toolpath playback the shape **grows** as the nozzle traces the path
+(`set_print_reveal`, below), so you watch the object build up layer by
+layer.
+
+A translucent rendering mode (`GCODE_TRANSPARENCY`) was tried on the old
+curve preview, as groundwork for build-up, but was reverted: a real
+multi-layer print is ~180,000 segments, and translucency over that many
+overlapping structures caused a constant frame-rate regression. The opaque
+bead mesh avoids that (no translucency), and the playback build-up is what
+that experiment was reaching for — see the reveal throttle
+(`GCODE_REVEAL_CHUNK`) for how re-upload cost is bounded.
 
 ## How it's computed
 
@@ -34,80 +50,90 @@ alongside a plan for the segment-count/rendering-cost problem itself
 1. `parse_gcode(filepath)` reads the file line by line, strips comments
    (`;...` to end of line, and inline `(...)`), and tokenizes each line
    with `GCODE_MOVE_RE` (`([A-Za-z])\s*(-?\d+\.?\d*)`). Only `G0`/`G1`
-   lines are kept; any other G/M code, or a line with no G-word, is
-   skipped.
-2. Position is **modal**: an axis word (X/Y/Z) missing from a line keeps
-   its last known value, matching standard G-code semantics — only the
-   very first line defaults missing axes to 0. This applies whether the
-   line is `G0` or `G1`.
-3. Each recognized line appends `([x, y, z], is_feed_move)` to the
-   returned list, where `is_feed_move` is `True` only for `G1`.
-4. `load_gcode()` converts the parsed points (plate-local mm) to world
-   coordinates with a single homogeneous multiply,
-   `T_user_frame @ [x, y, z, 1]^T` — not the per-frame Delta pipeline,
-   since the toolpath is static workpiece geometry with no joints (see
-   `settled.md` S1.3, same reasoning as the plate mesh itself, S1.2).
-5. Edges are built only between consecutive points where the destination
-   point's move was `G1` — so a `G0` travel move still contributes a node
-   (it's the anchor the next `G1` edge starts from) but is never itself
-   drawn as a line. This is why the fixture's opening `G0 X20 Y20 Z0`
-   produces no visible line from the plate origin to the square's start
-   corner.
-6. The curve is registered via `ps.register_curve_network(...)`,
-   following the exact pattern used for the TCP trajectory
-   (`TCP_Trajectory.md`) — same-name re-registration replaces the prior
-   curve, no explicit clear needed.
-7. `load_gcode()` is called not just from the "Load G-code preview" button but
-   also from the Build Plate Orientation panel's Move/Reset/Load Saved
-   Position buttons (`gui_panel.py`), so repositioning the plate
-   re-transforms the curve against the new `T_user_frame` instead of
-   leaving it stale (`settled.md` S1.8). It no-ops if the G-code file
-   doesn't exist yet, since those buttons are reachable before any G-code
-   has ever been loaded.
+   motion lines become waypoints; unsupported motion modes are skipped.
+2. Position is modal: an axis word (X/Y/Z) missing from a line keeps its
+   last known value. This applies whether the line is `G0` or `G1`.
+3. Extrusion (`E`) and feedrate (`F`) are modal too. `M82`/`M83` switch
+   absolute/relative extrusion tracking, and `G92 E...` resets the current
+   extrusion value without creating a TCP waypoint.
+4. Each recognized motion line appends
+   `([x, y, z], is_print_move, deposit)` to the returned list.
+   `is_print_move` is `True` only for `G1` moves where extrusion increases.
+   `deposit` is the **per-move** extrusion `e - previous_e`, **not** the
+   cumulative `E` — retraction/un-retract happen on non-motion lines that
+   create no waypoint, so a cumulative difference across the preceding
+   travel would fold the whole retract distance into the first bead of each
+   region and blow it out to the max-width clamp.
+5. `build_print_beads(waypoints, layer_height)` turns every print segment
+   into a swept rectangular box (vectorised, ~0.25 s for the full print):
+   - **width** `= clip((deposit · π(D/2)²) / (L · layer_height), min, max)`,
+     `D = FILAMENT_DIAMETER_MM`, `L` = segment length. This is the deposited
+     cross-section area divided by layer height.
+   - **height** = layer height (Cura's `;Layer height:` header when present,
+     else 0.1 mm), except the first layer hangs down by its actual first
+     toolpath Z so it reaches the plate-local top surface at `Z=0`. Cura's
+     initial layer is often thicker than the general layer height.
+   - The box is oriented in the **plate-local** frame: width along the
+     in-plane perpendicular to the segment, body hanging from the toolpath
+     Z down by one layer height, so the bead top sits at the nozzle and the
+     material is just below it. Near-vertical segments fall back to an
+     arbitrary in-plane side axis.
+   - Returns `(verts_local, faces, bead_end_waypoint)`; `bead_end_waypoint`
+     records the waypoint index each bead completes at, for playback reveal.
+6. `_ensure_print_beads()` caches those local arrays by file+mtime, so the
+   parse/build runs once per file.
+7. `load_gcode()` places the cached local verts into world with a single
+   homogeneous multiply, `T_user_frame @ [x,y,z,1]^T` (not the per-frame
+   Delta pipeline), and registers them via
+   `ps.register_surface_mesh("G-code Print", ...)`. Same-name
+   re-registration replaces the prior mesh. Because only the matmul re-runs
+   on a plate move (not the parse/build), repositioning stays responsive.
+8. **Progressive reveal:** `set_print_reveal(waypoint_index)` shows only the
+   beads deposited up to that playback index by re-registering a growing
+   **prefix** (`verts[:n*8]`, `faces[:n*12]`) of the cached world mesh —
+   `n = searchsorted(bead_end_waypoint, waypoint_index)`. It is throttled by
+   `GCODE_REVEAL_CHUNK` (only re-upload once that many new beads appear) so
+   the near-complete ~1.0M-vertex mesh isn't re-sent every frame; the empty
+   and fully-complete endpoints are always honored exactly. `Run` reveals
+   from the current index (starts empty), `Reset` empties it, and
+   `advance_toolpath_playback` grows it.
+9. `load_gcode()` is called from "Load G-code preview", from `Run`, and from
+   the Build Plate Orientation panel's Move/Reset/Load Saved Position
+   buttons, so repositioning the plate re-transforms the mesh against the
+   new `T_user_frame`. It no-ops if the G-code file doesn't exist yet.
 
 ## Current scope and limitations
 
-This is a G0/G1-only line-segment parser, not a general G-code
-interpreter — **by decision**, not just an unbuilt gap: see `settled.md`
-S1.7. It's the project's accepted general-purpose G-code loader, used for
-real Cura exports (the original `square_test.gcode` fixture still exists
-at `assets/models/gcode/square_test.gcode` but isn't the default anymore
-— see the dynamic file loading bullet below); a third-party tokenizer
-(`AndyEveritt/GcodeParser`) was evaluated and
-rejected (generic tokenizer only, no modal-position/G91/arc handling —
-wouldn't have removed any of the actual parsing work). Known
-gaps/non-goals, and where each would need to hook in if ever revisited:
+This is still a G0/G1-only line-segment parser, not a general G-code
+interpreter, by settled decision S1.7. It is the project's accepted
+general-purpose G-code loader for Cura exports.
 
-- **No arc support (`G2`/`G3`) or relative positioning (`G91`) — out of
-  scope by decision (settled.md S1.7), not pending work.** The
-  supervisor ruled G0/G1-only sufficient; rather than rely on Cura never
-  emitting these, `parse_gcode()`'s existing `if code not in (0, 1):
-  continue` filter discards them in software if they ever appear (so a
-  file that happens to contain an arc doesn't crash the loader — it just
-  silently loses that segment). If ever revisited: arcs would need
-  interpolation into a short line-segment chain, and `G91` would need
-  `x, y, z` accumulated as deltas instead of overwritten, both in
-  `parse_gcode()`.
-- **No unit switching (`G20`/`G21`)** — all coordinates are assumed to
-  already be millimeters (matches Cura's default output).
-- **No visual distinction between separate `G1` runs** — if a file had
-  multiple travel-separated print regions, they'd currently all render as
-  one uniform-colored curve. Could color-code by feed rate (`F`) or by
-  Z-height/layer.
-- **No dynamic file loading** — the path is the hardcoded `GCODE_DIR`/
+- No arc support (`G2`/`G3`) or relative XYZ positioning (`G91`). If ever
+  revisited, arcs would need interpolation and `G91` would need XYZ delta
+  accumulation.
+- No unit switching (`G20`/`G21`). All coordinates are assumed to already
+  be millimeters, matching Cura's default output.
+- No visual distinction between separate printed runs. Multiple
+  travel-separated print regions render as one uniform-colored mesh.
+  Future color-coding could use feed rate (`F`), Z-height/layer, or the
+  `;TYPE:` marker.
+- Bridges/overhangs render **as solid material but are not classified**.
+  Cura exports inspected so far carry no `;BRIDGE` markers, so deposited
+  material is inferred from extrusion state: every positive-extrusion span
+  becomes a bead (so a bridge across a hole shows as a solid bar);
+  non-extruding moves across gaps do not. Bridge beads are genuinely thinner
+  (low `E` over a long span) — the `GCODE_BEAD_MIN_WIDTH_MM` clamp is kept
+  loose so they stay visible. Distinct bridge *highlighting* would still need
+  a geometry/support heuristic or `;BRIDGE` markers.
+- Rectangular (flat-topped) bead cross-section only — no rounded/stadium
+  profile, and beads are independent boxes (not welded at segment joints),
+  so tight corners can show small overlaps/gaps. Fine at print scale.
+- Bead width assumes `FILAMENT_DIAMETER_MM` (1.75 mm) and 100% flow; a
+  different filament diameter or flow-comp would scale every width.
+- No dynamic file loading. The path is the hardcoded `GCODE_DIR`/
   `GCODE_FILE` constants (`assets/models/gcode/model.gcode`), matching
-  every other asset loader in this project (no file dialog anywhere in
-  the codebase). `GCODE_FILE` is a **fixed** name, not hand-edited per
-  session — Cura is configured to always export to `model.gcode`, so a
-  fresh export just overwrites the previous one at the same path. A real
-  file picker would replace the constant with a path held in
-  `gui_panel.py`'s view state.
-- **No live streaming through the arm (yet)** — this only previews the
-  path. This parser's waypoint list is the planned input to Stage 5.3
-  (`tutorials/Stage5_README.md`), which will drive
-  the arm through it via `solve_ik_tcp` — not started yet, but no longer
-  just a vague future idea.
-- **No malformed-line reporting** — unparseable or unsupported lines are
+  every other asset loader in this project.
+- No malformed-line reporting. Unparseable or unsupported lines are
   silently skipped, not logged or surfaced as an error.
 
 ## How to tune it
@@ -116,24 +142,27 @@ Module-level constants in `geometry_backend.py`:
 
 | Constant | Effect |
 |---|---|
-| `GCODE_DIR` / `GCODE_FILE` | Path to the loaded G-code file — `assets/models/gcode/model.gcode`, a fixed name Cura always exports to. |
-| `GCODE_RADIUS_MM` | Toolpath curve thickness, world units (mm) — kept distinct from `TRAJECTORY_RADIUS_MM` so the two curves don't visually merge. |
-| `GCODE_COLOR` | RGB color of the toolpath curve. |
+| `GCODE_DIR` / `GCODE_FILE` | Path to the loaded G-code file: `assets/models/gcode/model.gcode`, a fixed name Cura always exports to. |
+| `FILAMENT_DIAMETER_MM` | Filament diameter (1.75 mm) used to convert extrusion `E` into deposited volume, hence bead width. |
+| `GCODE_BEAD_MIN_WIDTH_MM` / `GCODE_BEAD_MAX_WIDTH_MM` | Clamp on derived bead width. `MIN` is kept loose so thin bridge beads stay visible; `MAX` guards against priming blobs / degenerate short segments. |
+| `GCODE_DEFAULT_LAYER_HEIGHT_MM` | Fallback bead height/offset if the Cura header lacks `;Layer height:`. |
+| `GCODE_REVEAL_CHUNK` | Playback reveal throttle: minimum new beads before the growing prefix mesh is re-uploaded. Raise it if playback stutters on the full print. |
+| `GCODE_COLOR` | RGB color of the deposited-bead mesh. |
 
 ## Code anchors
 
-- `geometry_backend.py`: `parse_gcode()`, `load_gcode()`, `GCODE_DIR`,
-  `GCODE_FILE`, `GCODE_RADIUS_MM`, `GCODE_COLOR`, `GCODE_MOVE_RE`.
-- `gui_panel.py`: "Load G-code preview" button ("I/O Operations" section); Move/
-  Reset/Load Saved Position buttons ("Build Plate Orientation" section)
-  also call `load_gcode()`.
-- `assets/models/gcode/square_test.gcode` — the original verification
-  fixture; not loaded by default (that's now `model.gcode`), but usable
-  by temporarily swapping `GCODE_FILE`.
-- `wiki/002_Architecture/settled.md` S1.3 — why this bypasses the Delta
-  pipeline and draws only `G1` segments; S1.7 — why the parser stays
-  G0/G1-only and custom (not a third-party tokenizer); S1.8 — why the
-  curve reloads on plate reposition via a button-triggered call, not a
-  per-frame pipeline.
-- `wiki/005_AgentMgmt/active/ctx_main/GLOSSARY.md` §3 — "G-code toolpath"
-  term.
+- `geometry_backend.py`: `parse_gcode()`, `build_print_beads()`,
+  `_ensure_print_beads()`, `load_gcode()`, `set_print_reveal()`,
+  `gcode_layer_height_mm()`; hooks in `reset_toolpath_playback()` /
+  `advance_toolpath_playback()`. Constants `GCODE_DIR`, `GCODE_FILE`,
+  `FILAMENT_DIAMETER_MM`, `GCODE_BEAD_MIN_WIDTH_MM`,
+  `GCODE_BEAD_MAX_WIDTH_MM`, `GCODE_DEFAULT_LAYER_HEIGHT_MM`,
+  `GCODE_REVEAL_CHUNK`, `GCODE_COLOR`, `GCODE_MOVE_RE`.
+- `gui_panel.py`: "Load G-code preview" and `Run` buttons ("I/O
+  Operations" section); Move/Reset/Load Saved Position buttons ("Build
+  Plate Orientation" section) also call `load_gcode()`.
+- `assets/models/gcode/square_test.gcode`: the original verification
+  fixture; not loaded by default.
+- `wiki/002_Architecture/settled.md` S1.3, S1.7, S1.8, S1.10, and S1.11.
+- `wiki/005_AgentMgmt/active/ctx_main/GLOSSARY.md` section 3:
+  "G-code toolpath" and "Deposited-bead mesh" terms.
