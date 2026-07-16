@@ -21,15 +21,28 @@ Orientation panel's Move/Reset/Load Saved Position buttons each reload
 this mesh too, so it stays in sync whenever the plate's pose changes
 (`settled.md` S1.8).
 
-An earlier translucent rendering mode (`GCODE_TRANSPARENCY`) was tried on
-the old curve-network preview, as groundwork for an eventual
-layer-by-layer build-up preview, but was **reverted** — a real
-multi-layer print's toolpath is on the order of ~180,000 `G0`/`G1`
-segments, and rendering that many overlapping translucent segments caused
-a constant (not just click-triggered) frame rate regression. The mesh is
-opaque; revisit translucency only alongside a plan for the
-segment-count/rendering-cost problem itself (e.g. decimation or a cheaper
-render path), not on its own.
+A translucent rendering mode was tried twice, both times as groundwork
+for an eventual layer-by-layer build-up preview, and reverted both times
+— **for two different reasons**, see `settled.md` S1.10 for the measured
+detail:
+
+1. On the old curve-network preview: rendering ~180,000 overlapping
+   translucent segments caused a constant (not just click-triggered)
+   frame-rate regression.
+2. On this bead mesh, re-attempted on the hypothesis that the mesh
+   representation itself wouldn't have the old regression — measured
+   directly (not assumed): `ps.set_transparency_mode("simple")` indeed
+   has no measurable frame-cost even at this scale (confirming the old
+   regression was specific to `"pretty"` mode's multi-pass blending), but
+   `set_transparency_mode()` turned out to be a **scene-global** renderer
+   switch — it made every other fully-opaque structure (the arm, the
+   plate) render translucent too, not just this mesh. That's an
+   unacceptable side effect for a default-on feature, independent of the
+   good frame-time number.
+
+The mesh stays opaque; the transparency code was removed after
+measuring, since it's blocked on a Polyscope API limitation (no
+per-structure transparency-mode opt-in found), not on rendering cost.
 
 ## How it's computed
 
@@ -176,6 +189,8 @@ Module-level constants in `geometry_backend.py`:
   G0/G1-only and custom (not a third-party tokenizer); S1.8 — why the
   mesh reloads on plate reposition via a button-triggered call, not a
   per-frame pipeline; S1.9 — the swept bead mesh itself, geometric
-  layer-height derivation, and the assumed filament diameter.
+  layer-height derivation, and the assumed filament diameter; S1.10 — the
+  transparency re-attempt, its measured numbers, and the scene-global
+  Polyscope limitation blocking it.
 - `wiki/005_AgentMgmt/active/ctx_main/GLOSSARY.md` §3 — "G-code toolpath"
   term.

@@ -317,3 +317,50 @@ cost of the bead mesh itself becomes a problem at larger scale (in which
 case decimation or LOD, not reverting to a wireframe, would be the fix).
 
 **Verified on:** 2026-07-16
+
+## S1.10 G-code print mesh transparency removed -- measured, not assumed, and blocked by a Polyscope limitation, not a performance one alone
+
+**Decision:** The transparency re-attempt (`GCODE_TRANSPARENT`,
+`GCODE_TRANSPARENCY_ALPHA`, and the `ps.set_transparency_mode(...)` +
+`handle.set_transparency(...)` call in `load_gcode()`) was removed from
+`geometry_backend.py` entirely after measuring it, rather than left in as
+a default-off toggle -- see Reason.
+
+**Reason:** This was a re-attempt at the translucency groundwork
+mentioned in S1.9/`Gcode_Toolpath.md`, on the hypothesis that the old
+frame-rate regression was specific to the old curve-network
+representation and might not recur on the new bead mesh. Measured
+directly on the real ~127,000-bead benchy (`screenshot_to_buffer()`
+timing, since `frame_tick()` alone doesn't force an actual render in this
+harness):
+
+| Mode | Mean frame time | ~fps |
+|---|---|---|
+| Opaque (current default) | ~28ms | ~35 |
+| `set_transparency_mode("pretty")` | ~69ms | ~14 |
+| `set_transparency_mode("simple")` | ~28ms | ~35 |
+
+Two findings, not one:
+1. **The old regression is confirmed to be specific to `"pretty"` mode**
+   (multi-pass order-independent transparency) — `"simple"` mode
+   (single-pass blend) shows no measurable cost even at this segment
+   count, on either representation.
+2. **`ps.set_transparency_mode()` is a scene-global renderer switch, not
+   a per-structure opt-in.** Confirmed directly: with zero transparent
+   objects in the scene (every structure left at its default
+   `transparency=1.0`), merely calling `set_transparency_mode("simple")`
+   made every opaque structure (the arm links, the plate) render
+   translucently in the output image. So there is currently no way to
+   make only the G-code print mesh translucent without also ghosting the
+   entire rest of the scene — an unacceptable default regardless of the
+   good frame-time number.
+
+**Non-revertible unless:** a Polyscope version or API is found that scopes
+transparency mode to specific structures rather than the whole scene, or
+the project decides whole-scene translucency (e.g. for a deliberate
+"see-through" debug view, toggled on demand rather than default-on) is
+actually desirable — at which point re-add the toggle using
+`set_transparency_mode("simple")`, not `"pretty"` (measured ~2.5x slower
+at this segment count, see the table above).
+
+**Verified on:** 2026-07-16

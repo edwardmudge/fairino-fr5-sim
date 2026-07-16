@@ -202,9 +202,8 @@ class VisContent:
         return points
 
 
-    # Local-index template for one bead box's 12 triangles (6 faces x 2 tris),
-    # corners 0-3 = bottom rectangle (CCW from above), 4-7 = top rectangle
-    # directly above 0-3. Reused for every segment via a vertex-index offset.
+    # One bead box's 12 triangles: corners 0-3 = bottom, 4-7 = top above them.
+    # Reused per segment via a vertex-index offset, see load_gcode().
     _BEAD_BOX_FACE_TEMPLATE = np.array([
         [0, 1, 2], [0, 2, 3],       # bottom
         [4, 6, 5], [4, 7, 6],       # top (reversed winding vs. bottom)
@@ -215,40 +214,16 @@ class VisContent:
     ])
 
     def load_gcode(self):
-        """Register the deposited G1 material as a swept bead surface mesh
-        on the plate -- a solid box per feed segment, not a thin wire, so
-        the preview reads as the printed object itself (bridges/overhangs
-        included). G0 travel moves are parsed (for position tracking) but
-        produce no bead, see parse_gcode(). Safe to call repeatedly --
-        including from the Build Plate Orientation panel's Move/Reset/Load
-        Saved Position buttons, to re-transform the mesh against the
-        plate's new pose (settled.md S1.8) -- Polyscope replaces the prior
-        structure of the same name. No-ops if the G-code file doesn't
-        exist yet.
-
-        Bead height comes from each drawn segment's enclosing layer band,
-        derived from the actual sequence of *printed* Z values -- not a
-        parsed slicer layer-height comment, which doesn't reliably describe
-        the first layer, and not a raw scan of every waypoint's Z either,
-        since real Cura output includes non-extruding Z excursions (e.g.
-        this project's own model.gcode lifts to Z=15 in its startup
-        sequence before the first real layer at Z=0.3) that would corrupt a
-        naive "previous distinct Z" tracker. Only segments that actually
-        deposit material (see settled.md S1.9) advance the running layer
-        floor, starting at 0 (plate-local) for the very first one -- so
-        first-layer beads automatically reach down to the plate's top
-        surface once the existing PLATE_THICKNESS_MM shift is applied
-        below, with no special-casing.
-
-        Bead width comes from the extruded filament volume (E delta x
-        FILAMENT_DIAMETER_MM cross-section) divided by (segment length x
-        bead height) -- the standard slicer-viewer formula. Segments with
-        no net extrusion (travel/retraction), ~zero length, ~zero height,
-        or a degenerate (near-vertical) direction produce no bead.
-
-        Mesh construction is fully vectorised (no per-segment Python loop)
-        since a real multi-layer print is on the order of ~180,000
-        segments (see Gcode_Toolpath.md)."""
+        """Register the deposited G1 material as a swept bead mesh on the
+        plate -- solid boxes, not a curve, so it reads as the printed
+        object (settled.md S1.9). Bead height tracks the actual printed Z
+        per layer rather than slicer metadata, since real files include
+        non-extruding Z excursions (e.g. a startup clearance lift) that
+        would corrupt a naive Z-change tracker. Bead width comes from
+        extruded E assuming FILAMENT_DIAMETER_MM. Vectorised across all
+        segments (no per-segment loop) for the ~180,000-segment scale of a
+        real print. No-ops if the G-code file is missing; safe to call
+        repeatedly, e.g. on plate reposition (settled.md S1.8)."""
         filepath = os.path.join(GCODE_DIR, GCODE_FILE)
         if not os.path.exists(filepath):
             return
@@ -267,17 +242,8 @@ class VisContent:
         delta_e = es[1:] - es[:-1]
         z_dest = p1[:, 2]
 
-        # Per-segment layer floor (plate-local Z), derived from the actual
-        # printed Z sequence -- not a parsed slicer layer-height comment,
-        # which doesn't reliably describe the first layer (see settled.md
-        # S1.9). Only segments that actually deposit material advance the
-        # running floor, so a non-extruding preamble move (e.g. Cura's
-        # startup Z-clearance lift, seen at Z=15 in the real model.gcode
-        # before the first real layer at Z=0.3) or a travel Z-hop can't
-        # corrupt it -- both are non-extruding and simply skipped. This
-        # starts at 0 (the plate's own top surface once PLATE_THICKNESS_MM
-        # is applied below), so first-layer beads automatically reach the
-        # plate surface -- item 5's ask, with no special-casing.
+        # Only extruding segments advance the layer floor (settled.md S1.9) --
+        # skips non-extruding Z excursions like a startup clearance lift.
         seg_is_print = is_feed[1:] & (delta_e > 1e-9)
         bead_bottom = np.empty(len(z_dest))
         prev_print_z = None
