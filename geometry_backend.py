@@ -83,6 +83,20 @@ class VisContent:
         self.precompute_joint_path = []
         self.precompute_status = ""
 
+        # Progressive-reveal playback state -- roadmap Stage5_README.md 5.7,
+        # settled.md S1.16. Mirrors the precompute state above: playback_running
+        # is is_playing's backend equivalent, playback_index persists across
+        # pause, only reset_toolpath_playback() zeroes it.
+        self.playback_running = False
+        self.playback_index = 0
+        self.playback_total = 0
+        self.playback_status = ""
+        self.gcode_bead_verts_full = None       # (K*8,3) world space, real bead positions
+        self.gcode_bead_faces = None
+        self.gcode_bead_reveal_index = None     # (K,) sorted ascending, see _build_gcode_beads
+        self.gcode_bead_verts_current = None    # (K*8,3) working copy, mutated as beads reveal
+        self.gcode_print_handle = None          # Polyscope handle, reused across advance() calls
+
         # Initialise the scene
         self.create_coordinate_frame()
         self.load_build_plate()
@@ -232,28 +246,33 @@ class VisContent:
         [3, 0, 4], [3, 4, 7],       # side 3-0
     ])
 
-    def load_gcode(self):
-        """Register the deposited G1 material as a swept bead mesh on the
-        plate -- solid boxes, not a curve, so it reads as the printed
-        object (settled.md S1.9). Bead height tracks the actual printed Z
-        per layer rather than slicer metadata, since real files include
-        non-extruding Z excursions (e.g. a startup clearance lift) that
-        would corrupt a naive Z-change tracker. Bead width comes from
-        extruded E assuming FILAMENT_DIAMETER_MM. Vectorised across all
-        segments (no per-segment loop) for the ~180,000-segment scale of a
-        real print. No-ops if the G-code file is missing; safe to call
-        repeatedly, e.g. on plate reposition (settled.md S1.8)."""
-        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
-        if not os.path.exists(filepath):
-            return
+    def _build_gcode_beads(self, gcode_points):
+        """Compute the swept bead-mesh geometry for a parsed G-code point
+        list -- the shared math behind both the always-visible static
+        preview (load_gcode()) and the progressive-reveal playback mesh
+        (reset_/advance_toolpath_playback(), roadmap Stage5_README.md 5.7).
+        Bead height tracks the actual printed Z per layer rather than
+        slicer metadata, since real files include non-extruding Z
+        excursions (e.g. a startup clearance lift) that would corrupt a
+        naive Z-change tracker. Bead width comes from extruded E assuming
+        FILAMENT_DIAMETER_MM. Vectorised across all segments (no
+        per-segment loop) for the ~180,000-segment scale of a real print
+        (settled.md S1.9).
 
-        waypoints = self.parse_gcode(filepath)
-        if len(waypoints) < 2:
-            return
-
-        pts = np.array([p for p, _, _ in waypoints])
-        es = np.array([e for _, e, _ in waypoints])
-        is_feed = np.array([f for _, _, f in waypoints])
+        Returns (verts_world, faces, reveal_waypoint_index):
+          verts_world: (K*8, 3) float, world-space bead-box corners,
+            bead-major (8 contiguous rows per bead) -- matches
+            _BEAD_BOX_FACE_TEMPLATE's indexing.
+          faces: (K*12, 3) int, triangle indices into verts_world.
+          reveal_waypoint_index: (K,) int, strictly increasing -- the
+            0-based index into gcode_points at which bead k's segment ends
+            (segment i connects point i -> point i+1, so it's revealed
+            once playback reaches point i+1). All three arrays are empty
+            (K == 0) if there are no printed beads.
+        """
+        pts = np.array([p for p, _, _ in gcode_points])
+        es = np.array([e for _, e, _ in gcode_points])
+        is_feed = np.array([f for _, _, f in gcode_points])
 
         p0, p1 = pts[:-1], pts[1:]
         seg_vec = p1 - p0
@@ -293,7 +312,12 @@ class VisContent:
 
         valid = seg_is_print & (seg_len > 1e-6) & (w_norm > 1e-6) & (bead_height > 1e-9)
         if not np.any(valid):
-            return
+            return np.empty((0, 3)), np.empty((0, 3), dtype=int), np.empty(0, dtype=int)
+
+        # Capture segment indices before the `valid` filter overwrites p0/p1 --
+        # segment i connects gcode_points[i] -> gcode_points[i+1], revealed once
+        # playback reaches point i+1.
+        reveal_waypoint_index = np.nonzero(valid)[0] + 1
 
         p0, p1 = p0[valid], p1[valid]
         w_axis = w_axis[valid]
@@ -320,6 +344,27 @@ class VisContent:
 
         homo = np.hstack([verts_local, np.ones((len(verts_local), 1))])
         verts_world = (self.T_user_frame @ homo.T).T[:, :3]
+
+        return verts_world, faces, reveal_waypoint_index
+
+
+    def load_gcode(self):
+        """Register the deposited G1 material as a swept bead mesh on the
+        plate -- solid boxes, not a curve, so it reads as the printed
+        object (settled.md S1.9). No-ops if the G-code file is missing;
+        safe to call repeatedly, e.g. on plate reposition (settled.md
+        S1.8). Geometry itself comes from _build_gcode_beads()."""
+        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
+        if not os.path.exists(filepath):
+            return
+
+        waypoints = self.parse_gcode(filepath)
+        if len(waypoints) < 2:
+            return
+
+        verts_world, faces, _reveal_waypoint_index = self._build_gcode_beads(waypoints)
+        if len(verts_world) == 0:
+            return
 
         handle = ps.register_surface_mesh("G-code Print", verts_world, faces)
         handle.set_color(GCODE_COLOR)
@@ -689,6 +734,108 @@ class VisContent:
             self.precompute_status = f"Solved {self.precompute_total} waypoint(s)"
         else:
             self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
+
+
+    def _init_toolpath_playback(self):
+        """Shared setup for reset_toolpath_playback() and the first
+        run_toolpath_playback() call this session -- roadmap
+        Stage5_README.md 5.7. Requires a completed precompute
+        (self.precompute_joint_path); re-parses the fixed G-code path and
+        rebuilds bead geometry via _build_gcode_beads() (not reused from
+        load_gcode(), which doesn't return reveal_waypoint_index). Collapses
+        every bead to its own first corner (zero-area, so nothing renders --
+        no transparency involved, settled.md S1.16) and registers/replaces
+        the "G-code Print" mesh with that collapsed state. Snaps the arm to
+        the first waypoint's solved pose. Returns True on success, False
+        (with playback_status explaining why) otherwise."""
+        if not self.precompute_joint_path:
+            self.playback_status = "Run Precompute first"
+            return False
+
+        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
+        if not os.path.exists(filepath):
+            self.playback_status = "No G-code file found"
+            return False
+
+        gcode_points = self.parse_gcode(filepath)
+        verts_world, faces, reveal_index = self._build_gcode_beads(gcode_points)
+        if len(verts_world) == 0:
+            self.playback_status = "No printed beads to reveal"
+            return False
+
+        self.gcode_bead_verts_full = verts_world
+        self.gcode_bead_faces = faces
+        self.gcode_bead_reveal_index = reveal_index
+
+        # Collapse every bead to its own first corner -- a zero-area box
+        # renders nothing, revealed later by restoring real positions
+        # (advance_toolpath_playback), never via transparency (settled.md S1.16).
+        self.gcode_bead_verts_current = np.repeat(verts_world[0::8], 8, axis=0)
+
+        self.gcode_print_handle = ps.register_surface_mesh(
+            "G-code Print", self.gcode_bead_verts_current, self.gcode_bead_faces)
+        self.gcode_print_handle.set_color(GCODE_COLOR)
+
+        self.playback_index = 0
+        self.playback_total = len(self.precompute_joint_path)
+        self.update_arm(self.precompute_joint_path[0])
+        return True
+
+
+    def reset_toolpath_playback(self):
+        """Mirrors the GUI's playback Reset button: snaps to the first pose
+        and empties the shape (roadmap Stage5_README.md 5.7) -- always a
+        full re-init, discarding any in-progress reveal."""
+        self.playback_running = False
+        ok = self._init_toolpath_playback()
+        if ok:
+            self.playback_status = "Ready to play"
+
+
+    def run_toolpath_playback(self):
+        """Mirrors the GUI's playback Run button: start or resume. If
+        playback was never initialized this session (or was reset),
+        initializes fresh; otherwise resumes from wherever playback_index
+        already is (a paused run continues, not restarts)."""
+        if self.gcode_bead_verts_full is None:
+            if not self._init_toolpath_playback():
+                return
+        self.playback_running = True
+
+
+    def pause_toolpath_playback(self):
+        """Mirrors the GUI's playback Pause button: stop advancing without
+        discarding progress. A following run_toolpath_playback() call
+        continues from playback_index."""
+        self.playback_running = False
+
+
+    def advance_toolpath_playback(self, step_count):
+        """Advance playback by up to step_count waypoints -- call every
+        frame from render() (roadmap Stage5_README.md 5.7). No-ops unless
+        playback_running. Moves the arm to the new waypoint's cached pose
+        and reveals beads via a sorted cutoff over gcode_bead_reveal_index
+        (strictly increasing by construction, settled.md S1.16) rather than
+        a per-bead scan or mask."""
+        if not self.playback_running:
+            return
+
+        new_index = min(self.playback_index + step_count, self.playback_total - 1)
+        self.update_arm(self.precompute_joint_path[new_index])
+
+        old_revealed = np.searchsorted(self.gcode_bead_reveal_index, self.playback_index, side='right')
+        new_revealed = np.searchsorted(self.gcode_bead_reveal_index, new_index, side='right')
+        if new_revealed > old_revealed:
+            self.gcode_bead_verts_current[old_revealed * 8:new_revealed * 8] = \
+                self.gcode_bead_verts_full[old_revealed * 8:new_revealed * 8]
+            self.gcode_print_handle.update_vertex_positions(self.gcode_bead_verts_current)
+
+        self.playback_index = new_index
+        if self.playback_index >= self.playback_total - 1:
+            self.playback_running = False
+            self.playback_status = "Playback complete"
+        else:
+            self.playback_status = f"Playing {self.playback_index}/{self.playback_total - 1}"
 
 
     def load_mesh(self, filepath):

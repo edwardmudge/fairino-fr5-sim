@@ -613,3 +613,82 @@ over already-settled backend state (S1.14), reversible by editing
 `gui_panel.py` alone.
 
 **Verified on:** 2026-07-16
+
+## S1.16 Progressive-reveal playback grows the opaque bead mesh via a sorted-cutoff vertex collapse, not transparency; Run/Pause/Reset GUI wiring pulled forward from 5.8
+
+**Decision:** Four new `geometry_backend.py` functions implement roadmap
+`Stage5_README.md` 5.7:
+
+1. `_build_gcode_beads(gcode_points)` -- the bead-construction math
+   extracted unchanged from `load_gcode()` into a shared instance method,
+   with one addition: it now also returns `reveal_waypoint_index`, a
+   `(K,)` array giving the 0-based `gcode_points` index each bead's
+   segment ends at (`np.nonzero(valid)[0] + 1`, captured before the
+   `valid` filter overwrites `p0`/`p1`). Strictly increasing by
+   construction, since `valid` is a boolean mask over segments already in
+   original line order. `load_gcode()` is now a thin wrapper: parse, call
+   `_build_gcode_beads()`, register + color exactly as before -- verified
+   unchanged (same bead count, same real benchy load) after the refactor.
+2. `_init_toolpath_playback()` (private) -- requires a completed
+   `precompute_joint_path` (`"Run Precompute first"` otherwise); re-parses
+   the G-code and calls `_build_gcode_beads()` fresh (not reused from
+   `load_gcode()`, which never returns `reveal_waypoint_index`); collapses
+   every bead to its own first corner via
+   `np.repeat(verts_world[0::8], 8, axis=0)` -- a zero-area box renders
+   nothing, so beads start invisible without any transparency machinery;
+   registers/replaces the same `"G-code Print"` structure `load_gcode()`
+   uses (playback repurposes it rather than drawing a second overlapping
+   mesh); snaps the arm to the first waypoint's pose.
+3. `reset_toolpath_playback()`/`run_toolpath_playback()`/
+   `pause_toolpath_playback()` mirror the existing playback Reset/Run/Pause
+   button semantics exactly the way S1.14 established for precompute:
+   Reset always re-initializes fully; Run initializes only if nothing's
+   loaded yet, otherwise resumes from `playback_index`; Pause only clears
+   the running flag.
+4. `advance_toolpath_playback(step_count)` -- a no-op unless
+   `playback_running`; moves the arm to
+   `precompute_joint_path[new_index]`, then reveals newly-passed beads via
+   a **sorted cutoff**, not a per-bead mask or scan:
+   `np.searchsorted(gcode_bead_reveal_index, playback_index, side='right')`
+   gives "how many beads are revealed so far" in one call, since
+   `reveal_waypoint_index` is monotonic; only the newly-revealed slice
+   `[old_revealed*8 : new_revealed*8]` is copied from the cached real
+   positions into the working array before a single
+   `update_vertex_positions` call.
+
+GUI wiring landed in this stage rather than waiting for roadmap 5.8: the
+existing (previously-dead) `gui_panel.py` Run/Pause/Reset buttons now call
+`run_/pause_/reset_toolpath_playback()` directly (replacing the
+UI-local-only `self.is_playing`/`self.playback_waypoint_index`, which were
+set but never meaningfully read -- retired entirely, matching S1.14's
+precedent of backend-owned state over UI-local shadows); the status line
+reads `self.content.playback_status` instead of a hand-built
+Running/Paused string. The existing Speed slider's range changed from a
+placeholder `0.1-5.0` to roadmap 5.8's actual spec, a `1-100`
+whole-steps-per-frame multiplier: `render()` calls
+`advance_toolpath_playback(max(1, int(self.playback_speed)))`
+unconditionally every frame, the same placement pattern as
+`step_toolpath_ik_precompute()`.
+
+**Reason:** The user initially asked for a transparency-based reveal
+("as noted in the docs"), but neither `Stage5_README.md` 5.7 (which
+literally says "grows the revealed beads") nor any other doc actually
+specifies that -- confronted with S1.10's own measurement that
+`ps.set_transparency_mode()` is scene-global (would ghost the arm and
+plate too, not just the print, for as long as playback runs), the user
+confirmed growing the opaque mesh instead. The vertex-collapse technique
+was chosen over an alternative (re-registering a growing sub-mesh each
+step) because Polyscope surface meshes already support cheap
+same-topology `update_vertex_positions` calls (the exact mechanism
+`apply_delta_transform` uses for the arm every frame) -- no new API
+surface, and no per-step re-registration cost at up to ~180,000-bead
+scale. The GUI-wiring-now decision mirrors the same call already made for
+5.6 (S1.14): the user wants each stage testable in the real app
+immediately rather than deferred to a later wiring-only stage.
+
+**Non-revertible unless:** a future need arises to reveal beads out of
+G-code line order (e.g. a re-sequenced/optimized print path), at which
+point the sorted-cutoff technique (which assumes `reveal_waypoint_index`
+is monotonic) would need to become a scattered-mask approach instead.
+
+**Verified on:** 2026-07-16

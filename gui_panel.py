@@ -39,9 +39,7 @@ class UI_Menu:
         self.bp_target_pos = np.array(USER_FRAME_ORIGIN_MM, dtype=float)
         self.bp_target_rpy = np.zeros(3)
         self.bp_status = ""
-        self.is_playing = False
-        self.playback_waypoint_index = 0
-        self.playback_speed = 1.0
+        self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100 (roadmap Stage5_README.md 5.7)
         self.toolpath_ik_solutions = []   # list of angle arrays, indexed [0]/[2]/[4] by the radio button loop
         self.selected_solution = 0
 
@@ -49,6 +47,7 @@ class UI_Menu:
         """This function needs to be called by Polyscope every frame"""
         self.content.record_trajectory_point()
         self.content.step_toolpath_ik_precompute()
+        self.content.advance_toolpath_playback(max(1, int(self.playback_speed)))
 
         # 1. Panel title
         psim.TextUnformatted("Fairino FR5 Arm Control")
@@ -69,24 +68,23 @@ class UI_Menu:
             psim.Spacing()
 
             if psim.Button("Run"):
-                self.is_playing = True
+                self.content.run_toolpath_playback()
 
             psim.SameLine()
 
             if psim.Button("Pause"):
-                self.is_playing = False
+                self.content.pause_toolpath_playback()
 
             psim.SameLine()
 
             if psim.Button("Reset"):
-                self.is_playing = False
-                self.playback_waypoint_index = 0
+                self.content.reset_toolpath_playback()
 
             psim.SameLine()
-            psim.TextUnformatted(f"Playback: {'Running' if self.is_playing else 'Paused'}")
+            psim.TextUnformatted(self.content.playback_status)
 
             if psim.TreeNode("Toolpath Settings"):
-                _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 0.1, 5.0)
+                _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 1.0, 100.0)
 
                 psim.Spacing()
                 if self.content.precompute_running:
