@@ -306,6 +306,39 @@ class VisContent:
         handle.set_color(GCODE_COLOR)
 
 
+    def build_toolpath_waypoints_world(self, gcode_points):
+        """
+        Map parse_gcode()'s plate-local waypoints to world-space 6-DOF
+        targets -- roadmap Stage5_README.md 5.4. gcode_points is
+        parse_gcode()'s own return value (not re-parsed here, kept
+        composable). Applies the same plate-local Z lift
+        (PLATE_THICKNESS_MM) load_gcode()/load_build_plate() already use,
+        then the same T_user_frame homogeneous multiply as load_gcode() --
+        see settled.md S1.3.
+
+        No subdivision: one returned waypoint per input point, in order --
+        see settled.md S1.12.
+
+        Returns (waypoints, R_target):
+          waypoints: list of (pos_world_mm: np.ndarray[3], is_feed_move: bool),
+            same length/order as gcode_points -- both G0 (travel) and G1
+            (feed) points are included (unlike load_gcode()'s
+            G1-extruding-only bead filter), so a caller can still tell them
+            apart later.
+          R_target: 3x3 np.ndarray, self.T_user_frame[:3,:3] snapshotted
+            once here -- the constant TCP orientation for the whole path
+            (the plate doesn't tilt mid-print, see settled.md S1.6/S1.8),
+            not stored per-waypoint.
+        """
+        pts_local = np.array([p for p, _, _ in gcode_points], dtype=float)
+        is_feed = [f for _, _, f in gcode_points]
+        pts_local[:, 2] += PLATE_THICKNESS_MM
+        homo = np.hstack([pts_local, np.ones((len(pts_local), 1))])
+        pts_world = (self.T_user_frame @ homo.T).T[:, :3]
+        R_target = self.T_user_frame[:3, :3].copy()
+        return list(zip(pts_world, is_feed)), R_target
+
+
     # FR5 standard DH parameters: (a_mm, alpha_rad, d_mm, theta_offset_rad)
     # Source: docs/FR5_DH_Table.md
     DH_PARAMS = [
@@ -486,6 +519,47 @@ class VisContent:
         roll, pitch, yaw = np.deg2rad(target_rpy_deg)
         R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
         return self.solve_ik_tcp_matrix(target_pos_mm, R_target, joint_limits)
+
+
+    def solve_toolpath_ik(self, waypoints, R_target, joint_limits, reference_joint_angles=None):
+        """
+        Solve IK across a whole toolpath, chaining continuity
+        waypoint-to-waypoint -- see settled.md S1.11, roadmap
+        Stage5_README.md 5.4. waypoints is
+        build_toolpath_waypoints_world()'s first return value; R_target is
+        its second (the constant TCP orientation for the whole path).
+
+        For each waypoint, calls solve_ik_tcp_matrix() ranked against the
+        previous waypoint's chosen solution (or reference_joint_angles /
+        self.current_joint_angles for the first waypoint), and takes the
+        top-ranked branch (solutions[0][0]) -- ground-clearance re-ranking
+        among valid branches is roadmap 5.5, not applied here.
+
+        Aborts the entire solve at the first waypoint with no valid branch
+        -- no partial motion, matching the abort contract roadmap 5.6's
+        chunked precompute will also need (settled.md S1.12).
+
+        Returns (joint_path, status_message):
+          joint_path: list of joint_angles_deg (np.ndarray[6]), one per
+            waypoint, in order. Empty list on failure.
+          status_message: "Solved N waypoint(s)" on success; on failure, the
+            failing waypoint's index plus solve_ik_tcp_matrix's own status
+            string verbatim (either "Unreachable: ..." or "Reachable but
+            outside joint limits ...").
+        """
+        if reference_joint_angles is None:
+            reference_joint_angles = self.current_joint_angles
+
+        joint_path = []
+        ref = reference_joint_angles
+        for i, (pos_world_mm, _is_feed_move) in enumerate(waypoints):
+            solutions, status = self.solve_ik_tcp_matrix(
+                pos_world_mm, R_target, joint_limits, reference_joint_angles=ref)
+            if not solutions:
+                return [], f"Waypoint {i}/{len(waypoints)}: {status}"
+            ref = solutions[0][0]
+            joint_path.append(ref)
+        return joint_path, f"Solved {len(joint_path)} waypoint(s)"
 
 
     def load_mesh(self, filepath):

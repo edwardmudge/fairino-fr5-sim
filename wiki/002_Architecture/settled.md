@@ -394,3 +394,56 @@ blend of the last N waypoints), at which point
 single `np.ndarray[6]`.
 
 **Verified on:** 2026-07-16
+
+## S1.12 Toolpath waypoints are 1:1 with parsed G-code lines, snapshot one constant TCP orientation, and IK solving aborts the whole path on the first failed waypoint
+
+**Decision:** Two new `geometry_backend.py` functions implement roadmap
+`Stage5_README.md` 5.4:
+
+1. `build_toolpath_waypoints_world(gcode_points)` maps `parse_gcode()`'s
+   output to world-space 1:1 -- one returned waypoint per input point,
+   **no subdivision** of long segments into denser intermediate points.
+   Both `G0` (travel) and `G1` (feed) points are included, unlike
+   `load_gcode()`'s G1-extruding-only bead-mesh filter.
+2. The constant TCP orientation (`T_user_frame[:3,:3]`) is snapshotted
+   exactly once, inside `build_toolpath_waypoints_world` itself, and
+   returned alongside the waypoint list rather than re-read or
+   re-stored per-waypoint -- licensed by S1.6/S1.8 (the plate only
+   repositions via discrete button clicks, never mid-print).
+3. `solve_toolpath_ik(waypoints, R_target, joint_limits,
+   reference_joint_angles)` chains `solve_ik_tcp_matrix`'s
+   `reference_joint_angles` from each waypoint's top-ranked branch
+   (`solutions[0][0]`) to the next, and **aborts the entire solve** at
+   the first waypoint with no valid branch -- returns `([], status)`,
+   reusing `solve_ik_tcp_matrix`'s own status wording verbatim (never
+   inventing new text), no partial/silent motion.
+
+**Reason:** One-waypoint-per-line keeps this stage simple (AGENTS.md
+"Simplicity First") and matches the roadmap's literal wording; no
+evidence yet that per-line resolution is visually or mechanically
+insufficient. The orientation snapshot happening once, at path-build
+time, avoids any window where position and orientation could be read
+from two different plate poses, even though S1.6/S1.8 already guarantee
+the plate cannot move mid-solve. Abort-on-first-failure matches roadmap
+5.6's chunked-precompute contract exactly (`Stage5_README.md` 5.6 item
+2: "the first unreachable / out-of-limits ... waypoint aborts and
+reports its index, with no partial motion"), so this stage's behavior
+does not need to change when chunking/pausing is layered on top later --
+this was an explicit user requirement, not just convenience.
+`solve_toolpath_ik` is the first real consumer of
+`reference_joint_angles` (settled.md S1.11's stated reason for adding
+it). Verified against the real ~187k-line `model.gcode`: full-scale
+waypoint build completes in well under a second; a hand-checked
+waypoint (flat and tilted plate) matches a manual `T_user_frame`
+transform exactly; a 300-waypoint IK-chained subset FK-reproduces every
+target pose to sub-micron error; a synthetic unreachable waypoint
+correctly aborts with the right failing index and status text.
+
+**Non-revertible unless:** a print needs higher path accuracy/smoothness
+than one waypoint per G-code line provides (e.g. visible faceting on
+long straight travel/feed moves solved as a single chord) -- at which
+point `build_toolpath_waypoints_world` would need to subdivide long
+segments into multiple sub-waypoints before IK solving, not just
+increase point density upstream in the G-code itself.
+
+**Verified on:** 2026-07-16
