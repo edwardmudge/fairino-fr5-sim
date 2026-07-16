@@ -504,3 +504,112 @@ or other scene geometry) -- at which point the filter would need to read
 `T_user_frame` instead of assuming z=0.
 
 **Verified on:** 2026-07-16
+
+## S1.14 Toolpath IK precompute is chunked and driven from `render()`, with Run/Pause/Cancel state mirroring the existing playback controls one-to-one instead of the roadmap's original five-function split
+
+**Decision:** Four new `geometry_backend.py` functions implement roadmap
+`Stage5_README.md` 5.6, replacing its originally-drafted
+`start_/step_/pause_/resume_/cancel_toolpath_ik_precompute` five-function
+split with `run_/step_/pause_/cancel_toolpath_ik_precompute` (four):
+
+1. `run_toolpath_ik_precompute(joint_limits, reference_joint_angles=None)`
+   mirrors the GUI's playback **Run** button exactly: sets
+   `precompute_running = True`, and only (re-)parses the fixed G-code path
+   and resets progress counters if nothing is loaded yet
+   (`precompute_waypoints is None` -- true on the first call, and again
+   after `cancel_toolpath_ik_precompute()`). If a precompute is already
+   loaded (i.e. paused), it just resumes stepping from `precompute_index`
+   -- no re-parsing, no restart. There is no separate `resume_` function;
+   `run_` does double duty for both "start fresh" and "resume", exactly as
+   the existing UI's single "Run" button does for playback
+   (`gui_panel.py:70-71`, which has never distinguished the two either).
+2. `pause_toolpath_ik_precompute()` mirrors playback **Pause**: sets
+   `precompute_running = False` only, leaving `precompute_index` and
+   `precompute_joint_path` untouched.
+3. `cancel_toolpath_ik_precompute()` mirrors playback **Reset**: sets
+   `precompute_running = False` **and** zeroes `precompute_index`/
+   `precompute_total`, discarding `precompute_waypoints`/
+   `precompute_joint_path` -- the same relationship `Reset` already has to
+   `playback_waypoint_index` (`gui_panel.py:80-82`).
+4. `step_toolpath_ik_precompute()` -- a no-op unless `precompute_running`
+   -- solves up to `PRECOMPUTE_CHUNK_SIZE = 25` waypoints per call (chosen
+   from S1.13's ~0.5ms/waypoint benchmark at benchy scale, keeping each
+   call to roughly a 12ms slice, comfortably under a 60fps frame budget),
+   using the exact same per-waypoint logic `solve_toolpath_ik` uses
+   (`solve_ik_tcp_matrix` then `_branch_clears_ground` over the ranked
+   branches, S1.13) so the two never drift apart. Called unconditionally
+   every frame from `gui_panel.py`'s `render()`, the same place
+   `record_trajectory_point()` already runs per-frame backend work. Aborts
+   the whole precompute (discarding `precompute_joint_path`, no partial
+   motion -- same contract as `solve_toolpath_ik`, S1.12) at the first
+   waypoint with no valid or ground-clearing branch.
+
+GUI wiring (Run/Pause/Cancel buttons, a progress bar via
+`psim.ProgressBar`, and a status line reading `precompute_status`) was
+added directly in this stage, in `gui_panel.py`'s "Toolpath Settings"
+panel beneath the Speed slider -- **not** deferred to roadmap 5.8 as
+originally drafted (`Stage5_README.md` 5.8 is rewritten to cover playback
+controls only, once 5.7 exists).
+
+**Reason:** The user asked explicitly, across two follow-ups, first to
+wire the GUI now (so the precompute is actually testable) rather than wait
+for 5.8, then to make the Run/Pause/Cancel *logic* mirror the existing
+playback Run/Pause/Reset buttons exactly rather than invent a separate
+five-function vocabulary -- the existing UI only has three
+buttons/concepts (a running flag set by Run/cleared by Pause, and a
+progress counter zeroed only by Reset), so introducing a distinct
+`start_`/`resume_` split on the backend would have been an asymmetry with
+no corresponding UI concept, and "Simplicity First" (AGENTS.md) favors the
+one `precompute_running` flag actually used everywhere else in this file
+(`is_playing`) over a busier state machine. `_branch_clears_ground` reuse
+(rather than re-implementing ground clearance inline) keeps the precompute
+and the existing blocking `solve_toolpath_ik` from ever disagreeing about
+what counts as reachable.
+
+**Non-revertible unless:** the fixed 25-waypoint chunk size becomes too
+coarse or too fine for a real frame budget once actually profiled inside
+Polyscope's render loop (as opposed to the standalone benchmark this was
+derived from) -- at which point it may need to become time-budgeted rather
+than count-budgeted; or the playback stage (5.7) needs to distinguish
+"paused mid-precompute" from "fully idle" in a way `precompute_running`
+alone can't express, at which point the state would need a third value
+instead of a bool.
+
+**Verified on:** 2026-07-16
+
+## S1.15 Precompute's Run/Pause buttons collapsed into one toggle; progress bar shows a percentage instead of a raw count
+
+**Decision:** A GUI-presentation-only refinement on top of S1.14's
+backend, requested once the 5.6 feature was visible and clickable in the
+real app:
+
+1. `gui_panel.py`'s "Toolpath Settings" panel no longer draws separate
+   "Run Precompute"/"Pause Precompute" buttons side by side. One button
+   now reads "Pause Precompute" and calls `pause_toolpath_ik_precompute()`
+   while `self.content.precompute_running` is `True`, or "Run Precompute"
+   and calls `run_toolpath_ik_precompute(JOINT_LIMITS)` otherwise --
+   `precompute_running` already fully describes which action makes sense,
+   so no new state was added, only which single button/handler is shown.
+   "Cancel Precompute" stays its own separate button, unchanged.
+2. The progress bar's overlay switched from the raw waypoint count
+   (`"150/181375"`) to a percentage (`f"{fraction * 100:.0f}%"`, e.g.
+   `"83%"`).
+3. The in-progress status string, set in both
+   `run_toolpath_ik_precompute` and `step_toolpath_ik_precompute`
+   (`geometry_backend.py`), gained a `" waypoints"` suffix:
+   `"Precomputing 150/181375 waypoints"`. The terminal
+   `"Solved N waypoint(s)"` and abort-status strings were left alone --
+   they already say "waypoint(s)".
+
+**Reason:** User follow-up request for a tighter, more informative panel
+after seeing the 5.6 controls running for real -- a single toggle button
+reads more clearly than two buttons that are only ever meaningfully
+different in one direction at a time, and a percentage is a more familiar
+progress-bar convention than a raw fraction printed twice (once on the bar,
+once in the status line below it).
+
+**Non-revertible unless:** none identified -- pure presentation change
+over already-settled backend state (S1.14), reversible by editing
+`gui_panel.py` alone.
+
+**Verified on:** 2026-07-16

@@ -44,6 +44,11 @@ FILAMENT_DIAMETER_MM = 1.75
 
 GCODE_MOVE_RE = re.compile(r"([A-Za-z])\s*(-?\d+\.?\d*)")
 
+PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
+# per-frame batch well under a 60fps budget. Measured ~0.5ms/waypoint for
+# solve_ik_tcp_matrix + the ground-clearance filter at benchy scale (see
+# settled.md S1.13's verification), so this is roughly a 12ms slice per frame.
+
 
 class VisContent:
     """
@@ -63,6 +68,20 @@ class VisContent:
         self._last_sample_time = time.time()
         self.trajectory_enabled = True
         self.trajectory_handle = None    # Set once a curve exists, see _update_trajectory_curve
+
+        # Chunked toolpath IK precompute state -- mirrors gui_panel.py's
+        # is_playing/playback_waypoint_index one-to-one (see settled.md S1.14),
+        # just on the backend since real work (G-code parsing, chunked IK)
+        # has to live there. See run_toolpath_ik_precompute().
+        self.precompute_running = False
+        self.precompute_index = 0
+        self.precompute_total = 0
+        self.precompute_waypoints = None
+        self.precompute_R_target = None
+        self.precompute_joint_limits = None
+        self.precompute_ref = None
+        self.precompute_joint_path = []
+        self.precompute_status = ""
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -568,6 +587,108 @@ class VisContent:
             ref = clear
             joint_path.append(ref)
         return joint_path, f"Solved {len(joint_path)} waypoint(s)"
+
+
+    def run_toolpath_ik_precompute(self, joint_limits, reference_joint_angles=None):
+        """Start or resume the chunked toolpath IK precompute -- roadmap
+        Stage5_README.md 5.6. Mirrors the GUI's playback Run button
+        (gui_panel.py): sets precompute_running True, and only (re-)parses
+        the G-code and resets progress if nothing is loaded yet
+        (precompute_waypoints is None -- true on the very first call, and
+        again after cancel_toolpath_ik_precompute()). If a precompute is
+        already loaded (i.e. paused), just resumes stepping from
+        precompute_index -- no re-parsing, no restart. Reads the fixed
+        G-code path (GCODE_DIR/GCODE_FILE, same convention as load_gcode())
+        via parse_gcode() + build_toolpath_waypoints_world(), not a cached
+        result from load_gcode() (which only keeps extruding-G1 preview
+        beads, not the raw 1:1 waypoint list).
+        """
+        if self.precompute_waypoints is None:
+            filepath = os.path.join(GCODE_DIR, GCODE_FILE)
+            if not os.path.exists(filepath):
+                self.precompute_status = "No G-code file found"
+                return
+
+            gcode_points = self.parse_gcode(filepath)
+            waypoints, R_target = self.build_toolpath_waypoints_world(gcode_points)
+            if not waypoints:
+                self.precompute_status = "No waypoints to solve"
+                return
+
+            self.precompute_waypoints = waypoints
+            self.precompute_R_target = R_target
+            self.precompute_joint_limits = joint_limits
+            self.precompute_index = 0
+            self.precompute_total = len(waypoints)
+            self.precompute_joint_path = []
+            self.precompute_ref = (
+                reference_joint_angles if reference_joint_angles is not None else self.current_joint_angles)
+
+        self.precompute_running = True
+        self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
+
+
+    def pause_toolpath_ik_precompute(self):
+        """Mirrors the GUI's playback Pause button: stop advancing the
+        precompute without discarding progress. A following
+        run_toolpath_ik_precompute() call continues from precompute_index."""
+        self.precompute_running = False
+
+
+    def cancel_toolpath_ik_precompute(self):
+        """Mirrors the GUI's playback Reset button: stop and discard the
+        precompute entirely, resetting progress back to zero -- a following
+        run_toolpath_ik_precompute() call starts completely fresh
+        (re-parses the G-code), matching Reset zeroing playback_waypoint_index."""
+        self.precompute_running = False
+        self.precompute_waypoints = None
+        self.precompute_index = 0
+        self.precompute_total = 0
+        self.precompute_joint_path = []
+        self.precompute_status = ""
+
+
+    def step_toolpath_ik_precompute(self):
+        """Advance the in-progress precompute by up to
+        PRECOMPUTE_CHUNK_SIZE waypoints -- call every frame from render()
+        (roadmap Stage5_README.md 5.6). No-ops unless precompute_running.
+        Uses the same per-waypoint logic as solve_toolpath_ik (solve, then
+        walk ranked branches with _branch_clears_ground, settled.md S1.13):
+        aborts the whole precompute -- no partial motion, settled.md S1.12
+        -- at the first waypoint with no valid/ground-clearing branch."""
+        if not self.precompute_running:
+            return
+
+        end = min(self.precompute_index + PRECOMPUTE_CHUNK_SIZE, self.precompute_total)
+        for i in range(self.precompute_index, end):
+            pos_world_mm, _is_feed_move = self.precompute_waypoints[i]
+            solutions, status = self.solve_ik_tcp_matrix(
+                pos_world_mm, self.precompute_R_target, self.precompute_joint_limits,
+                reference_joint_angles=self.precompute_ref)
+            if not solutions:
+                self.precompute_running = False
+                self.precompute_joint_path = []
+                self.precompute_status = f"Waypoint {i}/{self.precompute_total}: {status}"
+                return
+
+            clear = next((angles for angles, *_ in solutions if self._branch_clears_ground(angles)), None)
+            if clear is None:
+                self.precompute_running = False
+                self.precompute_joint_path = []
+                self.precompute_status = (
+                    f"Waypoint {i}/{self.precompute_total}: all {len(solutions)} valid branch(es) "
+                    "dip below the ground plane (z<0)")
+                return
+
+            self.precompute_ref = clear
+            self.precompute_joint_path.append(clear)
+
+        self.precompute_index = end
+        if self.precompute_index >= self.precompute_total:
+            self.precompute_running = False
+            self.precompute_status = f"Solved {self.precompute_total} waypoint(s)"
+        else:
+            self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
 
 
     def load_mesh(self, filepath):

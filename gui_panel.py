@@ -48,6 +48,7 @@ class UI_Menu:
     def render(self):
         """This function needs to be called by Polyscope every frame"""
         self.content.record_trajectory_point()
+        self.content.step_toolpath_ik_precompute()
 
         # 1. Panel title
         psim.TextUnformatted("Fairino FR5 Arm Control")
@@ -86,6 +87,24 @@ class UI_Menu:
 
             if psim.TreeNode("Toolpath Settings"):
                 _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 0.1, 5.0)
+
+                psim.Spacing()
+                if self.content.precompute_running:
+                    if psim.Button("Pause Precompute"):
+                        self.content.pause_toolpath_ik_precompute()
+                else:
+                    if psim.Button("Run Precompute"):
+                        self.content.run_toolpath_ik_precompute(JOINT_LIMITS)
+
+                psim.SameLine()
+
+                if psim.Button("Cancel Precompute"):
+                    self.content.cancel_toolpath_ik_precompute()
+
+                total = self.content.precompute_total
+                fraction = (self.content.precompute_index / total) if total else 0.0
+                psim.ProgressBar(fraction, overlay=f"{fraction * 100:.0f}%" if total else "")
+                psim.TextUnformatted(self.content.precompute_status)
 
                 psim.Spacing()
                 for i, sol in enumerate(self.toolpath_ik_solutions):
