@@ -264,3 +264,56 @@ need the per-frame pipeline S1.3 originally deferred, not just another
 reload call.
 
 **Verified on:** 2026-07-09
+
+## S1.9 G-code preview renders as a swept bead surface mesh; bead height comes from the printed Z sequence, not parsed slicer metadata; bead width assumes a fixed filament diameter
+
+**Decision:** `load_gcode()` (`geometry_backend.py`) now builds a solid
+**bead mesh** (a box per extruding segment, `ps.register_surface_mesh`)
+in place of the earlier `ps.register_curve_network` wireframe, satisfying
+`Stage5_README.md` 5.2 items 3 and 5. Three sub-decisions:
+
+1. **Bead height/first-layer band is derived from the actual printed Z
+   sequence, not `model.gcode`'s `;Layer height: 0.1` header comment.**
+   A running layer floor advances only on segments that actually extrude
+   (`is_feed` and `E` delta > 0); it starts at 0 (the plate surface) and
+   only moves up when a print segment's destination Z exceeds the
+   previous print Z. This was necessary, not just a style preference: the
+   real `model.gcode`'s own header layer-height doesn't describe its
+   first layer (measured first print Z is 0.3mm, not 0.1mm — a thicker
+   first layer for bed adhesion, standard slicer practice), and its
+   startup sequence includes a non-extruding `G1 Z15.0 ... ;Prime the
+   extruder` clearance move before the first real layer — a naive
+   "previous distinct Z becomes the new floor" tracker (not filtered by
+   whether the segment actually deposits material) gets corrupted by that
+   Z=15 excursion. Restricting floor updates to extruding segments only
+   sidesteps this without needing to special-case the startup sequence.
+2. **Bead width assumes `FILAMENT_DIAMETER_MM = 1.75`** (the standard FDM
+   default), converting extruded `E` into a volume via the standard
+   slicer-viewer formula (`E delta x filament cross-section / (segment
+   length x bead height)`). This is a documented assumption, not parsed
+   metadata — `model.gcode`'s header has no filament/nozzle-diameter
+   comment to read instead.
+3. **Mesh construction is fully vectorised** (box corners/faces built via
+   numpy array broadcasting across all segments at once, not a
+   per-segment Python loop or `trimesh.creation.box` + concatenate),
+   given a real multi-layer print is on the order of ~180,000 segments —
+   the same scale that caused the earlier translucent-curve attempt
+   (`Gcode_Toolpath.md`) to be reverted for frame-cost reasons.
+
+**Reason:** Roadmap items 3 and 5 explicitly called for a solid,
+first-layer-aware bead mesh instead of a thin wire. The thin curve
+(`GCODE_RADIUS_MM = 1.5mm` fixed tube radius) visually clipped through
+the plate at the first layer regardless of correct positioning, since a
+1.5mm-radius tube dips well below a first layer only ~0.3mm above the
+plate surface — a rendering artifact of representing deposited material
+as a round wire, not a position bug (see S1.2's `PLATE_THICKNESS_MM`,
+which remains correct and is reused here for the same plate-surface
+offset).
+
+**Non-revertible unless:** a future need for adaptive/per-layer filament
+diameter (e.g. multi-material prints) requires parsing real filament
+metadata instead of assuming one constant, or the segment-count/rendering
+cost of the bead mesh itself becomes a problem at larger scale (in which
+case decimation or LOD, not reverting to a wireframe, would be the fix).
+
+**Verified on:** 2026-07-16

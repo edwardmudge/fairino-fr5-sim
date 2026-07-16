@@ -36,8 +36,11 @@ BUILD_PLATE_POSITION_FILE = os.path.join(BUILD_PLATE_DIR, "saved_position.json")
 
 GCODE_DIR = "assets/models/gcode"
 GCODE_FILE = "model.gcode"  # Fixed name -- overwritten by each new Cura export, never hand-edited
-GCODE_RADIUS_MM = 1.5  # Toolpath curve thickness, world units (mm) -- distinct from TRAJECTORY_RADIUS_MM
 GCODE_COLOR = (1.0, 0.55, 0.0)  # Orange, so it doesn't visually merge with the Trajectory curve
+# Assumed, not parsed -- Cura's exported G-code carries no filament/nozzle-diameter
+# comment to read instead. 1.75mm is the standard FDM default. Used to convert
+# extruded filament length (E) into a deposited bead volume, see load_gcode().
+FILAMENT_DIAMETER_MM = 1.75
 
 GCODE_MOVE_RE = re.compile(r"([A-Za-z])\s*(-?\d+\.?\d*)")
 
@@ -156,14 +159,16 @@ class VisContent:
 
 
     def parse_gcode(self, filepath):
-        """Parse G0/G1 linear moves. Returns a list of ([x, y, z],
-        is_feed_move) pairs, plate-local mm -- G0 travel moves update
+        """Parse G0/G1 linear moves. Returns a list of ([x, y, z], e,
+        is_feed_move) triples, plate-local mm -- G0 travel moves update
         position but are flagged is_feed_move=False so load_gcode() skips
-        drawing them. Modal position handling: see GLOSSARY.md 'G-code
-        toolpath'. G0/G1-only by design (see settled.md S1.7) -- any other
-        G/M-code, and any line that isn't G0/G1, is discarded in software
-        here, not assumed absent from the input file."""
-        x, y, z = 0.0, 0.0, 0.0
+        drawing them. Position and extrusion (E) are both modal: a G0
+        travel line carries no E and simply leaves it unchanged. Modal
+        position handling: see GLOSSARY.md 'G-code toolpath'. G0/G1-only by
+        design (see settled.md S1.7) -- any other G/M-code, and any line
+        that isn't G0/G1, is discarded in software here, not assumed
+        absent from the input file."""
+        x, y, z, e = 0.0, 0.0, 0.0, 0.0
         points = []
         with open(filepath) as f:
             for line in f:
@@ -191,26 +196,59 @@ class VisContent:
                         y = float(value)
                     elif letter == 'Z':
                         z = float(value)
-                points.append(([x, y, z], code == 1))
+                    elif letter == 'E':
+                        e = float(value)
+                points.append(([x, y, z], e, code == 1))
         return points
 
 
+    # Local-index template for one bead box's 12 triangles (6 faces x 2 tris),
+    # corners 0-3 = bottom rectangle (CCW from above), 4-7 = top rectangle
+    # directly above 0-3. Reused for every segment via a vertex-index offset.
+    _BEAD_BOX_FACE_TEMPLATE = np.array([
+        [0, 1, 2], [0, 2, 3],       # bottom
+        [4, 6, 5], [4, 7, 6],       # top (reversed winding vs. bottom)
+        [0, 1, 5], [0, 5, 4],       # side 0-1
+        [1, 2, 6], [1, 6, 5],       # side 1-2
+        [2, 3, 7], [2, 7, 6],       # side 2-3
+        [3, 0, 4], [3, 4, 7],       # side 3-0
+    ])
+
     def load_gcode(self):
-        """Register the G1 feed-move segments of the parsed G-code as a
-        static curve network on the plate -- G0 travel moves are parsed
-        (for position tracking) but not drawn, see parse_gcode(). Points
-        are plate-local (mm) and mapped to world with the full
-        T_user_frame matrix multiply, not a raw vector add -- see
-        settled.md S1.3. Safe to call repeatedly -- including from the
-        Build Plate Orientation panel's Move/Reset/Load Saved Position
-        buttons, to re-transform the curve against the plate's new pose
-        (settled.md S1.8) -- Polyscope replaces the prior structure of the
-        same name, same as _update_trajectory_curve. No-ops (instead of
-        raising) if the G-code file doesn't exist yet, since it's now
-        reachable before any G-code has ever been loaded. Waypoints are
-        shifted up by PLATE_THICKNESS_MM before the transform, same as
-        load_build_plate(), so the print sits on the plate's actual top
-        surface rather than at position_mm (the resting/bottom face)."""
+        """Register the deposited G1 material as a swept bead surface mesh
+        on the plate -- a solid box per feed segment, not a thin wire, so
+        the preview reads as the printed object itself (bridges/overhangs
+        included). G0 travel moves are parsed (for position tracking) but
+        produce no bead, see parse_gcode(). Safe to call repeatedly --
+        including from the Build Plate Orientation panel's Move/Reset/Load
+        Saved Position buttons, to re-transform the mesh against the
+        plate's new pose (settled.md S1.8) -- Polyscope replaces the prior
+        structure of the same name. No-ops if the G-code file doesn't
+        exist yet.
+
+        Bead height comes from each drawn segment's enclosing layer band,
+        derived from the actual sequence of *printed* Z values -- not a
+        parsed slicer layer-height comment, which doesn't reliably describe
+        the first layer, and not a raw scan of every waypoint's Z either,
+        since real Cura output includes non-extruding Z excursions (e.g.
+        this project's own model.gcode lifts to Z=15 in its startup
+        sequence before the first real layer at Z=0.3) that would corrupt a
+        naive "previous distinct Z" tracker. Only segments that actually
+        deposit material (see settled.md S1.9) advance the running layer
+        floor, starting at 0 (plate-local) for the very first one -- so
+        first-layer beads automatically reach down to the plate's top
+        surface once the existing PLATE_THICKNESS_MM shift is applied
+        below, with no special-casing.
+
+        Bead width comes from the extruded filament volume (E delta x
+        FILAMENT_DIAMETER_MM cross-section) divided by (segment length x
+        bead height) -- the standard slicer-viewer formula. Segments with
+        no net extrusion (travel/retraction), ~zero length, ~zero height,
+        or a degenerate (near-vertical) direction produce no bead.
+
+        Mesh construction is fully vectorised (no per-segment Python loop)
+        since a real multi-layer print is on the order of ~180,000
+        segments (see Gcode_Toolpath.md)."""
         filepath = os.path.join(GCODE_DIR, GCODE_FILE)
         if not os.path.exists(filepath):
             return
@@ -219,16 +257,86 @@ class VisContent:
         if len(waypoints) < 2:
             return
 
-        points_local = np.array([p for p, _ in waypoints]) + np.array([0.0, 0.0, PLATE_THICKNESS_MM])
-        homo = np.hstack([points_local, np.ones((len(points_local), 1))])
-        nodes = (self.T_user_frame @ homo.T).T[:, :3]
+        pts = np.array([p for p, _, _ in waypoints])
+        es = np.array([e for _, e, _ in waypoints])
+        is_feed = np.array([f for _, _, f in waypoints])
 
-        edges = np.array([[i, i + 1] for i in range(len(nodes) - 1) if waypoints[i + 1][1]])
-        if len(edges) == 0:
+        p0, p1 = pts[:-1], pts[1:]
+        seg_vec = p1 - p0
+        seg_len = np.linalg.norm(seg_vec, axis=1)
+        delta_e = es[1:] - es[:-1]
+        z_dest = p1[:, 2]
+
+        # Per-segment layer floor (plate-local Z), derived from the actual
+        # printed Z sequence -- not a parsed slicer layer-height comment,
+        # which doesn't reliably describe the first layer (see settled.md
+        # S1.9). Only segments that actually deposit material advance the
+        # running floor, so a non-extruding preamble move (e.g. Cura's
+        # startup Z-clearance lift, seen at Z=15 in the real model.gcode
+        # before the first real layer at Z=0.3) or a travel Z-hop can't
+        # corrupt it -- both are non-extruding and simply skipped. This
+        # starts at 0 (the plate's own top surface once PLATE_THICKNESS_MM
+        # is applied below), so first-layer beads automatically reach the
+        # plate surface -- item 5's ask, with no special-casing.
+        seg_is_print = is_feed[1:] & (delta_e > 1e-9)
+        bead_bottom = np.empty(len(z_dest))
+        prev_print_z = None
+        cur_bottom = 0.0
+        for i in range(len(z_dest)):
+            if seg_is_print[i]:
+                zi = z_dest[i]
+                if prev_print_z is None or zi > prev_print_z:
+                    if prev_print_z is not None:
+                        cur_bottom = prev_print_z
+                elif zi < prev_print_z:
+                    cur_bottom = 0.0  # unexpected downward jump; rest on the plate
+                prev_print_z = zi
+            bead_bottom[i] = cur_bottom
+        bead_top = z_dest
+        bead_height = bead_top - bead_bottom
+
+        safe_len = np.where(seg_len > 1e-9, seg_len, 1.0)
+        u = seg_vec / safe_len[:, None]
+        w_axis = np.cross(u, [0.0, 0.0, 1.0])  # horizontal, perpendicular to travel
+        w_norm = np.linalg.norm(w_axis, axis=1)
+        safe_w_norm = np.where(w_norm > 1e-9, w_norm, 1.0)
+        w_axis = w_axis / safe_w_norm[:, None]
+
+        filament_area = np.pi * (FILAMENT_DIAMETER_MM / 2.0) ** 2
+        safe_denom = np.where((seg_len * bead_height) > 1e-9, seg_len * bead_height, 1.0)
+        width = (delta_e * filament_area) / safe_denom
+
+        valid = seg_is_print & (seg_len > 1e-6) & (w_norm > 1e-6) & (bead_height > 1e-9)
+        if not np.any(valid):
             return
 
-        handle = ps.register_curve_network("G-code Toolpath", nodes, edges)
-        handle.set_radius(GCODE_RADIUS_MM, relative=False)
+        p0, p1 = p0[valid], p1[valid]
+        w_axis = w_axis[valid]
+        half_w = (width[valid] / 2.0)[:, None]
+        bottom = (bead_bottom[valid] + PLATE_THICKNESS_MM)[:, None]
+        top = (bead_top[valid] + PLATE_THICKNESS_MM)[:, None]
+
+        offset = w_axis[:, :2] * half_w
+        c0 = p0[:, :2] + offset
+        c1 = p0[:, :2] - offset
+        c2 = p1[:, :2] - offset
+        c3 = p1[:, :2] + offset
+
+        K = len(p0)
+        verts_local = np.zeros((K, 8, 3))
+        for idx, corner_xy in enumerate((c0, c1, c2, c3)):
+            verts_local[:, idx, :2] = corner_xy
+            verts_local[:, idx, 2] = bottom[:, 0]
+            verts_local[:, idx + 4, :2] = corner_xy
+            verts_local[:, idx + 4, 2] = top[:, 0]
+        verts_local = verts_local.reshape(-1, 3)
+
+        faces = (self._BEAD_BOX_FACE_TEMPLATE[None, :, :] + (np.arange(K) * 8)[:, None, None]).reshape(-1, 3)
+
+        homo = np.hstack([verts_local, np.ones((len(verts_local), 1))])
+        verts_world = (self.T_user_frame @ homo.T).T[:, :3]
+
+        handle = ps.register_surface_mesh("G-code Print", verts_world, faces)
         handle.set_color(GCODE_COLOR)
 
 
