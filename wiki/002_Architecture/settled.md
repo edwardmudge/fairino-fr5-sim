@@ -364,3 +364,33 @@ actually desirable — at which point re-add the toggle using
 at this segment count, see the table above).
 
 **Verified on:** 2026-07-16
+
+## S1.11 IK gained a matrix-native entry point with an explicit reference pose; the RPY entry point is now a thin wrapper over it
+
+**Decision:** `solve_ik_tcp_matrix(target_pos_mm, R_target, joint_limits,
+reference_joint_angles=None)` (`geometry_backend.py`) now holds the shared
+solve/filter/rank/status logic that used to live directly in
+`solve_ik_tcp`. It takes the TCP orientation as a 3x3 rotation matrix
+instead of RPY, and ranks branches against an explicit
+`reference_joint_angles` instead of always `self.current_joint_angles` --
+when omitted (`None`), it falls back to `self.current_joint_angles`,
+reproducing the old behavior exactly. `solve_ik_tcp` is now a ~9-line
+wrapper: convert RPY to a rotation matrix, delegate. Both functions were
+verified to return bit-for-bit identical solutions (order, angles,
+singular flags) for the same pose.
+
+**Reason:** Roadmap `tutorials/Stage5_README.md` 5.3 -- a per-waypoint
+toolpath driver (5.4+) needs to solve IK directly from a rotation matrix
+it already holds (the plate's `T_user_frame[:3,:3]`) without a
+matrix->RPY->matrix round-trip on every call, and needs to rank branches
+against the *previous waypoint's* solved pose rather than the arm's live
+pose, for continuity along the path. This is the exact generalization
+S1.5's "Non-revertible unless" clause anticipated in advance.
+
+**Non-revertible unless:** a future need arises to rank against something
+other than a single reference joint-angle vector (e.g. a weighted
+blend of the last N waypoints), at which point
+`reference_joint_angles` would need to become a richer parameter than a
+single `np.ndarray[6]`.
+
+**Verified on:** 2026-07-16

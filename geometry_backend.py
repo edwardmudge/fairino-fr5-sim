@@ -411,21 +411,26 @@ class VisContent:
         return solutions
 
 
-    def solve_ik_tcp(self, target_pos_mm, target_rpy_deg, joint_limits):
+    def solve_ik_tcp_matrix(self, target_pos_mm, R_target, joint_limits, reference_joint_angles=None):
         """
-        GUI-facing IK entry point, targeting the TCP pose rather than the
-        flange -- see settled.md S1.4. Converts via self.T_flange_to_tcp,
-        solves, filters by joint_limits, then ranks every valid branch by
-        closeness to self.current_joint_angles -- see settled.md S1.5.
+        Matrix-native IK entry point, targeting the TCP pose -- see settled.md
+        S1.4. Converts via self.T_flange_to_tcp, solves, filters by
+        joint_limits, then ranks every valid branch by closeness to a
+        reference pose -- see settled.md S1.5.
 
-        target_rpy_deg: [roll, pitch, yaw] degrees, fixed-angle convention
-        (R = Rz(yaw) @ Ry(pitch) @ Rx(roll)).
+        R_target: 3x3 np.ndarray, target TCP orientation (base frame).
+        reference_joint_angles: joint_angles_deg (np.ndarray[6]) to rank
+        branches against; defaults to self.current_joint_angles when None
+        (the arm's live pose -- reproduces solve_ik_tcp's existing behavior).
+        A future toolpath driver instead passes the previous waypoint's
+        solved pose, for continuity between consecutive solves.
+
         Returns (solutions, status_message); solutions is a list of
         (joint_angles_deg, is_wrist_singular, raw_branch_index), sorted
-        closest-to-current first. Empty list on failure.
+        closest-to-reference first. Empty list on failure.
         """
-        roll, pitch, yaw = np.deg2rad(target_rpy_deg)
-        R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+        if reference_joint_angles is None:
+            reference_joint_angles = self.current_joint_angles
 
         T_target_tcp = np.eye(4)
         T_target_tcp[:3, :3] = R_target
@@ -456,12 +461,31 @@ class VisContent:
             return [], f"Reachable but outside joint limits ({len(branches)} branch(es), none valid)"
 
         def wrapped_dist(angles):
-            diff = (angles - self.current_joint_angles + 180) % 360 - 180
+            diff = (angles - reference_joint_angles + 180) % 360 - 180
             return np.sum(np.abs(diff))
 
         valid.sort(key=lambda item: wrapped_dist(item[0]))
         status = f"Solved ({len(valid)} valid solution{'s' if len(valid) != 1 else ''})"
         return valid, status
+
+
+    def solve_ik_tcp(self, target_pos_mm, target_rpy_deg, joint_limits):
+        """
+        GUI-facing IK entry point, targeting the TCP pose via RPY orientation
+        -- see settled.md S1.4. Thin wrapper: converts RPY to a rotation
+        matrix, then delegates to solve_ik_tcp_matrix() (ranked against
+        self.current_joint_angles, i.e. the arm's live pose -- see settled.md
+        S1.5).
+
+        target_rpy_deg: [roll, pitch, yaw] degrees, fixed-angle convention
+        (R = Rz(yaw) @ Ry(pitch) @ Rx(roll)).
+        Returns (solutions, status_message); solutions is a list of
+        (joint_angles_deg, is_wrist_singular, raw_branch_index), sorted
+        closest-to-current first. Empty list on failure.
+        """
+        roll, pitch, yaw = np.deg2rad(target_rpy_deg)
+        R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+        return self.solve_ik_tcp_matrix(target_pos_mm, R_target, joint_limits)
 
 
     def load_mesh(self, filepath):
