@@ -531,21 +531,24 @@ class VisContent:
 
         For each waypoint, calls solve_ik_tcp_matrix() ranked against the
         previous waypoint's chosen solution (or reference_joint_angles /
-        self.current_joint_angles for the first waypoint), and takes the
-        top-ranked branch (solutions[0][0]) -- ground-clearance re-ranking
-        among valid branches is roadmap 5.5, not applied here.
+        self.current_joint_angles for the first waypoint), then walks the
+        ranked branches and takes the first one that clears the ground
+        (_branch_clears_ground -- roadmap 5.5, settled.md S1.13), not
+        blindly the top-ranked branch.
 
-        Aborts the entire solve at the first waypoint with no valid branch
-        -- no partial motion, matching the abort contract roadmap 5.6's
-        chunked precompute will also need (settled.md S1.12).
+        Aborts the entire solve at the first waypoint with no valid branch,
+        or where every valid branch dips below the ground plane -- no
+        partial motion, matching the abort contract roadmap 5.6's chunked
+        precompute will also need (settled.md S1.12).
 
         Returns (joint_path, status_message):
           joint_path: list of joint_angles_deg (np.ndarray[6]), one per
             waypoint, in order. Empty list on failure.
           status_message: "Solved N waypoint(s)" on success; on failure, the
-            failing waypoint's index plus solve_ik_tcp_matrix's own status
-            string verbatim (either "Unreachable: ..." or "Reachable but
-            outside joint limits ...").
+            failing waypoint's index plus either solve_ik_tcp_matrix's own
+            status string verbatim ("Unreachable: ..." / "Reachable but
+            outside joint limits ...") or the ground-clearance failure
+            message when every valid branch dips below z=0.
         """
         if reference_joint_angles is None:
             reference_joint_angles = self.current_joint_angles
@@ -557,7 +560,12 @@ class VisContent:
                 pos_world_mm, R_target, joint_limits, reference_joint_angles=ref)
             if not solutions:
                 return [], f"Waypoint {i}/{len(waypoints)}: {status}"
-            ref = solutions[0][0]
+
+            clear = next((angles for angles, *_ in solutions if self._branch_clears_ground(angles)), None)
+            if clear is None:
+                return [], f"Waypoint {i}/{len(waypoints)}: all {len(solutions)} valid branch(es) dip below the ground plane (z<0)"
+
+            ref = clear
             joint_path.append(ref)
         return joint_path, f"Solved {len(joint_path)} waypoint(s)"
 
@@ -604,6 +612,12 @@ class VisContent:
         nozzle_handle = ps.register_surface_mesh("Nozzle", nozzle.vertices, nozzle.faces)
         self.mesh_handles.append(nozzle_handle)
         self.update_fns.append(nozzle_handle.update_vertex_positions)
+
+        # Zero-pose bbox corners for the moving-geometry set (Robot1..6 + nozzle,
+        # rest_verts[0:7] -- excludes the TCP point/frame appended below, which
+        # are visualization markers, not solid robot geometry). See
+        # moving_geometry_bbox_min_z (roadmap Stage5_README.md 5.5).
+        self.moving_geometry_rest_bbox_corners = [_bbox_corners(v) for v in self.rest_verts]
 
         self.tcp_local = np.loadtxt(os.path.join(PRINTER_HEAD_DIR, TCP_FILE))  # Zero-pose world frame [x, y, z]
 
@@ -667,6 +681,61 @@ class VisContent:
         self.apply_delta_transform(joint_angles_deg)
 
 
+    def _moving_geometry_deltas(self, joint_angles_deg):
+        """Delta_i for each moving mesh (Robot1..Robot6 + nozzle), reusing
+        Delta_6 for the nozzle -- same src = min(i, 5) mapping as
+        apply_delta_transform, but pure computation with no Polyscope side
+        effects (used by the ground-clearance checks below, not per-frame
+        rendering)."""
+        T_current = self.compute_fk(joint_angles_deg)
+        return [T_current[min(i, 5)] @ np.linalg.inv(self.T_zero[min(i, 5)]) for i in range(7)]
+
+
+    def moving_geometry_bbox_min_z(self, joint_angles_deg):
+        """Cheap ground-clearance pre-check (roadmap Stage5_README.md 5.5):
+        transform each moving mesh's cached zero-pose bounding-box corners (8
+        per mesh, not the full vertex set) by its Delta transform and return
+        the minimum world z reached, mm. This is a guaranteed lower bound on
+        moving_geometry_min_z's result -- a rigid transform of an AABB's 8
+        corners always produces a convex hull enclosing the mesh's true
+        transformed extent, and z is linear so its minimum is attained at a
+        corner -- so a non-negative result here proves the branch clears
+        without needing the exact check."""
+        deltas = self._moving_geometry_deltas(joint_angles_deg)
+        min_z = np.inf
+        for delta, corners in zip(deltas, self.moving_geometry_rest_bbox_corners):
+            homo = np.hstack([corners, np.ones((len(corners), 1))])
+            world = (delta @ homo.T).T[:, :3]
+            min_z = min(min_z, world[:, 2].min())
+        return min_z
+
+
+    def moving_geometry_min_z(self, joint_angles_deg):
+        """Exact ground-clearance check (roadmap Stage5_README.md 5.5):
+        transform every vertex of every moving mesh and return the true
+        minimum world z reached, mm. Slower than moving_geometry_bbox_min_z --
+        only called when the bbox check doesn't already prove clearance."""
+        deltas = self._moving_geometry_deltas(joint_angles_deg)
+        min_z = np.inf
+        for delta, verts in zip(deltas, self.rest_verts[:7]):
+            homo = np.hstack([verts, np.ones((len(verts), 1))])
+            world = (delta @ homo.T).T[:, :3]
+            min_z = min(min_z, world[:, 2].min())
+        return min_z
+
+
+    def _branch_clears_ground(self, joint_angles_deg):
+        """True if this branch's moving geometry never dips below world
+        z=0 (the robot's own base-mounting plane, roadmap Stage5_README.md
+        5.5). Checks the cheap bbox bound first -- proven clear if
+        non-negative -- and only escalates to the exact per-vertex check
+        when the bbox result is negative (inconclusive: a rotated AABB
+        corner can dip below ground even when the real mesh does not)."""
+        if self.moving_geometry_bbox_min_z(joint_angles_deg) >= 0:
+            return True
+        return self.moving_geometry_min_z(joint_angles_deg) >= 0
+
+
     def record_trajectory_point(self):
         """Sample self.tcp_world at most once per TRAJECTORY_SAMPLE_INTERVAL_S;
         discard the sample if the TCP hasn't moved since the last recorded point."""
@@ -712,6 +781,15 @@ class VisContent:
         self.trajectory_handle = None
         ps.remove_curve_network("Trajectory", error_if_absent=False)
 
+
+
+def _bbox_corners(verts):
+    """The 8 corners of verts' axis-aligned bounding box, in whatever frame
+    verts is already in. Used to cheaply bound a mesh's rotated extent
+    without transforming every vertex -- see moving_geometry_bbox_min_z."""
+    lo, hi = verts.min(axis=0), verts.max(axis=0)
+    xs, ys, zs = np.meshgrid([lo[0], hi[0]], [lo[1], hi[1]], [lo[2], hi[2]], indexing='ij')
+    return np.stack([xs.ravel(), ys.ravel(), zs.ravel()], axis=1)
 
 
 def dh_transform(a, alpha, d, theta):

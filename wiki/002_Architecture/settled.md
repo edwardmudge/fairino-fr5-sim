@@ -447,3 +447,60 @@ segments into multiple sub-waypoints before IK solving, not just
 increase point density upstream in the G-code itself.
 
 **Verified on:** 2026-07-16
+
+## S1.13 Ground-clearance filter checks literal world z=0, not the build plate's current surface height; the cheap bbox check proves clearance, the exact check only confirms when it's inconclusive
+
+**Decision:** Three new `geometry_backend.py` functions implement roadmap
+`Stage5_README.md` 5.5:
+
+1. `moving_geometry_bbox_min_z(joint_angles_deg)` -- transforms each moving
+   mesh's cached zero-pose bounding-box corners (`self.moving_geometry_rest_bbox_corners`,
+   8 corners per mesh, cached once in `load_data()` via the new module-level
+   `_bbox_corners()` helper) through that mesh's Delta transform and returns
+   the minimum world z reached.
+2. `moving_geometry_min_z(joint_angles_deg)` -- the same, but over every
+   vertex of every moving mesh (`self.rest_verts[:7]`), for the true
+   minimum z.
+3. `_branch_clears_ground(joint_angles_deg)` -- returns `True` immediately
+   if the bbox check is non-negative (a rigid transform of an AABB's 8
+   corners always produces a convex hull enclosing the mesh's true
+   transformed extent, and z is linear so its minimum is attained at a
+   corner -- so a non-negative bbox result *proves* clearance); only calls
+   the exact check when the bbox result is negative, since that's
+   inconclusive (a rotated AABB corner can dip below ground even when the
+   real mesh does not).
+
+"Moving geometry" is `self.rest_verts[0:7]` (Robot1..Robot6 + nozzle) --
+the same set `apply_delta_transform` drives, minus indices 7/8 (the TCP
+point and TCP frame triad, which are visualization markers, not solid
+robot geometry) and minus `Robot0` (the static base, never in `rest_verts`,
+and not affected by any joint-angle branch choice).
+
+"Ground" means literal **world z=0** -- the robot's own base-mounting
+plane -- not the build plate's current top surface via `T_user_frame`.
+`solve_toolpath_ik()` now walks each waypoint's continuity-ranked branch
+list (settled.md S1.12) and takes the first branch `_branch_clears_ground`
+accepts, aborting the whole solve (no partial motion, same contract as
+S1.12) if every valid branch dips below z=0.
+
+**Reason:** Roadmap 5.5's own wording is a literal `z=0` check, and the
+user confirmed this reading explicitly when asked (the alternative --
+checking against `T_user_frame`'s current Z + `PLATE_THICKNESS_MM` -- would
+track the plate's real position after a reposition, but goes beyond both
+the roadmap's literal spec and this stage's scope). Known simplification:
+if the plate is moved away from its default z=0-resting pose (S1.6), this
+filter no longer tracks the plate's actual surface height. The
+bbox-proves/exact-confirms combination (rather than treating any negative
+bbox result as an outright reject) was also confirmed with the user --
+the mathematical guarantee only runs one direction (bbox is a lower bound
+on the exact result), so a negative bbox result cannot be used to reject a
+branch without risking a false rejection of one that actually clears.
+
+**Non-revertible unless:** the build plate becomes reachable while
+mid-print at a non-default pose in the same session the ground-clearance
+filter needs to apply, or a future collision check needs to guard against
+something other than the base mounting plane (e.g. the plate mesh itself,
+or other scene geometry) -- at which point the filter would need to read
+`T_user_frame` instead of assuming z=0.
+
+**Verified on:** 2026-07-16
