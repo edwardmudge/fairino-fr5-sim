@@ -45,17 +45,23 @@ one-time setup call (see `settled.md` S1.6):
    RPY, reusing the shared `rot_x`/`rot_y`/`rot_z` helpers.
 2. Builds `self.T_user_frame`, a full 4x4 matrix: rotation submatrix `R`,
    translation column `position_mm`.
-3. Loads the plate OBJ via the shared `load_mesh()` helper and maps its
-   raw vertices to world coordinates with the full homogeneous multiply
-   `T_user_frame @ [x,y,z,1]` (same pattern `load_gcode()` uses, S1.3) —
-   no longer a raw vector add, since there's now a rotation to apply too.
-   The mesh's local origin `(0,0,0)` still sits almost exactly at the
-   plate's front-left-top corner (checked directly with `trimesh` bounds:
-   X:[0,258], Y:[-10,266], Z:[-0.75,0]), so `position_mm` alone (at
-   zero rotation) reproduces the old placement exactly.
-4. Registers the mesh (`ps.register_surface_mesh("Build Plate", ...)`) —
-   Polyscope replaces any prior structure of the same name, so calling
-   this repeatedly (e.g. from GUI buttons) is safe.
+3. Loads the plate OBJ via the shared `load_mesh()` helper. The mesh's
+   local origin `(0,0,0)` sits almost exactly at the plate's
+   front-left-**top** corner (checked directly with `trimesh` bounds:
+   X:[0,258], Y:[-10,266], Z:[-0.75,0]) — but `position_mm` is meant to
+   mark the plate's **resting/bottom** face, not its top. So the local
+   vertices are shifted up by `PLATE_THICKNESS_MM` (0.75mm) in Z first —
+   local Z=-0.75 (bottom) becomes local Z=0 — before mapping to world
+   coordinates with the full homogeneous multiply `T_user_frame @
+   [x,y,z,1]` (same pattern `load_gcode()` uses, S1.3). `load_gcode()`
+   applies the identical shift to its plate-local waypoints, so the
+   printed path lands on the plate's real top surface instead of
+   `PLATE_THICKNESS_MM` below it.
+4. Registers the mesh (`ps.register_surface_mesh("Build Plate", ...)`)
+   and sets its color to `PLATE_COLOR`, a light cool gray distinct from
+   the orange G-code print — Polyscope replaces any prior structure of
+   the same name, so calling this repeatedly (e.g. from GUI buttons) is
+   safe.
 5. Calls `create_coordinate_frame(scale=USER_FRAME_SCALE_MM,
    origin=position_mm, rotation=R, name="User Frame")` — the same
    generalised triad helper used for the TCP frame (`TCP_Frame.md`), now
@@ -98,13 +104,16 @@ Module-level constants in `geometry_backend.py`:
 | `USER_FRAME_ORIGIN_MM` | Default base-frame `[x, y, z]` translation to the plate's corner, used when `load_build_plate()` is called argument-free (startup, Reset). Keep it in the same quadrant as the zero/home-pose TCP direction (see above) and within the ~830–1124mm reach envelope. |
 | `USER_FRAME_SCALE_MM` | Length of the fixed axis triad drawn at the corner, world units (mm). |
 | `BUILD_PLATE_POSITION_FILE` | Path to the saved-position JSON (`assets/buildPlate/saved_position.json`) read/written by the Save/Load Position buttons. |
+| `PLATE_THICKNESS_MM` | Measured thickness (mm) of `BambuLab_BuildPlate.obj`. Shifts the plate mesh and G-code waypoints up in their local Z before the `T_user_frame` transform, so `position_mm` marks the resting/bottom face and the print lands on the real top surface. |
+| `PLATE_COLOR` | RGB (0-1) color applied to the "Build Plate" mesh via `set_color()` — light cool gray, distinct from `GCODE_COLOR`. |
 
 ## Code anchors
 
 - `geometry_backend.py`: `load_build_plate()`, `save_build_plate_position()`,
   `load_saved_build_plate_position()`, `create_coordinate_frame()`
   (`rotation` param), `USER_FRAME_ORIGIN_MM`, `USER_FRAME_SCALE_MM`,
-  `BUILD_PLATE_POSITION_FILE`, `self.T_user_frame`.
+  `BUILD_PLATE_POSITION_FILE`, `PLATE_THICKNESS_MM`, `PLATE_COLOR`,
+  `self.T_user_frame`.
 - `gui_panel.py`: "Build Plate Orientation" panel (`bp_target_pos`,
   `bp_target_rpy`, `bp_status`).
 - `wiki/002_Architecture/settled.md` S1.2 — why this bypasses the Delta

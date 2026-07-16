@@ -21,6 +21,11 @@ TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
 
 BUILD_PLATE_DIR = "assets/buildPlate"
 BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
+PLATE_COLOR = (0.75, 0.75, 0.78)  # Light cool gray, visually distinct from the orange print
+# Measured thickness of BambuLab_BuildPlate.obj (its local Z span is [-0.75, 0],
+# origin at the top corner) -- position_mm marks the resting/bottom face, so the
+# top/print surface sits this far above it. See BuildPlate_UserFrame.md.
+PLATE_THICKNESS_MM = 0.75
 
 # Placed in the (-X, -Y) quadrant to match the arm's natural zero/home-pose
 # reach direction -- the opposite quadrant only reaches via a near-limit J1
@@ -97,7 +102,10 @@ class VisContent:
         pitch, yaw] degrees, XYZ fixed-angle convention (R = Rz(yaw) @
         Ry(pitch) @ Rx(roll)) -- same convention as solve_ik_tcp. Safe to
         call repeatedly (e.g. from the GUI's Move/Reset buttons); Polyscope
-        replaces the prior structures of the same names."""
+        replaces the prior structures of the same names. position_mm marks
+        the plate's resting/bottom face -- the raw mesh's local origin sits
+        at its top face instead, so local vertices are shifted up by
+        PLATE_THICKNESS_MM before the transform to compensate."""
         roll, pitch, yaw = np.deg2rad(rpy_deg)
         R = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
 
@@ -106,9 +114,11 @@ class VisContent:
         self.T_user_frame[:3, 3] = position_mm
 
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
-        homo = np.hstack([plate.vertices, np.ones((len(plate.vertices), 1))])
+        plate_verts_local = plate.vertices + np.array([0.0, 0.0, PLATE_THICKNESS_MM])
+        homo = np.hstack([plate_verts_local, np.ones((len(plate_verts_local), 1))])
         plate_verts_world = (self.T_user_frame @ homo.T).T[:, :3]
-        ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
+        plate_handle = ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
+        plate_handle.set_color(PLATE_COLOR)
 
         self.create_coordinate_frame(scale=USER_FRAME_SCALE_MM, origin=position_mm, rotation=R, name="User Frame")
 
@@ -197,7 +207,10 @@ class VisContent:
         (settled.md S1.8) -- Polyscope replaces the prior structure of the
         same name, same as _update_trajectory_curve. No-ops (instead of
         raising) if the G-code file doesn't exist yet, since it's now
-        reachable before any G-code has ever been loaded."""
+        reachable before any G-code has ever been loaded. Waypoints are
+        shifted up by PLATE_THICKNESS_MM before the transform, same as
+        load_build_plate(), so the print sits on the plate's actual top
+        surface rather than at position_mm (the resting/bottom face)."""
         filepath = os.path.join(GCODE_DIR, GCODE_FILE)
         if not os.path.exists(filepath):
             return
@@ -206,7 +219,7 @@ class VisContent:
         if len(waypoints) < 2:
             return
 
-        points_local = np.array([p for p, _ in waypoints])
+        points_local = np.array([p for p, _ in waypoints]) + np.array([0.0, 0.0, PLATE_THICKNESS_MM])
         homo = np.hstack([points_local, np.ones((len(points_local), 1))])
         nodes = (self.T_user_frame @ homo.T).T[:, :3]
 
