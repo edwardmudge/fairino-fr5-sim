@@ -1,7 +1,7 @@
 ---
 status: active
 scope: current-truth
-last_verified_against_code: 2026-07-09
+last_verified_against_code: 2026-07-17
 ---
 
 # Agent Boot File — FR5 Simulator (Current State)
@@ -30,8 +30,12 @@ corresponding FR5 arm configuration in an interactive 3D window.
 | Tool head + TCP tracking | done | See `wiki/003_Guides/TCP_Frame.md` |
 | Analytical IK | done | Closed-form solver, multi-solution — see `settled.md` S1.4/S1.5 |
 | TCP trajectory recording | done | See `wiki/003_Guides/TCP_Trajectory.md` |
-| G-code toolpath preview | done | G0/G1-only parser, fixed `model.gcode` path, reloads on plate reposition — see `wiki/003_Guides/Gcode_Toolpath.md`, `settled.md` S1.7/S1.8 |
+| G-code toolpath preview | done | G0/G1-only parser, fixed `model.gcode` path, registered via an explicit "Load G-code preview" click — does **not** auto-reload on plate reposition (that auto-reload was removed, see `settled.md` S1.23) — see `wiki/003_Guides/Gcode_Toolpath.md`, `settled.md` S1.7/S1.8 |
 | Build-plate position/orientation | done | Re-posable via Move/Reset/Save/Load Position buttons — see `wiki/003_Guides/BuildPlate_UserFrame.md`, `settled.md` S1.6 |
+| Toolpath IK precompute | done | Chunked (`PRECOMPUTE_CHUNK_SIZE` waypoints/frame), pausable/resumable/cancellable, ground-clearance filtered — see `settled.md` S1.14/S1.15 |
+| Toolpath precompute disk cache | done | `assets/models/gcode/model.precompute.npz`, keyed on G-code SHA-256 + build-plate pose + version; loaded before re-solving on `run_toolpath_ik_precompute()` — see `settled.md` S1.21 |
+| Toolpath playback | done | Progressive-reveal (beads start invisible, revealed as playback crosses them), render-throttled (`PLAYBACK_RENDER_STRIDE`, `PLAYBACK_LOOKAHEAD_BEADS`) — see `settled.md` S1.16/S1.17-S1.20 |
+| Precompute/playback invalidation on plate move | done | In-session: `load_build_plate()` compares the new pose against the pose captured at precompute-start and invalidates both if it differs — see `settled.md` S1.22 |
 
 ## Directory Structure
 
@@ -62,4 +66,4 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-See `wiki/002_Architecture/settled.md` (S1.1–S1.8).
+See `wiki/002_Architecture/settled.md` (S1.1–S1.24).

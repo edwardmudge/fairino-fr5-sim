@@ -1,7 +1,7 @@
 import polyscope.imgui as psim
 import numpy as np
 
-from geometry_backend import USER_FRAME_ORIGIN_MM
+from geometry_backend import USER_FRAME_ORIGIN_MM, PRECOMPUTE_CHUNK_SIZE
 
 # FR5 practical joint slider ranges (degrees), asymmetric per joint.
 # Source: docs/FR5_Joint_Limits.md "Practical Slider Ranges"
@@ -39,25 +39,49 @@ class UI_Menu:
         self.bp_target_pos = np.array(USER_FRAME_ORIGIN_MM, dtype=float)
         self.bp_target_rpy = np.zeros(3)
         self.bp_status = ""
-        self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100 (roadmap Stage5_README.md 5.7)
-        self.toolpath_ik_solutions = []   # list of angle arrays, indexed [0]/[2]/[4] by the radio button loop
-        self.selected_solution = 0
+        self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100
+        # -- snapped down automatically if it ever outruns precompute
+
+    def _section_gap(self):
+        """Uniform small gap between the numbered top-level sections below."""
+        psim.Spacing()
+        psim.Spacing()
+
+    def _clear_ik_solutions(self):
+        """Discard the current IK solution list -- called wherever the pose
+        or target it was solved for stops being current, so a stale
+        solution can't be applied via a leftover radio button."""
+        self.ik_solutions = []
+        self.ik_status = ""
+        self.ik_selected_index = 0
 
     def render(self):
         """This function needs to be called by Polyscope every frame"""
         self.content.record_trajectory_point()
         self.content.step_toolpath_ik_precompute()
         self.content.advance_toolpath_playback(max(1, int(self.playback_speed)))
+        if self.content.playback_waiting:
+            # Snap down reactively the moment playback hits precompute's throughput
+            self.playback_speed = min(self.playback_speed, float(PRECOMPUTE_CHUNK_SIZE))
+
+        if not self.content.playback_running:
+            # Keep the FK sliders following the arm's real pose whenever
+            # something other than these sliders could be driving it
+            # (playback). A no-op once the sliders themselves are the last
+            # thing to call update_arm(), since that keeps the two in sync.
+            self.joint_angles = np.array(self.content.current_joint_angles, dtype=float)
 
         # 1. Panel title
         psim.TextUnformatted("Fairino FR5 Arm Control")
         psim.Separator()
+        self._section_gap()
 
         # 2. Trajectory section
         changed, self.trajectory_enabled = psim.Checkbox("Enable Trajectory", self.trajectory_enabled)
         if changed:
             self.content.set_trajectory_enabled(self.trajectory_enabled)
         psim.Separator()
+        self._section_gap()
 
         # 3. Data loading section
         if psim.TreeNode("I/O Operations"):
@@ -67,21 +91,28 @@ class UI_Menu:
             psim.Spacing()
             psim.Spacing()
 
-            if psim.Button("Run"):
-                self.content.run_toolpath_playback()
+            if self.content.playback_running:
+                if psim.Button("Pause"):
+                    self.content.pause_toolpath_playback()
+            else:
+                if psim.Button("Run Toolpath"):
+                    self.content.run_toolpath_playback()
+                    if self.content.playback_running:
+                        # Only clear IK view state if playback actually
+                        # started (e.g. not "Run Precompute first") -- the
+                        # FK sliders resync to the real pose automatically
+                        # once playback stops (see the top of render()).
+                        self.ik_target_pos = np.zeros(3)
+                        self.ik_target_rpy = np.zeros(3)
+                        self._clear_ik_solutions()
 
             psim.SameLine()
 
-            if psim.Button("Pause"):
-                self.content.pause_toolpath_playback()
-
-            psim.SameLine()
-
-            if psim.Button("Reset"):
+            if psim.Button("Reset Toolpath"):
                 self.content.reset_toolpath_playback()
 
             psim.SameLine()
-            psim.TextUnformatted(self.content.playback_status)
+            psim.TextWrapped(self.content.playback_status)
 
             if psim.TreeNode("Toolpath Settings"):
                 _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 1.0, 100.0)
@@ -102,25 +133,24 @@ class UI_Menu:
                 total = self.content.precompute_total
                 fraction = (self.content.precompute_index / total) if total else 0.0
                 psim.ProgressBar(fraction, overlay=f"{fraction * 100:.0f}%" if total else "")
-                psim.TextUnformatted(self.content.precompute_status)
-
-                psim.Spacing()
-                for i, sol in enumerate(self.toolpath_ik_solutions):
-                    changed, self.selected_solution = psim.RadioButton(
-                        f"Solution {i+1}/{len(self.toolpath_ik_solutions)}: J1={sol[0]:.1f} J3={sol[2]:.1f} J5={sol[4]:.1f}",
-                        self.selected_solution, i
-                    )
+                psim.TextWrapped(self.content.precompute_status)
                 psim.TreePop()
             psim.TreePop()
+        self._section_gap()
 
         # 4. Build plate orientation section -- see settled.md S1.6.
         if psim.TreeNode("Build Plate Orientation"):
+            # Disabled during playback -- moving the plate mid-print
+            # invalidates and cancels the running toolpath (settled.md
+            # S1.22), same reason FK/IK are disabled below.
+            psim.BeginDisabled(self.content.playback_running)
+
             _, self.bp_target_pos = psim.InputFloat3("Target Position (mm)", self.bp_target_pos)
             _, self.bp_target_rpy = psim.InputFloat3("Target RPY (deg)", self.bp_target_rpy)
 
             if psim.Button("Move"):
                 self.content.load_build_plate(self.bp_target_pos, self.bp_target_rpy)
-                self.bp_status = "Build plate moved -- click 'Load G-code preview' to refresh"
+                self.bp_status = "Build plate moved"
 
             psim.SameLine()
 
@@ -128,14 +158,13 @@ class UI_Menu:
                 self.bp_target_pos = np.array(USER_FRAME_ORIGIN_MM, dtype=float)
                 self.bp_target_rpy = np.zeros(3)
                 self.content.load_build_plate()
-                self.bp_status = "Reset to default -- click 'Load G-code preview' to refresh"
+                self.bp_status = "Reset to default"
 
             psim.Spacing()
             psim.Spacing()
 
             if psim.Button("Save Position"):
-                self.content.save_build_plate_position(self.bp_target_pos, self.bp_target_rpy)
-                self.bp_status = "Position saved"
+                self.bp_status = self.content.save_build_plate_position(self.bp_target_pos, self.bp_target_rpy)
 
             psim.SameLine()
 
@@ -144,17 +173,23 @@ class UI_Menu:
                 if pos is not None:
                     self.bp_target_pos = pos
                     self.bp_target_rpy = rpy
-                    self.bp_status = "Loaded saved position -- click 'Load G-code preview' to refresh"
+                    self.bp_status = "Loaded saved position"
                 else:
                     self.bp_status = status
 
             psim.Spacing()
             psim.Spacing()
-            psim.TextUnformatted(self.bp_status)
+            psim.TextWrapped(self.bp_status)
+            psim.EndDisabled()
             psim.TreePop()
+        self._section_gap()
 
         # 5. Forward kinematics section
         if psim.TreeNode("Forward Kinematics"):
+            # Disabled during playback -- these sliders would otherwise
+            # fight advance_toolpath_playback() for the arm's pose.
+            psim.BeginDisabled(self.content.playback_running)
+
             changed_any = False
             for i in range(6):
                 lo, hi = JOINT_LIMITS[i]
@@ -168,26 +203,36 @@ class UI_Menu:
                 self.joint_angles = np.array(HOME_JOINT_ANGLES, dtype=float)
                 self.content.update_arm(self.joint_angles)
                 self.content.clear_trajectory()
+                # Any IK solutions on screen were solved for the pre-reset
+                # pose -- applying one now would silently undo this reset.
+                self._clear_ik_solutions()
 
-            psim.Spacing()
-            psim.Spacing()
+            psim.EndDisabled()
             psim.TreePop()
+        self._section_gap()
 
         # 6. Inverse kinematics section -- target is the TCP pose, not the
         # flange (see docs/FR5_IK_Derivation.md).
         if psim.TreeNode("Inverse Kinematics"):
-            _, self.ik_target_pos = psim.InputFloat3("Target Position (mm)", self.ik_target_pos)
-            _, self.ik_target_rpy = psim.SliderFloat3("Target RPY (deg)", self.ik_target_rpy, -180, 180)
+            # Disabled during playback, same reason as Forward Kinematics above.
+            psim.BeginDisabled(self.content.playback_running)
+
+            target_changed_pos, self.ik_target_pos = psim.InputFloat3("Target Position (mm)", self.ik_target_pos)
+            target_changed_rpy, self.ik_target_rpy = psim.SliderFloat3("Target RPY (deg)", self.ik_target_rpy, -180, 180)
+            if target_changed_pos or target_changed_rpy:
+                # Existing solutions were solved for the old target -- stop
+                # showing them as if they applied to the one on screen now.
+                self._clear_ik_solutions()
 
             if psim.Button("Solve IK"):
                 self.ik_solutions, self.ik_status = self.content.solve_ik_tcp(
                     self.ik_target_pos, self.ik_target_rpy, JOINT_LIMITS)
                 self.ik_selected_index = 0
                 if self.ik_solutions:
-                    self.joint_angles = self.ik_solutions[0][0]
+                    self.joint_angles = self.ik_solutions[0][0].copy()
                     self.content.update_arm(self.joint_angles)
 
-            psim.TextUnformatted(self.ik_status)
+            psim.TextWrapped(self.ik_status)
 
             if self.ik_solutions:
                 # No verified anatomical naming (shoulder/elbow/wrist left-right)
@@ -201,9 +246,9 @@ class UI_Menu:
                     )
                     changed, self.ik_selected_index = psim.RadioButton(label, self.ik_selected_index, i)
                     if changed:
-                        self.joint_angles = angles
+                        self.joint_angles = angles.copy()
                         self.content.update_arm(self.joint_angles)
 
-            psim.Spacing()
-            psim.Spacing()
+            psim.EndDisabled()
             psim.TreePop()
+        self._section_gap()

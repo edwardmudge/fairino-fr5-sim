@@ -526,7 +526,8 @@ split with `run_/step_/pause_/cancel_toolpath_ik_precompute` (four):
    -- no re-parsing, no restart. There is no separate `resume_` function;
    `run_` does double duty for both "start fresh" and "resume", exactly as
    the existing UI's single "Run" button does for playback
-   (`gui_panel.py:70-71`, which has never distinguished the two either).
+   (`gui_panel.py`'s Run/Pause buttons, which have never distinguished
+   the two either).
 2. `pause_toolpath_ik_precompute()` mirrors playback **Pause**: sets
    `precompute_running = False` only, leaving `precompute_index` and
    `precompute_joint_path` untouched.
@@ -1148,3 +1149,265 @@ pipeline would be needed for the preview regardless of what triggers a
 reload.
 
 **Verified on:** 2026-07-17
+
+## S1.24 Playback-reset factored into `_reset_toolpath_playback_state()`; fixes a real crash in the GUI's Cancel Precompute button
+
+**Decision:** `load_build_plate()`'s invalidation branch (S1.22) reset
+playback state inline (`playback_running`/`playback_index`/
+`playback_total`/`gcode_bead_verts_full`) rather than through
+`cancel_toolpath_ik_precompute()`, specifically because that function
+alone had been found insufficient. But `cancel_toolpath_ik_precompute()`
+is also what the GUI's "Cancel Precompute" button calls directly
+(`gui_panel.py`) -- so that fix only ever covered the plate-move trigger,
+not the button. Since `advance_toolpath_playback()` indexes
+`precompute_joint_path` directly and doesn't stop being `playback_running`
+just because that list got emptied, clicking "Cancel Precompute" while a
+playback was active (or already finished, with a nonzero `playback_index`)
+and then clicking "Run" again reached `self.precompute_joint_path[self.
+playback_index]` against a now-empty list -- `IndexError`, raised from
+inside the per-frame Polyscope callback. Confirmed by direct reproduction
+(scripted, not just read) before this fix landed.
+
+Fixed by extracting the playback-reset block into
+`_reset_toolpath_playback_state()` (also removing the stale "G-code
+Print" mesh registration, which previously stayed visible at the old pose
+until the next Run/Reset) and calling it from both
+`cancel_toolpath_ik_precompute()` and `load_build_plate()`'s invalidation
+branch -- the latter now just calls the former, no longer duplicating the
+reset inline. Also added a defensive bounds guard at the top of
+`advance_toolpath_playback()` (refuse cleanly with a status message if
+`playback_index >= len(precompute_joint_path)`) as a second line of
+defense, since it also covers the G-code-content-changed-without-a-plate-
+move gap S1.22 knowingly left open.
+
+**Reason:** the state-reset logic existed in exactly one caller
+(`load_build_plate`) when a second caller
+(`cancel_toolpath_ik_precompute`, reachable directly from the GUI) needed
+the same invariant and didn't get it -- a duplication-avoidance gap, not a
+new design decision.
+
+**Verified on:** 2026-07-17 -- scripted repro (drive precompute to
+completion via disk cache, play back to completion, cancel precompute,
+re-run playback) raised `IndexError` before this fix and refused cleanly
+with `"Run Precompute first"` after it.
+
+## S1.25 Playback starting during a still-running precompute now chases the live frontier instead of finishing on a frozen snapshot
+
+**Decision:** `advance_toolpath_playback()` (`geometry_backend.py`) no
+longer caps its advance against a stored `playback_total` -- that field is
+removed entirely (`__init__`, `_reset_toolpath_playback_state()`,
+`_init_toolpath_playback()`). The cap is now `len(self.precompute_joint_path)`
+(the live frontier), re-read every call, so it grows as
+`step_toolpath_ik_precompute()` appends more solved waypoints in the
+background.
+
+Reaching the frontier now branches on whether precompute is truly done
+(`precompute_index >= precompute_total`):
+- If exhausted, playback finishes for real (`"Playback complete"`,
+  unchanged from before).
+- If not exhausted (precompute still running, or merely paused with more
+  waypoints left), playback holds at the frontier -- `playback_running`
+  stays `True`, status becomes `"Waiting for precompute (n/N solved)"` --
+  and resumes advancing on its own the moment the frontier grows, with no
+  further user action. The Polyscope push (arm pose + bead reveal) is
+  forced once when the wait begins (so the arm doesn't lag mid-stride at
+  the parked pose) but not repeated on subsequent idle frames at the same
+  index. The "Playing x/y" status denominator changed from the old
+  snapshot to `precompute_total - 1`, the real final count, stable from
+  the moment precompute starts.
+
+No GUI or Speed-slider changes -- `gui_panel.py` already renders whatever
+`playback_status` string the backend produces.
+
+**Reason:** `playback_total` was set once, at whichever moment playback
+first initialized (first "Run Toolpath" click, or "Reset"), and never
+refreshed. Starting playback while precompute was still mid-way solved
+against that one small snapshot forever, so playback declared
+`"Playback complete"` and stopped once it worked through only the
+waypoints solved *so far* -- regardless of how much more precompute later
+produced. The user confirmed they want to keep starting playback early
+(no requirement to block it), just fixed so it waits instead of falsely
+finishing -- explicitly declining a slider-based "drop to 1x speed"
+literal reading in favor of the cap naturally holding at the frontier.
+
+The pre-existing defensive guard (`playback_index >= len(precompute_joint_path)`
+-> `"Toolpath data changed -- reset playback"`, S1.24) already covers
+precompute aborting mid-run, which forcibly empties `precompute_joint_path`
+back to `[]` -- untouched by this change, still the correct behavior.
+
+**Non-revertible unless:** none identified -- confined to
+`geometry_backend.py`, reversible by editing that file alone.
+
+**Verified on:** 2026-07-17 -- scripted repro (real solve path, disk cache
+moved aside): started precompute on the real ~181k-waypoint `model.gcode`,
+solved 3 chunks (75/181375), started playback, then drove
+`advance_toolpath_playback(1000)` repeatedly. Playback held at index 74
+with status `"Waiting for precompute (75/181375 solved)"` and
+`playback_running` stayed `True` instead of finishing. One more precompute
+chunk (100/181375) let playback advance to index 99 with no extra calls.
+Ran precompute to full completion, then playback advanced to the real end
+(index 181374) and reported `"Playback complete"`.
+
+**Superseded by:** S1.26 -- the "explicitly declining a slider-based
+'drop to 1x speed' literal reading" call above was reconsidered once the
+user asked directly for a physical slider reaction to hitting the
+frontier; S1.26 adds that as a reactive snap-down, not a re-litigation of
+the frontier/exhaustion logic itself, which is unchanged.
+
+## S1.26 Speed slider value snaps down to `PRECOMPUTE_CHUNK_SIZE` reactively, the instant playback actually hits the compute limit; the 1-100 range itself is untouched
+
+**Decision:** `gui_panel.py`'s `render()` now checks
+`self.content.playback_waiting` (a new public flag on `VisContent`, set
+every `advance_toolpath_playback()` call in lockstep with the `waiting`
+local S1.25 already computed) immediately after calling
+`advance_toolpath_playback()`. Whenever it's `True`:
+```python
+self.playback_speed = min(self.playback_speed, float(PRECOMPUTE_CHUNK_SIZE))
+```
+The Speed slider itself (`psim.SliderFloat("Speed", ..., 1.0, 100.0)`) is
+untouched -- its range stays 1-100 at all times. Only the current value
+gets pulled down, and only reactively, the moment playback is actually
+observed catching up to precompute's frontier -- not preemptively just
+because `precompute_running` is `True`. Nothing raises the value back up
+automatically once precompute finishes; `playback_waiting` simply stops
+becoming `True` again, so the user is free to drag the slider back up
+themselves whenever they like.
+
+**Reason:** First draft of this proposed capping the slider's *max* to
+`PRECOMPUTE_CHUNK_SIZE` for the whole time `precompute_running` was `True`
+-- rejected by the user: they want the slider free to sit at 100x the
+entire time precompute is running, and only want it physically pulled down
+once playback actually goes past the computed waypoints and hits the
+limit, snapping to whatever rate the waypoints are actually being computed
+at (`PRECOMPUTE_CHUNK_SIZE`, the same per-frame unit `playback_speed`
+already uses -- both `step_toolpath_ik_precompute()` and
+`advance_toolpath_playback()` are called once per `render()` frame,
+S1.14/S1.16). This directly builds on S1.25 (which introduced the
+`waiting` state as a status message only); S1.26 is purely a GUI reaction
+to that already-existing signal, promoted to a public field so
+`gui_panel.py` doesn't need to re-derive it from `precompute_joint_path`
+internals.
+
+**Non-revertible unless:** none identified -- `playback_waiting` is a pure
+addition to `VisContent`'s public surface, and the `gui_panel.py` change
+is 4 lines; both revertible by editing those two files alone.
+
+**Verified on:** 2026-07-17
+
+## S1.27 Forward/Inverse Kinematics sections greyed out via `psim.BeginDisabled`/`EndDisabled` while a toolpath is playing
+
+**Decision:** Both the Forward Kinematics (`gui_panel.py`, six `J1`-`J6`
+sliders + Reset) and Inverse Kinematics (`gui_panel.py`, target
+position/RPY + Solve IK + solution radio buttons) sections now wrap their
+entire interactive body in `psim.BeginDisabled(self.content.playback_running)`
+/ `psim.EndDisabled()`, immediately inside each `psim.TreeNode(...)` block
+(the TreeNode header itself stays live -- the section can still be
+expanded/collapsed, just its widgets go inert). `docs/Polyscope_Quickstart.md`
+gained a short entry for this widget pair: unlike the slider/input/button
+widgets already documented there, it returns `None`, not `(changed,
+value)`, and disabled widgets automatically report `changed=False`, so no
+extra `if playback_running: ...` guards were needed around the existing
+`update_arm()` calls.
+
+Gated specifically on `playback_running`, not `precompute_running`:
+`step_toolpath_ik_precompute()` never calls `update_arm()`, so precompute
+running on its own (before "Run Toolpath" is pressed) has nothing to
+conflict with and both sections stay fully interactive during it. The
+S1.25 "waiting for precompute" hold keeps `playback_running` `True`, so
+it's correctly covered too (the arm is deliberately parked then, same as
+mid-playback). Pausing (`playback_running` -> `False`) re-enables both
+sections immediately.
+
+**Reason:** Both sections call `self.content.update_arm(...)` directly
+from user-driven widgets, and `advance_toolpath_playback()` also calls
+`update_arm()` every frame while playback runs -- nothing previously
+stopped a user from nudging an FK slider or clicking Solve IK mid-playback
+and yanking the rendered arm to an unrelated pose, corrupting the running
+toolpath animation. The user asked for the FK/IK sliders to have "no
+effect on the simulation" while a toolpath plays; `BeginDisabled` was
+chosen over ad-hoc `if playback_running: return` guards scattered across
+each callback because it's the standard ImGui idiom, gives free visual
+feedback (greyed-out widgets) that the section is inert, and needs no
+special-casing per widget.
+
+**Non-revertible unless:** none identified -- confined to `gui_panel.py`
+(plus a docs addition), reversible by removing the four `BeginDisabled`/
+`EndDisabled` calls.
+
+**Verified on:** 2026-07-17 -- syntax-checked, then drove real `render()`
+frames via `ps.frame_tick()` (same headless technique noted in S1.20) with
+`playback_running` toggled `True`/`False` across frames to confirm the
+`BeginDisabled`/`EndDisabled` pairing never mismatches in either branch;
+no ImGui stack assertion or exception in either state.
+
+## S1.28 Pre-v0.1 bug-fix pass: FK/IK view state, Build Plate gating, and precompute-failure cleanup
+
+**Decision:** A code review ahead of the v0.1 commit surfaced seven real
+bugs in how the GUI and backend interact; all seven are fixed:
+
+1. `gui_panel.py`'s `render()` now resyncs `self.joint_angles` to
+   `self.content.current_joint_angles` every frame `playback_running` is
+   `False`. Previously the FK sliders only ever changed via direct user
+   interaction, so pausing mid-playback left them showing a stale value;
+   nudging one afterward would call `update_arm()` with that stale value
+   and yank the arm off its correct paused pose. The resync is a no-op
+   whenever the sliders themselves were the last thing to call
+   `update_arm()`, so it never fights live interaction -- only the
+   dead time right after playback stops.
+2. Build Plate Orientation is now `BeginDisabled`-gated on
+   `playback_running`, matching Forward/Inverse Kinematics (S1.27).
+   Moving the plate mid-print invalidates and cancels the running
+   toolpath (S1.22); it was previously the one panel not protected
+   against triggering that mid-print.
+3. The Forward Kinematics "Reset" button and editing the IK target
+   position/RPY both now call a new `UI_Menu._clear_ik_solutions()`
+   helper. Previously neither invalidated a previously-solved
+   `ik_solutions` list, so a leftover radio button could apply a
+   solution computed for a pose/target that no longer matches what's
+   on screen.
+4. The "Run Toolpath" click handler only clears IK view state when
+   `self.content.playback_running` is actually `True` afterward, not
+   unconditionally -- clicking it before ever running a precompute no
+   longer zeroes the IK target/solutions for no reason (playback never
+   started, so nothing needed clearing). The FK zeroing this handler
+   used to do is gone entirely, superseded by fix 1's general resync.
+5. `geometry_backend.py`: `step_toolpath_ik_precompute()`'s two failure
+   branches now share a new `_abort_toolpath_ik_precompute()` helper
+   (also used by `cancel_toolpath_ik_precompute()`) that resets
+   `precompute_index`/`precompute_total`/`precompute_waypoints`/
+   `precompute_cache_meta` and calls `_reset_toolpath_playback_state()`
+   -- previously only `precompute_joint_path` was cleared on failure,
+   leaving `precompute_index` stale (a misleading frozen progress bar),
+   `precompute_waypoints` still set (so "Run Precompute" silently
+   *resumed* into the emptied path instead of restarting), and any
+   already-running playback (started mid-precompute per S1.25) with a
+   stale `gcode_bead_verts_full` that made a subsequent "Run Toolpath"
+   silently no-op.
+6. `load_data()` now caches `self.T_zero_inv` once instead of
+   `apply_delta_transform()`/`_moving_geometry_deltas()` each calling
+   `np.linalg.inv()` on the same fixed zero-pose matrices every single
+   frame (`apply_delta_transform` alone did it 9 times per call, 4
+   redundantly on the same `T_zero[5]`). Not a bug, but the accompanying
+   efficiency finding was fixed in the same pass since it touched the
+   same functions.
+
+**Reason:** All seven were found by an explicit code-review pass the user
+requested ahead of the v0.1 commit, each verified against the actual code
+(not just agent speculation) before being reported, then fixed and
+re-verified. See the review's findings for the full failure scenarios.
+
+**Non-revertible unless:** none identified -- confined to
+`geometry_backend.py` and `gui_panel.py`.
+
+**Verified on:** 2026-07-17 -- syntax-checked; two pre-existing scripted
+repros (chase-precompute, speed-slider-snap) re-run unchanged; new
+scripted repros directly exercising each fix (forced an unreachable
+waypoint to trigger the precompute-failure path and confirmed
+`precompute_index`/`total`/`waypoints`/`cache_meta` all reset correctly
+and a follow-up `run_toolpath_ik_precompute()` does a fresh
+reload/restart rather than a stale resume; confirmed `T_zero_inv` matches
+a fresh `np.linalg.inv()` for all 6 entries and `apply_delta_transform`'s
+output is bit-identical; drove real `render()` frames via `ps.frame_tick()`
+to confirm the FK resync fires only while not playing and the new
+Build Plate `BeginDisabled` stays balanced across every
+playback/precompute state).

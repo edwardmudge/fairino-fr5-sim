@@ -85,15 +85,22 @@ pattern) — position/RPY are plain `InputFloat3` fields, not sliders:
 | **Move** | `load_build_plate(bp_target_pos, bp_target_rpy)` with the current field values. |
 | **Reset** | Resets the fields to `USER_FRAME_ORIGIN_MM`/zero-rotation, then calls `load_build_plate()` argument-free — back to the exact original placement. |
 | **Save Position** | `save_build_plate_position(...)` writes the current field values to `assets/buildPlate/saved_position.json`. |
-| **Load Saved Position** | `load_saved_build_plate_position()` reads that file (if present), applies it immediately, and syncs the input fields; on failure (no saved file yet) shows a status message, but leaves `bp_status` unchanged on success (`gui_panel.py`). |
+| **Load Saved Position** | `load_saved_build_plate_position()` reads that file (if present), applies it immediately, and syncs the input fields; on failure (no saved file yet) or success alike, `gui_panel.py` sets a `bp_status` message (on success, prompting a follow-up G-code reload — see below). |
 
 Loading a saved position only ever happens on that explicit click —
 `__init__` never reads the saved-position file automatically, so every
 fresh start still begins from `USER_FRAME_ORIGIN_MM`/zero-rotation.
 
-Move, Reset, and Load Saved Position all also call `load_gcode()` again,
-so an already-loaded G-code toolpath stays in sync with the plate's new
-pose instead of going stale (`settled.md` S1.8).
+**Move, Reset, and Load Saved Position do *not* reload the G-code
+preview.** Each just sets a `bp_status` message prompting an explicit
+"Load G-code preview" click — an already-loaded preview mesh is left
+showing the *old* plate pose until that click happens. This supersedes
+S1.8's original button-triggered auto-reload, which was removed by
+`settled.md` S1.23 specifically because it made the plate move look
+fully in sync (preview jumped correctly) while the toolpath IK
+precompute/playback state (a separate concern, unaffected by this page)
+silently went stale underneath it — see `settled.md` S1.22/S1.23 and
+`wiki/003_Guides/Gcode_Toolpath.md`.
 
 ## How to tune it
 

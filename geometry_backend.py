@@ -20,26 +20,18 @@ TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP traje
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
 TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
 
-PLAYBACK_RENDER_STRIDE = 50  # Push arm/bead updates to Polyscope every Nth solved
-# waypoint, not every frame -- precompute_joint_path itself is untouched (roadmap
-# Stage5_README.md 5.9). Waypoints, not frames, since step_count varies 1-100 with
-# the Speed slider. update_vertex_positions() re-uploads the FULL bead buffer every
-# call, not just the changed slice (docs/Polyscope_Quickstart.md), so fewer/coarser
-# pushes cut real GPU upload cost, not just Python-side work -- settled.md S1.18.
+PLAYBACK_RENDER_STRIDE = 50  # Push arm/bead updates to Polyscope every Nth
+# solved waypoint, not every frame -- full-buffer re-uploads make coarser
+# pushes cut real GPU cost, not just Python-side work.
 
-TRAJECTORY_CURVE_RENDER_STRIDE = 5  # Re-register the "Trajectory" curve network
-# every Nth recorded sample, not every sample -- trajectory_points itself stays
-# dense (roadmap Stage5_README.md 5.9); register_curve_network() has no incremental
-# grow-node-count API, so this only throttles how often the O(n) rebuild fires.
+TRAJECTORY_CURVE_RENDER_STRIDE = 5  # Re-register the "Trajectory" curve
+# network every Nth recorded sample -- it has no incremental grow API, so
+# this throttles how often the O(n) rebuild fires.
 
 PLAYBACK_LOOKAHEAD_BEADS = 5000  # How far ahead of current progress the
-# registered "G-code Print" mesh is grown, in beads -- kept close to actual
-# playback progress instead of registering the full K-bead mesh from frame 1
-# (settled.md S1.20). Real per-frame render cost turned out to scale with the
-# registered mesh size, not update frequency alone (S1.17-S1.19 measured this
-# with a flawed screenshot-based proxy that masked it -- see S1.20). Value is
-# an empirical tuning knob, balancing re-registration frequency against how
-# far ahead of true progress the draw cost is allowed to run.
+# registered "G-code Print" mesh is grown, in beads -- render cost scales
+# with registered mesh size, so this stays close to actual progress instead
+# of registering the full mesh from frame 1.
 
 BUILD_PLATE_DIR = "assets/buildPlate"
 BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
@@ -102,10 +94,7 @@ class VisContent:
         self.trajectory_enabled = True
         self.trajectory_handle = None    # Set once a curve exists, see _update_trajectory_curve
 
-        # Chunked toolpath IK precompute state -- mirrors gui_panel.py's
-        # is_playing/playback_waypoint_index one-to-one (see settled.md S1.14),
-        # just on the backend since real work (G-code parsing, chunked IK)
-        # has to live there. See run_toolpath_ik_precompute().
+        # Chunked toolpath IK precompute state, see run_toolpath_ik_precompute()
         self.precompute_running = False
         self.precompute_index = 0
         self.precompute_total = 0
@@ -117,24 +106,21 @@ class VisContent:
         self.precompute_status = ""
         self.precompute_cache_meta = None  # Cache key captured at precompute-start, see run_toolpath_ik_precompute()
 
-        # Progressive-reveal playback state -- roadmap Stage5_README.md 5.7,
-        # settled.md S1.16. Mirrors the precompute state above: playback_running
-        # is is_playing's backend equivalent, playback_index persists across
+        # Progressive-reveal playback state -- playback_index persists across
         # pause, only reset_toolpath_playback() zeroes it.
         self.playback_running = False
         self.playback_index = 0
         self._last_rendered_playback_index = 0  # Throttles the Polyscope push in advance_toolpath_playback, see PLAYBACK_RENDER_STRIDE
-        self.playback_total = 0
         self.playback_status = ""
+        self.playback_waiting = False  # True when caught up to precompute's frontier but it isn't exhausted yet, see advance_toolpath_playback()
         self.gcode_bead_verts_full = None       # (K*8,3) world space, real bead positions
         self.gcode_bead_faces = None
         self.gcode_bead_reveal_index = None     # (K,) sorted ascending, see _build_gcode_beads
         self.gcode_bead_face_prefix = None      # (K+1,) cumulative triangle count, see _build_gcode_beads
         self.gcode_bead_verts_current = None    # (K*8,3) working copy, mutated as beads reveal
         self.gcode_print_handle = None          # Polyscope handle, reused across advance() calls
-        self._registered_bead_capacity = 0      # How many beads are actually registered with
-        # Polyscope right now -- kept close to playback progress, not pinned at the full K from
-        # frame 1, so draw/upload cost tracks progress (settled.md S1.20). See PLAYBACK_LOOKAHEAD_BEADS.
+        self._registered_bead_capacity = 0      # How many beads are actually registered
+        # with Polyscope right now, see PLAYBACK_LOOKAHEAD_BEADS
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -202,12 +188,6 @@ class VisContent:
                 self.cancel_toolpath_ik_precompute()
                 self.precompute_status = "Build plate moved -- precompute invalidated, run again"
 
-                self.playback_running = False
-                self.playback_index = 0
-                self.playback_total = 0
-                self.gcode_bead_verts_full = None
-                self.playback_status = ""
-
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
         plate_verts_local = plate.vertices + np.array([0.0, 0.0, PLATE_THICKNESS_MM])
         homo = np.hstack([plate_verts_local, np.ones((len(plate_verts_local), 1))])
@@ -222,13 +202,20 @@ class VisContent:
         """Write the given build-plate pose to assets/buildPlate/ so it can
         be recalled later via load_saved_build_plate_position() -- see the
         GUI's "Save Position" button. Only ever called on explicit user
-        action, never automatically."""
+        action, never automatically. Returns a status message; a write
+        failure (missing directory, permissions) is reported back rather
+        than left to raise out of the button callback, since silently
+        claiming success here would be worse than the crash it avoids."""
         data = {
             "position_mm": np.asarray(position_mm, dtype=float).tolist(),
             "rpy_deg": np.asarray(rpy_deg, dtype=float).tolist(),
         }
-        with open(BUILD_PLATE_POSITION_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        try:
+            with open(BUILD_PLATE_POSITION_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError as e:
+            return f"Failed to save position: {e}"
+        return "Position saved"
 
 
     def load_saved_build_plate_position(self):
@@ -451,7 +438,13 @@ class VisContent:
         if not os.path.exists(filepath):
             return
 
-        waypoints = self.parse_gcode(filepath)
+        try:
+            waypoints = self.parse_gcode(filepath)
+        except OSError:
+            # File can be overwritten mid-read by a Cura re-export between
+            # the exists() check above and here -- no-op like the missing-
+            # file case rather than crashing the per-frame callback.
+            return
         if len(waypoints) < 2:
             return
 
@@ -827,8 +820,18 @@ class VisContent:
                 self.precompute_status = "No G-code file found"
                 return
 
-            gcode_points = self.parse_gcode(filepath)
-            waypoints, R_target = self.build_toolpath_waypoints_world(gcode_points)
+            # filepath can be overwritten mid-read by a Cura re-export
+            # between the exists() check above and here -- fail closed with
+            # a status message rather than letting the exception escape the
+            # per-frame Polyscope callback (settled.md notes model.gcode
+            # "gets overwritten by each new Cura export").
+            try:
+                gcode_points = self.parse_gcode(filepath)
+                waypoints, R_target = self.build_toolpath_waypoints_world(gcode_points)
+                cache_meta = self._toolpath_cache_meta(self.T_user_frame)
+            except OSError:
+                self.precompute_status = "G-code file changed while loading -- try again"
+                return
             if not waypoints:
                 self.precompute_status = "No waypoints to solve"
                 return
@@ -841,7 +844,7 @@ class VisContent:
             self.precompute_joint_path = []
             self.precompute_ref = (
                 reference_joint_angles if reference_joint_angles is not None else self.current_joint_angles)
-            self.precompute_cache_meta = self._toolpath_cache_meta(self.T_user_frame)
+            self.precompute_cache_meta = cache_meta
 
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
@@ -855,27 +858,37 @@ class VisContent:
 
 
     def cancel_toolpath_ik_precompute(self):
-        """Mirrors the GUI's playback Reset button: stop and discard the
-        precompute entirely, resetting progress back to zero -- a following
-        run_toolpath_ik_precompute() call starts completely fresh
-        (re-parses the G-code), matching Reset zeroing playback_waypoint_index."""
+        """Stop and discard the precompute entirely, resetting progress to
+        zero -- a following run_toolpath_ik_precompute() call starts fresh."""
+        self._abort_toolpath_ik_precompute()
+        self.precompute_status = ""
+
+
+    def _abort_toolpath_ik_precompute(self):
+        """Shared discard used by cancel_toolpath_ik_precompute() and
+        step_toolpath_ik_precompute()'s failure branches -- resets all
+        precompute progress (precompute_index/total included, so a stale
+        index can't outlive the joint path it counted) and playback state,
+        since playback indexes precompute_joint_path directly and can't be
+        left pointing at a joint path this just emptied. Does not touch
+        precompute_status, so a caller can set an explanatory message
+        first."""
         self.precompute_running = False
         self.precompute_waypoints = None
         self.precompute_index = 0
         self.precompute_total = 0
         self.precompute_joint_path = []
-        self.precompute_status = ""
         self.precompute_cache_meta = None
+        self._reset_toolpath_playback_state()
 
 
     def step_toolpath_ik_precompute(self):
-        """Advance the in-progress precompute by up to
-        PRECOMPUTE_CHUNK_SIZE waypoints -- call every frame from render()
-        (roadmap Stage5_README.md 5.6). No-ops unless precompute_running.
-        Uses the same per-waypoint logic as solve_toolpath_ik (solve, then
-        walk ranked branches with _branch_clears_ground, settled.md S1.13):
-        aborts the whole precompute -- no partial motion, settled.md S1.12
-        -- at the first waypoint with no valid/ground-clearing branch."""
+        """Advance the in-progress precompute by up to PRECOMPUTE_CHUNK_SIZE
+        waypoints -- call every frame from render(). No-ops unless
+        precompute_running. Uses the same per-waypoint solve + ground-
+        clearance logic as solve_toolpath_ik, and aborts the whole
+        precompute (no partial motion) at the first waypoint with no
+        valid/clearing branch."""
         if not self.precompute_running:
             return
 
@@ -886,18 +899,18 @@ class VisContent:
                 pos_world_mm, self.precompute_R_target, self.precompute_joint_limits,
                 reference_joint_angles=self.precompute_ref)
             if not solutions:
-                self.precompute_running = False
-                self.precompute_joint_path = []
-                self.precompute_status = f"Waypoint {i}/{self.precompute_total}: {status}"
+                status_msg = f"Waypoint {i}/{self.precompute_total}: {status}"
+                self._abort_toolpath_ik_precompute()
+                self.precompute_status = status_msg
                 return
 
             clear = next((angles for angles, *_ in solutions if self._branch_clears_ground(angles)), None)
             if clear is None:
-                self.precompute_running = False
-                self.precompute_joint_path = []
-                self.precompute_status = (
+                status_msg = (
                     f"Waypoint {i}/{self.precompute_total}: all {len(solutions)} valid branch(es) "
                     "dip below the ground plane (z<0)")
+                self._abort_toolpath_ik_precompute()
+                self.precompute_status = status_msg
                 return
 
             self.precompute_ref = clear
@@ -912,21 +925,31 @@ class VisContent:
             self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
 
 
+    def _reset_toolpath_playback_state(self):
+        """Shared playback reset used by cancel_toolpath_ik_precompute() and
+        load_build_plate()'s invalidation branch, both of which discard
+        precompute_joint_path that playback indexes into directly. Also
+        removes the "G-code Print" mesh so a stale preview doesn't linger
+        at the old pose."""
+        self.playback_running = False
+        self.playback_index = 0
+        self.playback_waiting = False
+        self.gcode_bead_verts_full = None
+        self.playback_status = ""
+        self.gcode_print_handle = None
+        ps.remove_surface_mesh("G-code Print", error_if_absent=False)
+
+
     def _init_toolpath_playback(self):
         """Shared setup for reset_toolpath_playback() and the first
-        run_toolpath_playback() call this session -- roadmap
-        Stage5_README.md 5.7. Requires a completed precompute
-        (self.precompute_joint_path); re-parses the fixed G-code path and
-        rebuilds bead geometry via _build_gcode_beads() (not reused from
-        load_gcode(), which doesn't return reveal_waypoint_index). Collapses
-        every bead to its own first corner (zero-area, so nothing renders --
-        no transparency involved, settled.md S1.16) and registers/replaces
-        the "G-code Print" mesh with only the first PLAYBACK_LOOKAHEAD_BEADS
-        beads' worth of that collapsed state, not the full K -- draw/upload
-        cost tracks playback progress instead of being pinned at the full
-        mesh's cost from frame 1 (settled.md S1.20). Snaps the arm to the
-        first waypoint's solved pose. Returns True on success, False (with
-        playback_status explaining why) otherwise."""
+        run_toolpath_playback() call this session. Requires a completed
+        precompute; re-parses the G-code and rebuilds bead geometry via
+        _build_gcode_beads() (not load_gcode(), which doesn't return
+        reveal_waypoint_index). Collapses every bead to its own first
+        corner (zero-area, nothing renders) and registers only the first
+        PLAYBACK_LOOKAHEAD_BEADS beads' worth, not the full mesh. Snaps
+        the arm to the first waypoint's pose. Returns True on success,
+        False (with playback_status explaining why) otherwise."""
         if not self.precompute_joint_path:
             self.playback_status = "Run Precompute first"
             return False
@@ -936,7 +959,13 @@ class VisContent:
             self.playback_status = "No G-code file found"
             return False
 
-        gcode_points = self.parse_gcode(filepath)
+        try:
+            gcode_points = self.parse_gcode(filepath)
+        except OSError:
+            # File can be overwritten mid-read by a Cura re-export between
+            # the exists() check above and here.
+            self.playback_status = "G-code file changed while loading -- try again"
+            return False
         verts_world, faces, reveal_index, face_prefix = self._build_gcode_beads(gcode_points)
         if len(verts_world) == 0:
             self.playback_status = "No printed beads to reveal"
@@ -962,7 +991,6 @@ class VisContent:
 
         self.playback_index = 0
         self._last_rendered_playback_index = 0
-        self.playback_total = len(self.precompute_joint_path)
         self.update_arm(self.precompute_joint_path[0])
         return True
 
@@ -997,32 +1025,47 @@ class VisContent:
 
     def advance_toolpath_playback(self, step_count):
         """Advance playback by up to step_count waypoints -- call every
-        frame from render() (roadmap Stage5_README.md 5.7). No-ops unless
-        playback_running. The waypoint index always advances every call;
-        only the Polyscope push (arm pose + bead reveal) is throttled to
-        every PLAYBACK_RENDER_STRIDE waypoints -- or forced on the final
-        waypoint, so playback never ends on a stale mid-stride pose
-        (roadmap Stage5_README.md 5.9). Reveals beads via a sorted cutoff
-        over gcode_bead_reveal_index (strictly increasing by construction,
-        settled.md S1.16) rather than a per-bead scan or mask, accumulated
-        from the last *rendered* index so no bead is skipped across
-        throttled frames.
+        frame from render(). No-ops unless playback_running. The index
+        always advances every call; the Polyscope push (arm pose + bead
+        reveal) is throttled to every PLAYBACK_RENDER_STRIDE waypoints,
+        forced on the final one so playback never ends on a stale
+        mid-stride pose. Beads reveal via a sorted cutoff over
+        gcode_bead_reveal_index, accumulated from the last *rendered*
+        index so none are skipped across throttled frames. The
+        registered mesh grows in PLAYBACK_LOOKAHEAD_BEADS chunks instead
+        of registering the full mesh from frame 1.
 
-        The registered "G-code Print" mesh is kept right-sized to progress
-        (PLAYBACK_LOOKAHEAD_BEADS ahead of the last revealed bead, capped at
-        the full K), not pinned at the full K from frame 1 -- real per-frame
-        render cost tracks the registered mesh size, not just how often it's
-        pushed (settled.md S1.20). Growing capacity re-registers (the
-        periodic, progress-proportional cost); staying within the current
-        capacity is a cheap same-size update_vertex_positions call."""
+        Playback may start before precompute finishes: the advance is
+        capped at the live frontier (len(precompute_joint_path)), not a
+        snapshot. If playback catches the frontier before precompute is
+        exhausted, it holds there with a "Waiting for precompute" status
+        and playback_running stays True so the next frame rechecks the
+        frontier automatically. self.playback_waiting mirrors this state
+        -- gui_panel.py reads it to snap the Speed slider down the
+        moment playback actually hits the compute limit."""
         if not self.playback_running:
             return
 
-        new_index = min(self.playback_index + step_count, self.playback_total - 1)
+        frontier = len(self.precompute_joint_path)
+        if self.playback_index >= frontier:
+            # precompute_joint_path shrank or emptied under an active
+            # playback -- refuse cleanly instead of an IndexError below.
+            self.playback_running = False
+            self.playback_waiting = False
+            self.playback_status = "Toolpath data changed -- reset playback"
+            return
+
+        new_index = min(self.playback_index + step_count, frontier - 1)
+        moved = new_index != self.playback_index
         self.playback_index = new_index
 
-        finished = self.playback_index >= self.playback_total - 1
-        if finished or self.playback_index - self._last_rendered_playback_index >= PLAYBACK_RENDER_STRIDE:
+        exhausted = self.precompute_index >= self.precompute_total
+        at_frontier = self.playback_index >= frontier - 1
+        finished = exhausted and at_frontier
+        waiting = at_frontier and not exhausted
+        self.playback_waiting = waiting
+
+        if finished or (waiting and moved) or self.playback_index - self._last_rendered_playback_index >= PLAYBACK_RENDER_STRIDE:
             self.update_arm(self.precompute_joint_path[self.playback_index])
 
             old_revealed = np.searchsorted(self.gcode_bead_reveal_index, self._last_rendered_playback_index, side='right')
@@ -1049,8 +1092,10 @@ class VisContent:
         if finished:
             self.playback_running = False
             self.playback_status = "Playback complete"
+        elif waiting:
+            self.playback_status = f"Waiting for precompute ({frontier}/{self.precompute_total} solved)"
         else:
-            self.playback_status = f"Playing {self.playback_index}/{self.playback_total - 1}"
+            self.playback_status = f"Playing {self.playback_index}/{self.precompute_total - 1}"
 
 
     def load_mesh(self, filepath):
@@ -1076,6 +1121,8 @@ class VisContent:
         # Compute zero-pose transforms
         zero_joints = [0, 0, 0, 0, 0, 0]
         self.T_zero = self.compute_fk(zero_joints)
+        self.T_zero_inv = [np.linalg.inv(T) for T in self.T_zero]  # cached once,
+        # not per-frame -- apply_delta_transform()/_moving_geometry_deltas() run every frame
 
         # Store the rest-pose vertices for each list
         self.rest_verts = [m.vertices.copy() for m in meshes[1:]]  # List of Nx3 arrays, one per link (Robot1..Robot6)
@@ -1106,7 +1153,7 @@ class VisContent:
 
         # Fixed flange->TCP transform for IK; rotation comes from inv(T_zero[5]),
         # not assumed identity -- see settled.md S1.4 for why.
-        T_zero_flange_inv = np.linalg.inv(self.T_zero[5])
+        T_zero_flange_inv = self.T_zero_inv[5]
         self.T_flange_to_tcp = T_zero_flange_inv.copy()
         self.T_flange_to_tcp[:3, 3] = (T_zero_flange_inv @ np.append(self.tcp_local, 1.0))[:3]
 
@@ -1141,7 +1188,7 @@ class VisContent:
         T_current = self.compute_fk(joint_angles_deg)
         for i in range(9):
             src = min(i, 5)
-            Delta = T_current[src] @ np.linalg.inv(self.T_zero[src])
+            Delta = T_current[src] @ self.T_zero_inv[src]
 
             # Convert rest verts to homogenous [x,y,z,1]
             N = self.rest_verts[i].shape[0]
@@ -1171,7 +1218,7 @@ class VisContent:
         effects (used by the ground-clearance checks below, not per-frame
         rendering)."""
         T_current = self.compute_fk(joint_angles_deg)
-        return [T_current[min(i, 5)] @ np.linalg.inv(self.T_zero[min(i, 5)]) for i in range(7)]
+        return [T_current[min(i, 5)] @ self.T_zero_inv[min(i, 5)] for i in range(7)]
 
 
     def moving_geometry_bbox_min_z(self, joint_angles_deg):

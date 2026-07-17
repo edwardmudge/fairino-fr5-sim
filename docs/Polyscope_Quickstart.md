@@ -135,6 +135,14 @@ psim.PopItemWidth()
 if psim.TreeNode("Section Name"):
     # ... widgets ...
     psim.TreePop()                  # ★ Must call TreePop() to close!
+
+# Grey out and disable a block of widgets -- unlike the widgets above,
+# this pair returns None, not (changed, value). Disabled widgets report
+# changed=False automatically, so no extra guards are needed around calls
+# that act on a widget's change.
+psim.BeginDisabled(some_condition)  # bool, default True
+# ... widgets ...
+psim.EndDisabled()                  # ★ Must call EndDisabled() to close!
 ```
 
 ## Loading Meshes with trimesh

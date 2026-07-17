@@ -17,9 +17,11 @@ Print"` covering only the `G1` (feed) segments that actually extrude —
 `G0` (travel) moves and non-extruding `G1` moves (retraction, priming)
 are tracked for position but produce no bead, so the mesh shows the
 printed/cut object, not incidental repositioning. The Build Plate
-Orientation panel's Move/Reset/Load Saved Position buttons each reload
-this mesh too, so it stays in sync whenever the plate's pose changes
-(`settled.md` S1.8).
+Orientation panel's Move/Reset/Load Saved Position buttons do **not**
+reload this mesh — an already-loaded preview is left showing the old
+plate pose until "Load G-code preview" is clicked again explicitly.
+(S1.8's original button-triggered auto-reload was removed by `settled.md`
+S1.23 — see `wiki/003_Guides/BuildPlate_UserFrame.md` for why.)
 
 A translucent rendering mode was tried twice, both times as groundwork
 for an eventual layer-by-layer build-up preview, and reverted both times
@@ -120,12 +122,13 @@ per-structure transparency-mode opt-in found), not on rendering cost.
 10. The mesh is registered via `ps.register_surface_mesh("G-code Print",
     ...)` and colored `GCODE_COLOR` — same-name re-registration replaces
     the prior mesh, no explicit clear needed.
-11. `load_gcode()` is called not just from the "Load G-code preview"
-    button but also from the Build Plate Orientation panel's
-    Move/Reset/Load Saved Position buttons (`gui_panel.py`), so
-    repositioning the plate re-transforms the mesh against the new
-    `T_user_frame` instead of leaving it stale (`settled.md` S1.8). It
-    no-ops if the G-code file doesn't exist yet, since those buttons are
+11. `load_gcode()` is called only from the "Load G-code preview" button
+    (`gui_panel.py`) — **not** from the Build Plate Orientation panel's
+    Move/Reset/Load Saved Position buttons. Repositioning the plate does
+    not re-transform an already-loaded preview mesh; it's left showing
+    the old `T_user_frame` until "Load G-code preview" is clicked again
+    (`settled.md` S1.23 superseded S1.8's button-triggered reload). It
+    no-ops if the G-code file doesn't exist yet, since the button is
     reachable before any G-code has ever been loaded.
 
 ## Current scope and limitations
@@ -193,21 +196,23 @@ Module-level constants in `geometry_backend.py`:
   `_BEAD_BOX_FACE_TEMPLATE`, `GCODE_DIR`, `GCODE_FILE`,
   `FILAMENT_DIAMETER_MM`, `GCODE_COLOR`, `GCODE_MOVE_RE`,
   `CAP_CULL_COLINEAR_DOT_MIN`, `CAP_CULL_WIDTH_TOL_MM`.
-- `gui_panel.py`: "Load G-code preview" button ("I/O Operations" section); Move/
-  Reset/Load Saved Position buttons ("Build Plate Orientation" section)
-  also call `load_gcode()`.
+- `gui_panel.py`: "Load G-code preview" button ("I/O Operations" section) is
+  the only caller of `load_gcode()` — the Move/Reset/Load Saved Position
+  buttons ("Build Plate Orientation" section) do not call it (S1.23).
 - `assets/models/gcode/square_test.gcode` — the original verification
   fixture; not loaded by default (that's now `model.gcode`), but usable
   by temporarily swapping `GCODE_FILE`.
 - `wiki/002_Architecture/settled.md` S1.3 — why this bypasses the Delta
   pipeline and draws only `G1` segments; S1.7 — why the parser stays
-  G0/G1-only and custom (not a third-party tokenizer); S1.8 — why the
-  mesh reloads on plate reposition via a button-triggered call, not a
-  per-frame pipeline; S1.9 — the swept bead mesh itself, geometric
-  layer-height derivation, and the assumed filament diameter; S1.10 — the
-  transparency re-attempt, its measured numbers, and the scene-global
-  Polyscope limitation blocking it; S1.19 — the cap-face culling added in
-  point 9 above; S1.20 — why `bead_face_prefix` exists (playback registers
-  a variable-length slice of `faces`, not a fixed 12-per-bead stride).
+  G0/G1-only and custom (not a third-party tokenizer); S1.8 — the original
+  button-triggered reload-on-plate-reposition decision, since superseded;
+  S1.9 — the swept bead mesh itself, geometric layer-height derivation,
+  and the assumed filament diameter; S1.10 — the transparency re-attempt,
+  its measured numbers, and the scene-global Polyscope limitation blocking
+  it; S1.19 — the cap-face culling added in point 9 above; S1.20 — why
+  `bead_face_prefix` exists (playback registers a variable-length slice of
+  `faces`, not a fixed 12-per-bead stride); S1.23 — why the plate-reposition
+  auto-reload from S1.8 was removed (an explicit "Load G-code preview"
+  click is required instead).
 - `wiki/005_AgentMgmt/active/ctx_main/GLOSSARY.md` §3 — "G-code toolpath"
   term.

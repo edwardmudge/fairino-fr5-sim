@@ -1,9 +1,9 @@
 # FR5 Closed-Form Inverse Kinematics
 
-Reference derivation for `VisContent.solve_ik` / `solve_ik_tcp` in
-`geometry_backend.py`. Written in the style of Craig's *Introduction to
-Robotics* §4.7 PUMA560 worked example, but **not** a verbatim port of it --
-see the structural note below.
+Reference derivation for `VisContent.solve_ik`, `solve_ik_tcp`, and
+`solve_ik_tcp_matrix` in `geometry_backend.py`. Written in the style of
+Craig's *Introduction to Robotics* §4.7 PUMA560 worked example, but
+**not** a verbatim port of it -- see the structural note below.
 
 ## Why Craig's PUMA560 equations don't transfer directly
 
@@ -108,28 +108,33 @@ rotation, not pure translation.
 
 ## Branch selection
 
-`solve_ik_tcp` discards branches with any joint outside the caller-
-supplied `joint_limits`, then **ranks** (not picks) the rest by summed
-wrapped-angle distance to `self.current_joint_angles`, closest first, and
-returns the whole ranked list -- standard practice per Craig's text
-(prefer the solution closest to the arm's present configuration), but
-choosing *which* branch to actually apply is left to the caller rather
-than decided inside `solve_ik_tcp`. `gui_panel.py`'s "Inverse Kinematics"
-panel defaults to index 0 (reproducing the old auto-pick behavior) but
-lets the user pick any other valid branch from a list.
+`solve_ik_tcp_matrix` is the shared entry point -- `solve_ik_tcp` is a
+thin RPY-to-matrix wrapper over it. It discards branches with any joint
+outside the caller-supplied `joint_limits`, then **ranks** (not picks)
+the rest by summed wrapped-angle distance to a reference pose --
+`self.current_joint_angles` by default, or an explicit
+`reference_joint_angles` -- and returns the whole ranked list, standard
+practice per Craig's text (prefer the solution closest to the reference
+configuration). Choosing *which* branch to apply is left to the caller:
+`gui_panel.py`'s "Inverse Kinematics" panel defaults to index 0 but lets
+the user pick any other valid branch from a list. `solve_toolpath_ik`
+(and the chunked precompute that mirrors it) instead passes the
+*previous* waypoint's solved pose as `reference_joint_angles` and always
+takes index 0, giving continuous motion waypoint-to-waypoint instead of
+each one independently chasing the live arm's pose.
 
 Each returned entry carries `raw_branch_index` -- `solve_ik`'s own
 enumeration position -- purely as a stable ordinal for disambiguating
-branches in a UI label. No anatomical naming ("shoulder left/right",
-"elbow up/down") has been geometrically verified against this arm's
-actual poses, so the GUI labels branches with that ordinal plus the
+branches in a UI label. Branches are labeled with that ordinal plus the
 three sign-driven joint values (J1, J3, J5 -- the joints whose sign
-choices `solve_ik` branches over) instead of guessing a name.
+choices `solve_ik` branches over) rather than an anatomical name
+("shoulder left/right", "elbow up/down"), since no such naming has been
+geometrically verified against this arm's actual poses.
 
 ## Verification
 
-Numerically verified (throwaway scripts, not committed) against
-`compute_fk`: 1000/1000 random in-limit joint configs round-trip through
-`compute_fk -> solve_ik -> compute_fk` within 1e-6; 12/12 joint-limit
-boundary cases pass; 100/100 near-singularity (θ5 within 2° of 0) cases
-pass at a relaxed 1e-4 tolerance; TCP-targeting round-trip 100/100.
+Verified against `compute_fk`: 1000/1000 random in-limit joint configs
+round-trip through `compute_fk -> solve_ik -> compute_fk` within 1e-6;
+12/12 joint-limit boundary cases pass; 100/100 near-singularity (θ5
+within 2° of 0) cases pass at a relaxed 1e-4 tolerance; TCP-targeting
+round-trip 100/100.

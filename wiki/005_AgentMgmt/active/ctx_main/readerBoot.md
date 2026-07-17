@@ -14,8 +14,10 @@ short version:
    otherwise have to memorise. **The AI agent** helps implement and debug,
    but doesn't decide for you.
 3. The 4-stage roadmap (FK maths → mesh rendering → tool head/TCP → IK) is
-   complete, plus G-code toolpath preview and TCP trajectory recording —
-   see `ctx_system_current.md` for the per-feature status.
+   complete, plus G-code toolpath preview, TCP trajectory recording, and a
+   full toolpath execution pipeline (chunked/cached IK precompute,
+   progressive-reveal playback) — see `ctx_system_current.md` for the
+   per-feature status.
 4. Before touching mesh rendering code, read
    `docs/FR5_Mesh_Convention.md` — skipping it guarantees broken rendering.
 5. `wiki/002_Architecture/settled.md` will fill up with decisions as you
