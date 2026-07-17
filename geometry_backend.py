@@ -19,6 +19,27 @@ TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP traje
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
 TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
 
+PLAYBACK_RENDER_STRIDE = 50  # Push arm/bead updates to Polyscope every Nth solved
+# waypoint, not every frame -- precompute_joint_path itself is untouched (roadmap
+# Stage5_README.md 5.9). Waypoints, not frames, since step_count varies 1-100 with
+# the Speed slider. update_vertex_positions() re-uploads the FULL bead buffer every
+# call, not just the changed slice (docs/Polyscope_Quickstart.md), so fewer/coarser
+# pushes cut real GPU upload cost, not just Python-side work -- settled.md S1.18.
+
+TRAJECTORY_CURVE_RENDER_STRIDE = 5  # Re-register the "Trajectory" curve network
+# every Nth recorded sample, not every sample -- trajectory_points itself stays
+# dense (roadmap Stage5_README.md 5.9); register_curve_network() has no incremental
+# grow-node-count API, so this only throttles how often the O(n) rebuild fires.
+
+PLAYBACK_LOOKAHEAD_BEADS = 5000  # How far ahead of current progress the
+# registered "G-code Print" mesh is grown, in beads -- kept close to actual
+# playback progress instead of registering the full K-bead mesh from frame 1
+# (settled.md S1.20). Real per-frame render cost turned out to scale with the
+# registered mesh size, not update frequency alone (S1.17-S1.19 measured this
+# with a flawed screenshot-based proxy that masked it -- see S1.20). Value is
+# an empirical tuning knob, balancing re-registration frequency against how
+# far ahead of true progress the draw cost is allowed to run.
+
 BUILD_PLATE_DIR = "assets/buildPlate"
 BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
 PLATE_COLOR = (0.75, 0.75, 0.78)  # Light cool gray, visually distinct from the orange print
@@ -41,6 +62,13 @@ GCODE_COLOR = (1.0, 0.55, 0.0)  # Orange, so it doesn't visually merge with the 
 # comment to read instead. 1.75mm is the standard FDM default. Used to convert
 # extruded filament length (E) into a deposited bead volume, see load_gcode().
 FILAMENT_DIAMETER_MM = 1.75
+
+# How straight (dot product of unit tangents) and width-matched (mm) two
+# back-to-back bead segments must be for their shared cap faces to be treated
+# as exactly coincident -- and thus safely dropped -- rather than meeting at a
+# visible angle or ledge. See _build_gcode_beads, settled.md S1.19.
+CAP_CULL_COLINEAR_DOT_MIN = 0.999  # ~2.6 degrees
+CAP_CULL_WIDTH_TOL_MM = 0.01
 
 GCODE_MOVE_RE = re.compile(r"([A-Za-z])\s*(-?\d+\.?\d*)")
 
@@ -66,6 +94,7 @@ class VisContent:
         self.tcp_world = None            # Current TCP world position, set each apply_delta_transform call
         self.trajectory_points = []      # Recorded TCP world positions (see record_trajectory_point)
         self._last_sample_time = time.time()
+        self._trajectory_curve_sample_count = 0  # Throttles _update_trajectory_curve() re-registration, see TRAJECTORY_CURVE_RENDER_STRIDE
         self.trajectory_enabled = True
         self.trajectory_handle = None    # Set once a curve exists, see _update_trajectory_curve
 
@@ -89,13 +118,18 @@ class VisContent:
         # pause, only reset_toolpath_playback() zeroes it.
         self.playback_running = False
         self.playback_index = 0
+        self._last_rendered_playback_index = 0  # Throttles the Polyscope push in advance_toolpath_playback, see PLAYBACK_RENDER_STRIDE
         self.playback_total = 0
         self.playback_status = ""
         self.gcode_bead_verts_full = None       # (K*8,3) world space, real bead positions
         self.gcode_bead_faces = None
         self.gcode_bead_reveal_index = None     # (K,) sorted ascending, see _build_gcode_beads
+        self.gcode_bead_face_prefix = None      # (K+1,) cumulative triangle count, see _build_gcode_beads
         self.gcode_bead_verts_current = None    # (K*8,3) working copy, mutated as beads reveal
         self.gcode_print_handle = None          # Polyscope handle, reused across advance() calls
+        self._registered_bead_capacity = 0      # How many beads are actually registered with
+        # Polyscope right now -- kept close to playback progress, not pinned at the full K from
+        # frame 1, so draw/upload cost tracks progress (settled.md S1.20). See PLAYBACK_LOOKAHEAD_BEADS.
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -259,16 +293,23 @@ class VisContent:
         per-segment loop) for the ~180,000-segment scale of a real print
         (settled.md S1.9).
 
-        Returns (verts_world, faces, reveal_waypoint_index):
+        Returns (verts_world, faces, reveal_waypoint_index, bead_face_prefix):
           verts_world: (K*8, 3) float, world-space bead-box corners,
             bead-major (8 contiguous rows per bead) -- matches
             _BEAD_BOX_FACE_TEMPLATE's indexing.
-          faces: (K*12, 3) int, triangle indices into verts_world.
+          faces: (<=K*12, 3) int, triangle indices into verts_world -- fewer
+            than 12 per bead wherever settled.md S1.19's cap culling drops
+            a hidden face, so no longer a fixed per-bead stride.
           reveal_waypoint_index: (K,) int, strictly increasing -- the
             0-based index into gcode_points at which bead k's segment ends
             (segment i connects point i -> point i+1, so it's revealed
-            once playback reaches point i+1). All three arrays are empty
-            (K == 0) if there are no printed beads.
+            once playback reaches point i+1).
+          bead_face_prefix: (K+1,) int, cumulative triangle count --
+            `faces[:bead_face_prefix[n]]` is exactly the triangles for the
+            first n beads, needed because `faces` no longer has a fixed
+            per-bead stride (settled.md S1.20, right-sized playback
+            registration). All four arrays are empty/trivial (K == 0) if
+            there are no printed beads.
         """
         pts = np.array([p for p, _, _ in gcode_points])
         es = np.array([e for _, e, _ in gcode_points])
@@ -312,7 +353,8 @@ class VisContent:
 
         valid = seg_is_print & (seg_len > 1e-6) & (w_norm > 1e-6) & (bead_height > 1e-9)
         if not np.any(valid):
-            return np.empty((0, 3)), np.empty((0, 3), dtype=int), np.empty(0, dtype=int)
+            return (np.empty((0, 3)), np.empty((0, 3), dtype=int), np.empty(0, dtype=int),
+                    np.zeros(1, dtype=int))
 
         # Capture segment indices before the `valid` filter overwrites p0/p1 --
         # segment i connects gcode_points[i] -> gcode_points[i+1], revealed once
@@ -340,12 +382,38 @@ class VisContent:
             verts_local[:, idx + 4, 2] = top[:, 0]
         verts_local = verts_local.reshape(-1, 3)
 
-        faces = (self._BEAD_BOX_FACE_TEMPLATE[None, :, :] + (np.arange(K) * 8)[:, None, None]).reshape(-1, 3)
+        # Drop cap faces at bead-to-bead boundaries that are provably always
+        # hidden: back-to-back in the G-code (no travel gap), colinear (same
+        # travel direction -- at a turn the two cap planes meet at an angle,
+        # not coincide), and width-matched (same cross-section, so no ledge
+        # is exposed). ~8% of triangles on a real multi-layer print, since
+        # most consecutive segments trace a curved surface and fail the
+        # colinearity test -- settled.md S1.19.
+        u_valid, width_valid = u[valid], width[valid]
+        chained = np.diff(reveal_waypoint_index) == 1
+        colinear = np.sum(u_valid[:-1] * u_valid[1:], axis=1) >= CAP_CULL_COLINEAR_DOT_MIN
+        width_matched = np.abs(width_valid[:-1] - width_valid[1:]) <= CAP_CULL_WIDTH_TOL_MM
+        cullable = chained & colinear & width_matched
+
+        drop_end_cap = np.zeros(K, dtype=bool)    # bead k's end cap (template rows 8-9)
+        drop_start_cap = np.zeros(K, dtype=bool)  # bead k's start cap (template rows 4-5)
+        drop_end_cap[:-1] = cullable
+        drop_start_cap[1:] = cullable
+
+        keep_row = np.ones((K, 12), dtype=bool)
+        keep_row[drop_end_cap, 8] = False
+        keep_row[drop_end_cap, 9] = False
+        keep_row[drop_start_cap, 4] = False
+        keep_row[drop_start_cap, 5] = False
+
+        faces_full = (self._BEAD_BOX_FACE_TEMPLATE[None, :, :] + (np.arange(K) * 8)[:, None, None])
+        faces = faces_full[keep_row]
+        bead_face_prefix = np.concatenate([[0], np.cumsum(keep_row.sum(axis=1))])
 
         homo = np.hstack([verts_local, np.ones((len(verts_local), 1))])
         verts_world = (self.T_user_frame @ homo.T).T[:, :3]
 
-        return verts_world, faces, reveal_waypoint_index
+        return verts_world, faces, reveal_waypoint_index, bead_face_prefix
 
 
     def load_gcode(self):
@@ -362,7 +430,7 @@ class VisContent:
         if len(waypoints) < 2:
             return
 
-        verts_world, faces, _reveal_waypoint_index = self._build_gcode_beads(waypoints)
+        verts_world, faces, _reveal_waypoint_index, _bead_face_prefix = self._build_gcode_beads(waypoints)
         if len(verts_world) == 0:
             return
 
@@ -745,9 +813,12 @@ class VisContent:
         load_gcode(), which doesn't return reveal_waypoint_index). Collapses
         every bead to its own first corner (zero-area, so nothing renders --
         no transparency involved, settled.md S1.16) and registers/replaces
-        the "G-code Print" mesh with that collapsed state. Snaps the arm to
-        the first waypoint's solved pose. Returns True on success, False
-        (with playback_status explaining why) otherwise."""
+        the "G-code Print" mesh with only the first PLAYBACK_LOOKAHEAD_BEADS
+        beads' worth of that collapsed state, not the full K -- draw/upload
+        cost tracks playback progress instead of being pinned at the full
+        mesh's cost from frame 1 (settled.md S1.20). Snaps the arm to the
+        first waypoint's solved pose. Returns True on success, False (with
+        playback_status explaining why) otherwise."""
         if not self.precompute_joint_path:
             self.playback_status = "Run Precompute first"
             return False
@@ -758,7 +829,7 @@ class VisContent:
             return False
 
         gcode_points = self.parse_gcode(filepath)
-        verts_world, faces, reveal_index = self._build_gcode_beads(gcode_points)
+        verts_world, faces, reveal_index, face_prefix = self._build_gcode_beads(gcode_points)
         if len(verts_world) == 0:
             self.playback_status = "No printed beads to reveal"
             return False
@@ -766,17 +837,23 @@ class VisContent:
         self.gcode_bead_verts_full = verts_world
         self.gcode_bead_faces = faces
         self.gcode_bead_reveal_index = reveal_index
+        self.gcode_bead_face_prefix = face_prefix
 
         # Collapse every bead to its own first corner -- a zero-area box
         # renders nothing, revealed later by restoring real positions
         # (advance_toolpath_playback), never via transparency (settled.md S1.16).
         self.gcode_bead_verts_current = np.repeat(verts_world[0::8], 8, axis=0)
 
+        K = len(reveal_index)
+        self._registered_bead_capacity = min(PLAYBACK_LOOKAHEAD_BEADS, K)
         self.gcode_print_handle = ps.register_surface_mesh(
-            "G-code Print", self.gcode_bead_verts_current, self.gcode_bead_faces)
+            "G-code Print",
+            self.gcode_bead_verts_current[:self._registered_bead_capacity * 8],
+            self.gcode_bead_faces[:self.gcode_bead_face_prefix[self._registered_bead_capacity]])
         self.gcode_print_handle.set_color(GCODE_COLOR)
 
         self.playback_index = 0
+        self._last_rendered_playback_index = 0
         self.playback_total = len(self.precompute_joint_path)
         self.update_arm(self.precompute_joint_path[0])
         return True
@@ -813,25 +890,55 @@ class VisContent:
     def advance_toolpath_playback(self, step_count):
         """Advance playback by up to step_count waypoints -- call every
         frame from render() (roadmap Stage5_README.md 5.7). No-ops unless
-        playback_running. Moves the arm to the new waypoint's cached pose
-        and reveals beads via a sorted cutoff over gcode_bead_reveal_index
-        (strictly increasing by construction, settled.md S1.16) rather than
-        a per-bead scan or mask."""
+        playback_running. The waypoint index always advances every call;
+        only the Polyscope push (arm pose + bead reveal) is throttled to
+        every PLAYBACK_RENDER_STRIDE waypoints -- or forced on the final
+        waypoint, so playback never ends on a stale mid-stride pose
+        (roadmap Stage5_README.md 5.9). Reveals beads via a sorted cutoff
+        over gcode_bead_reveal_index (strictly increasing by construction,
+        settled.md S1.16) rather than a per-bead scan or mask, accumulated
+        from the last *rendered* index so no bead is skipped across
+        throttled frames.
+
+        The registered "G-code Print" mesh is kept right-sized to progress
+        (PLAYBACK_LOOKAHEAD_BEADS ahead of the last revealed bead, capped at
+        the full K), not pinned at the full K from frame 1 -- real per-frame
+        render cost tracks the registered mesh size, not just how often it's
+        pushed (settled.md S1.20). Growing capacity re-registers (the
+        periodic, progress-proportional cost); staying within the current
+        capacity is a cheap same-size update_vertex_positions call."""
         if not self.playback_running:
             return
 
         new_index = min(self.playback_index + step_count, self.playback_total - 1)
-        self.update_arm(self.precompute_joint_path[new_index])
-
-        old_revealed = np.searchsorted(self.gcode_bead_reveal_index, self.playback_index, side='right')
-        new_revealed = np.searchsorted(self.gcode_bead_reveal_index, new_index, side='right')
-        if new_revealed > old_revealed:
-            self.gcode_bead_verts_current[old_revealed * 8:new_revealed * 8] = \
-                self.gcode_bead_verts_full[old_revealed * 8:new_revealed * 8]
-            self.gcode_print_handle.update_vertex_positions(self.gcode_bead_verts_current)
-
         self.playback_index = new_index
-        if self.playback_index >= self.playback_total - 1:
+
+        finished = self.playback_index >= self.playback_total - 1
+        if finished or self.playback_index - self._last_rendered_playback_index >= PLAYBACK_RENDER_STRIDE:
+            self.update_arm(self.precompute_joint_path[self.playback_index])
+
+            old_revealed = np.searchsorted(self.gcode_bead_reveal_index, self._last_rendered_playback_index, side='right')
+            new_revealed = np.searchsorted(self.gcode_bead_reveal_index, self.playback_index, side='right')
+            if new_revealed > old_revealed:
+                self.gcode_bead_verts_current[old_revealed * 8:new_revealed * 8] = \
+                    self.gcode_bead_verts_full[old_revealed * 8:new_revealed * 8]
+
+                K = len(self.gcode_bead_reveal_index)
+                if finished or new_revealed >= self._registered_bead_capacity:
+                    target_capacity = K if finished else min(new_revealed + PLAYBACK_LOOKAHEAD_BEADS, K)
+                    self._registered_bead_capacity = target_capacity
+                    self.gcode_print_handle = ps.register_surface_mesh(
+                        "G-code Print",
+                        self.gcode_bead_verts_current[:target_capacity * 8],
+                        self.gcode_bead_faces[:self.gcode_bead_face_prefix[target_capacity]])
+                    self.gcode_print_handle.set_color(GCODE_COLOR)
+                else:
+                    self.gcode_print_handle.update_vertex_positions(
+                        self.gcode_bead_verts_current[:self._registered_bead_capacity * 8])
+
+            self._last_rendered_playback_index = self.playback_index
+
+        if finished:
             self.playback_running = False
             self.playback_status = "Playback complete"
         else:
@@ -1006,7 +1113,12 @@ class VisContent:
 
     def record_trajectory_point(self):
         """Sample self.tcp_world at most once per TRAJECTORY_SAMPLE_INTERVAL_S;
-        discard the sample if the TCP hasn't moved since the last recorded point."""
+        discard the sample if the TCP hasn't moved since the last recorded
+        point. trajectory_points stays dense every accepted sample; only the
+        Polyscope redraw (_update_trajectory_curve, a full re-registration)
+        is throttled to every TRAJECTORY_CURVE_RENDER_STRIDE samples --
+        roadmap Stage5_README.md 5.9 treats the curve as a decimatable debug
+        overlay, not the exported path."""
         if not self.trajectory_enabled:
             return
 
@@ -1019,7 +1131,10 @@ class VisContent:
             return
 
         self.trajectory_points.append(self.tcp_world.copy())
-        self._update_trajectory_curve()
+        self._trajectory_curve_sample_count += 1
+        if self._trajectory_curve_sample_count >= TRAJECTORY_CURVE_RENDER_STRIDE:
+            self._trajectory_curve_sample_count = 0
+            self._update_trajectory_curve()
 
 
     def _update_trajectory_curve(self):
@@ -1047,6 +1162,7 @@ class VisContent:
         points, which would otherwise leave the stale curve on screen."""
         self.trajectory_points = []
         self.trajectory_handle = None
+        self._trajectory_curve_sample_count = 0
         ps.remove_curve_network("Trajectory", error_if_absent=False)
 
 

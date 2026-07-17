@@ -99,15 +99,28 @@ per-structure transparency-mode opt-in found), not on rendering cost.
    standard slicer-viewer formula.
 8. Each valid segment becomes an independent box: 8 corner vertices (4 at
    each endpoint, offset ± half the bead width along a horizontal axis
-   perpendicular to travel, at the layer's bottom and top Z) and 12
+   perpendicular to travel, at the layer's bottom and top Z) and up to 12
    triangles (6 faces). This is built fully vectorised across all
    segments at once (no per-segment Python loop or `trimesh.creation.box`
    + concatenate), since a real print is on the order of ~180,000
    segments.
-9. The mesh is registered via `ps.register_surface_mesh("G-code Print",
-   ...)` and colored `GCODE_COLOR` — same-name re-registration replaces
-   the prior mesh, no explicit clear needed.
-10. `load_gcode()` is called not just from the "Load G-code preview"
+9. **Cap-face culling**: at a bead-to-bead boundary that is back-to-back
+   in the G-code (no travel gap between them), colinear (unit travel
+   directions' dot product ≥ `CAP_CULL_COLINEAR_DOT_MIN`), and
+   width-matched (cross-section widths differ by ≤ `CAP_CULL_WIDTH_TOL_MM`),
+   the two beads' shared cap faces are provably always hidden inside the
+   print and are dropped — 2 triangles off each side of the boundary
+   (~8% fewer triangles on a real multi-layer print, since most
+   consecutive segments trace a curved surface and fail the colinearity
+   test). This means `faces` no longer has a fixed 12-triangles-per-bead
+   stride; `_build_gcode_beads()` also returns `bead_face_prefix`, a
+   `(K+1,)` cumulative-triangle-count array, so `faces[:bead_face_prefix[n]]`
+   is exactly the triangles for the first `n` beads — see `settled.md`
+   S1.19, S1.20.
+10. The mesh is registered via `ps.register_surface_mesh("G-code Print",
+    ...)` and colored `GCODE_COLOR` — same-name re-registration replaces
+    the prior mesh, no explicit clear needed.
+11. `load_gcode()` is called not just from the "Load G-code preview"
     button but also from the Build Plate Orientation panel's
     Move/Reset/Load Saved Position buttons (`gui_panel.py`), so
     repositioning the plate re-transforms the mesh against the new
@@ -176,8 +189,10 @@ Module-level constants in `geometry_backend.py`:
 ## Code anchors
 
 - `geometry_backend.py`: `parse_gcode()`, `load_gcode()`,
+  `_build_gcode_beads()` (including its `bead_face_prefix` return value),
   `_BEAD_BOX_FACE_TEMPLATE`, `GCODE_DIR`, `GCODE_FILE`,
-  `FILAMENT_DIAMETER_MM`, `GCODE_COLOR`, `GCODE_MOVE_RE`.
+  `FILAMENT_DIAMETER_MM`, `GCODE_COLOR`, `GCODE_MOVE_RE`,
+  `CAP_CULL_COLINEAR_DOT_MIN`, `CAP_CULL_WIDTH_TOL_MM`.
 - `gui_panel.py`: "Load G-code preview" button ("I/O Operations" section); Move/
   Reset/Load Saved Position buttons ("Build Plate Orientation" section)
   also call `load_gcode()`.
@@ -191,6 +206,8 @@ Module-level constants in `geometry_backend.py`:
   per-frame pipeline; S1.9 — the swept bead mesh itself, geometric
   layer-height derivation, and the assumed filament diameter; S1.10 — the
   transparency re-attempt, its measured numbers, and the scene-global
-  Polyscope limitation blocking it.
+  Polyscope limitation blocking it; S1.19 — the cap-face culling added in
+  point 9 above; S1.20 — why `bead_face_prefix` exists (playback registers
+  a variable-length slice of `faces`, not a fixed 12-per-bead stride).
 - `wiki/005_AgentMgmt/active/ctx_main/GLOSSARY.md` §3 — "G-code toolpath"
   term.

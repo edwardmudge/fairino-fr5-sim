@@ -692,3 +692,318 @@ point the sorted-cutoff technique (which assumes `reveal_waypoint_index`
 is monotonic) would need to become a scattered-mask approach instead.
 
 **Verified on:** 2026-07-16
+
+## S1.17 Playback and trajectory-curve rendering are throttled by two independent fixed-constant strides, not a GUI slider
+
+**Decision:** Roadmap `Stage5_README.md` 5.9 implemented as two separate
+throttles in `geometry_backend.py`, both decoupling the *calculation* (which
+must stay dense for a future export) from the *Polyscope push* (which is
+purely visual and safe to decimate):
+
+1. `advance_toolpath_playback(step_count)` -- `self.playback_index` still
+   advances every call, unconditionally. The Polyscope push (`update_arm()`
+   plus the bead-reveal `update_vertex_positions()` call) only fires once
+   `self.playback_index - self._last_rendered_playback_index >=
+   PLAYBACK_RENDER_STRIDE`, or unconditionally on the final waypoint
+   (`finished`) so playback never freezes on a stale mid-stride pose. The
+   bead-reveal cutoff (`np.searchsorted` over `gcode_bead_reveal_index`) is
+   computed from `_last_rendered_playback_index`, not the previous frame's
+   index, so beads revealed during throttled-away frames are never lost --
+   they just appear in one larger batch at the next render.
+2. `record_trajectory_point()` -- `self.trajectory_points.append(...)`
+   fires on every accepted sample exactly as before (still gated by the
+   pre-existing `TRAJECTORY_SAMPLE_INTERVAL_S` wall-clock throttle and the
+   `np.allclose` no-movement dedup). Only the call to
+   `_update_trajectory_curve()` -- a full `ps.register_curve_network()`
+   re-registration, the actual cost center since curve networks have no
+   incremental grow-node-count API -- is gated behind a new counter,
+   `_trajectory_curve_sample_count`, firing every
+   `TRAJECTORY_CURVE_RENDER_STRIDE` accepted samples.
+3. Both strides are fixed `geometry_backend.py` module constants (default
+   `5`), styled like the existing `PRECOMPUTE_CHUNK_SIZE` -- no GUI slider
+   was added.
+
+**Reason:** `advance_toolpath_playback` already used incremental
+`update_vertex_positions` for bead reveal (S1.16) -- the actual full
+re-registration offender was `_update_trajectory_curve()`, confirmed against
+`docs/Polyscope_Quickstart.md` (no incremental API for curve networks), so
+the roadmap's item 2 explicitly calls it out as the first target and a
+"decimatable debug overlay" since, unlike `precompute_joint_path` and the
+bead mesh's vertex/face arrays, it is never exported. The user confirmed a
+fixed constant over a GUI slider: roadmap 5.9 (unlike 5.6/5.7) has no
+GUI-wiring bullet, matching the project's existing precedent of only adding
+GUI surface when a stage's roadmap text calls for it.
+
+Checked with a standalone script driving `VisContent` against a real
+(not mocked) Polyscope backend: a 41-waypoint fake playback path pushed to
+Polyscope 8 times instead of 41 (throttled to every 5th waypoint, plus the
+forced final frame), ended exactly on the full bead set and
+`"Playback complete"`, and left `precompute_joint_path`'s length unaffected;
+23 forced trajectory samples stayed fully dense in `trajectory_points` while
+`_update_trajectory_curve()` only fired 4 times (`23 // 5`). `main.py` still
+launches cleanly (OpenGL 3.3 context, no errors) after the change.
+
+**Non-revertible unless:** profiling at real ~180,000-bead scale shows `5`
+is too coarse (visible stutter) or too fine (rendering still the bottleneck)
+for either stride, at which point the constants would need retuning or --
+per the roadmap's original framing -- promotion to a GUI-exposed control.
+
+**Verified on:** 2026-07-17
+
+## S1.18 `PLAYBACK_RENDER_STRIDE` raised from 5 to 50, measured (not assumed) against the real benchy; `planar-printing-prototype` had nothing portable for rendering
+
+**Decision:** S1.17's `5` was too conservative in practice -- the user
+reported playback still felt laggy after that change. Raised
+`PLAYBACK_RENDER_STRIDE` (`geometry_backend.py`) to `50`.
+`TRAJECTORY_CURVE_RENDER_STRIDE` stays at `5`, unchanged -- see Reason.
+
+**Reason:** Two things drove this, both checked rather than guessed:
+
+1. **Branch comparison.** The user asked to check
+   `planar-printing-prototype` (recalled as fast) for a portable technique.
+   It isn't one: its `set_print_reveal()` re-registers a growing mesh
+   *prefix* every reveal step (`ps.register_surface_mesh(...,
+   verts[:n*8], faces[:n*12])`, throttled by a bead-count delta,
+   `GCODE_REVEAL_CHUNK = 200`) -- exactly the "re-register a growing
+   sub-mesh" approach S1.16 already rejected in favor of a fixed-size
+   buffer + `update_vertex_positions`. Its own architecture doc even
+   flags this as a known weak point needing a non-re-upload mechanism. Its
+   trajectory-curve throttle is also worse than `main`'s (100Hz sampling,
+   *no* stride on the full re-registration -- `main` already added the
+   throttle it lacks). The prototype's real speed advantage is on the
+   **precompute** side -- sparse keyframe IK (every 2.5mm/15° turn) +
+   joint-space interpolation, plus a disk cache
+   (`model.precompute.npz`) `main` completely lacks -- confirmed out of
+   scope here since the user confirmed the lag is specifically in
+   playback rendering, not precompute (candidate future work, roadmap
+   5.10/5.11).
+2. **Root-cause measurement**, using a script that loads the real
+   ~187,000-line `model.gcode` and a cached keyframe-interpolated joint
+   path (`assets/models/gcode/model.precompute.npz`, sha256-verified
+   against the current G-code + default plate pose, borrowed purely as a
+   fast way to get a real dense joint path for a *rendering* benchmark --
+   not evidence that keyframe interpolation was adopted). Real bead mesh:
+   127,677 beads, 1,021,416 verts. `ps.screenshot_to_buffer()` per frame
+   (S1.10's method -- `frame_tick()` alone doesn't force a render),
+   300 frames per condition, `step_count=1` (Speed slider at its slowest,
+   worst case):
+
+   | Condition | Mean frame time | ~fps |
+   |---|---|---|
+   | `PLAYBACK_RENDER_STRIDE=5` (old) | 65.55ms | ~15.3 |
+   | `PLAYBACK_RENDER_STRIDE=50` (new) | 36.10ms | ~27.7 |
+   | Static floor (fully revealed, zero updates) | 34.15ms | ~29.3 |
+
+   `update_vertex_positions()` re-uploads the *entire* vertex buffer every
+   call, not just the changed slice (`docs/Polyscope_Quickstart.md`), so
+   fewer/coarser pushes cut real GPU upload cost, not just Python-side
+   work -- explaining why `50` (10x fewer pushes than `5`) very nearly
+   closes the gap to the floor (36.10ms vs. 34.15ms) rather than scaling
+   down only proportionally. `50` is therefore close to the practical
+   ceiling for this lever: the residual ~2ms gap to the floor is
+   Python-side/update overhead; the floor itself (~34ms, matching S1.10's
+   ~28ms opaque measurement in the same ballpark) is raw GPU triangle-count
+   draw cost that no update-frequency throttle can reduce further --
+   closing it would require decimating the *displayed* bead geometry
+   (S1.9's flagged future LOD/decimation fix), explicitly out of scope for
+   this pass. `TRAJECTORY_CURVE_RENDER_STRIDE` was left at `5`: the
+   reported lag is playback-specific, and during playback the TCP barely
+   moves between throttled `update_arm()` calls, so
+   `record_trajectory_point()`'s pre-existing `np.allclose` dedup already
+   collapses most of that redundant work as a side effect of the
+   `PLAYBACK_RENDER_STRIDE` increase.
+
+**Non-revertible unless:** a future need for smoother-than-~28fps playback
+on the full benchy arises, at which point the fix is bead-mesh
+LOD/decimation (reducing displayed triangle count), not further stride
+tuning -- this pass's own measurement shows stride is already within ~2ms
+of its ceiling.
+
+**Verified on:** 2026-07-17
+
+## S1.19 Bead mesh cap faces culled at provably-hidden boundaries -- ~8% fewer triangles, no visual change
+
+**Decision:** `_build_gcode_beads()` (`geometry_backend.py`) now drops the
+two triangles of a bead's "end cap" (`_BEAD_BOX_FACE_TEMPLATE` rows 8-9) and
+the next bead's "start cap" (rows 4-5) wherever a boundary between
+consecutive beads satisfies all three:
+
+1. **Index-chained** -- `reveal_waypoint_index[k+1] == reveal_waypoint_index[k] + 1`
+   (no G0 travel move or non-print gap between the two segments).
+2. **Colinear** -- unit-tangent dot product `>= CAP_CULL_COLINEAR_DOT_MIN`
+   (`0.999`, ~2.6°). At a turn the two cap planes meet at an angle rather
+   than coincide, so dropping both would expose a visible sliver.
+3. **Width-matched** -- bead widths differ by `<= CAP_CULL_WIDTH_TOL_MM`
+   (`0.01`mm). Width is derived per-segment from extrusion rate/length/layer
+   height (S1.9) and can vary slightly even along a straight run; a
+   mismatch would expose a stepped ledge on the wider bead's side wall.
+
+`verts_world` and `reveal_waypoint_index` are untouched -- only which
+triangles get built from those same vertices changes, so S1.16's
+vertex-collapse playback reveal (which never touches `faces` after initial
+registration) is unaffected. Fully vectorised (boolean mask over `(K-1,)`
+boundaries, then `faces_full[keep_row]` fancy-indexing), matching the rest
+of the function's style.
+
+**Reason:** Requested by the user after S1.18 still felt laggy in
+practice; investigated whether the remaining ~28fps ceiling on the full
+benchy was inherent or fixable. It's mostly inherent (S1.18 already showed
+a fully-static mesh of that size drawing at ~34ms/frame regardless of
+update frequency), but cap culling is a genuine, zero-risk reduction in
+what actually gets drawn -- not an approximation, since the culled faces
+are geometrically proven to never be visible.
+
+Measured on the real benchy (`assets/models/gcode/model.gcode`,
+127,677 beads): 107,939 boundaries (85%) are index-chained, but the
+curved-hull shape means most consecutive segments turn slightly, so only
+30,640 pass the full colinear+width-matched test -- **8.0% of triangles**
+(122,560 of 1,532,124) dropped, confirmed by direct inspection of
+`_build_gcode_beads`'s output (`1,532,124 -> 1,409,564` triangles,
+`verts_world`/`reveal_waypoint_index` shapes unchanged). Initial back-of-
+envelope estimate before measuring was 15-30%; actual measured savings was
+meaningfully lower once the colinearity condition was checked against the
+real curved geometry, not just the index-chain condition -- the gap
+between "back-to-back in the G-code" and "actually straight" is the
+benchy's curvature, and would be smaller on a print dominated by long
+straight walls.
+
+Re-profiled with the same `ps.screenshot_to_buffer()` method as S1.18,
+300 frames, `PLAYBACK_RENDER_STRIDE=50`, `step_count=1`:
+
+| Condition | Before (S1.18) | After (culled) |
+|---|---|---|
+| Static floor (fully revealed, zero updates) | 34.15ms (~29.3fps) | 29.12ms (~34.3fps) |
+| Playback, stride=50 | 36.10ms (~27.7fps) | 34.36ms (~29.1fps) |
+
+The floor improved ~15% (more than the 8% triangle reduction alone would
+suggest -- some combination of fixed per-triangle GPU cost and measurement
+noise, not further investigated). The playback figure improved less and
+has high variance (std ~30ms) since most frames are cheap no-push draws at
+the new floor, occasionally spiked by the real `update_vertex_positions`
+push every `PLAYBACK_RENDER_STRIDE` waypoints.
+
+Visually verified: fully-revealed culled mesh screenshotted from an
+overview angle, a low grazing angle across the hull, an extreme close-up on
+a curved hull section, and a from-below angle -- no gaps, slivers, or
+missing faces in any of them.
+
+**Non-revertible unless:** a print dominated by short, sharply-turning
+segments makes the colinearity condition rarely fire (diminishing returns
+for the added code complexity), or a future need arises to relax
+`CAP_CULL_COLINEAR_DOT_MIN`/`CAP_CULL_WIDTH_TOL_MM` for a bigger (but
+no-longer-provably-exact) reduction -- at which point this becomes a true
+approximation/LOD decision, not a free win, and should be re-evaluated
+against real visual inspection, not just the triangle count.
+
+**Verified on:** 2026-07-17
+
+## S1.20 `screenshot_to_buffer()` timing methodology retracted; playback registration right-sized to progress instead of registering the full mesh from frame 1
+
+**Decision:** Two related corrections after the user reported playback
+still felt laggy post-S1.19 and asked to compare against
+`planar-printing-prototype` again:
+
+1. **Methodology retraction.** Every frame-time number in S1.10/S1.17/
+   S1.18/S1.19 was measured via `ps.screenshot_to_buffer()`, inherited from
+   S1.10's own justification (`frame_tick()` "doesn't force an actual
+   render in this harness"). Diagnosed directly: `screenshot_to_buffer()`
+   costs ~29.5ms with *no print mesh loaded at all* (just the arm + plate)
+   vs. ~38.3ms with the full 1.4M-triangle mesh -- only ~9ms attributable
+   to the mesh; the rest is a mostly-fixed readback cost unrelated to scene
+   complexity. Confirmed further: registering meshes from 1,000 to 127,677
+   beads (0.8% to 100% of K) showed draw time flat at 28-35ms regardless of
+   size when measured this way. `frame_tick()` was re-examined too --
+   ~0.02-0.5ms, confirming S1.10's original read that it doesn't force a
+   real render either. Neither is a valid proxy for real interactive frame
+   cost.
+2. **Real methodology**: drive the actual `ps.show()` render loop (real
+   vsync/present, no CPU-side pixel readback) with an instrumented
+   callback that logs `time.perf_counter()` deltas and calls `ps.unshow()`
+   after a fixed duration. This revealed the *real* shape of the problem,
+   which is nothing like what the screenshot-based numbers implied: median
+   frame time ~15.8ms (**~63fps** -- smooth) with occasional spikes up to
+   ~410ms. Playback isn't uniformly slow; it's smooth almost all the time,
+   punctuated by periodic multi-hundred-millisecond stutters landing
+   exactly at `PLAYBACK_RENDER_STRIDE` push boundaries, because
+   `update_vertex_positions()` re-uploads the *entire* K*8 vertex buffer on
+   every push regardless of playback progress (`main`'s mesh has been
+   registered at full K size since S1.16, from frame 1 of playback).
+3. **Fix**: stop registering the full K-bead mesh upfront. `_init_toolpath_
+   playback()` now registers only `min(PLAYBACK_LOOKAHEAD_BEADS, K)` beads'
+   worth; `advance_toolpath_playback()` keeps updating in place
+   (`update_vertex_positions`, cheap) as long as revealed progress stays
+   within the currently registered capacity, and only re-registers (grows
+   capacity to `min(revealed + PLAYBACK_LOOKAHEAD_BEADS, K)`, or exactly
+   `K` on the final frame) when progress outgrows it. This is deliberately
+   close to the prototype's `set_print_reveal()` technique (register a
+   slice sized to progress) rather than S1.16's "always full K, vertex-
+   collapse only" -- S1.16's own rejection of the growing-submesh approach
+   ("per-step re-registration cost... at ~180,000-bead scale") reasoned
+   about cost near the *end* of a print without weighing it against
+   steady-state draw-cost savings for most of the print's *duration*, an
+   incomplete tradeoff analysis. `gcode_bead_faces` is no longer a fixed
+   12-triangles-per-bead stride after S1.19's culling, so
+   `_build_gcode_beads()` now also returns `bead_face_prefix`, a `(K+1,)`
+   cumulative-triangle-count array, so `faces[:bead_face_prefix[n]]` slices
+   correctly by bead count in O(1).
+
+**Reason:** the user's recollection that the prototype played back
+smoothly (including on what sounds like a real print, given "precompute
+took longer") directly contradicted the "nothing worth porting" verdict
+from the first prototype comparison (S1.18's write-up) -- prompting a
+re-examination that found the real explanation wasn't a rendering
+trick but a genuine difference in how much is registered at once, masked
+until now by a flawed timing methodology.
+
+Real `ps.show()`-loop measurements on the actual benchy (127,677 beads),
+`PLAYBACK_RENDER_STRIDE=50`, `step_count=1`, before vs. after this fix:
+
+| Checkpoint | Before (full K registered) | After (`PLAYBACK_LOOKAHEAD_BEADS=5000`) |
+|---|---|---|
+| Start (0%) | mean 20.30ms, std 31.01ms, max 410.77ms, ~49fps | mean 16.57ms, std 5.59ms, max 95.84ms, ~60fps |
+| Mid (50%) | (not separately measured pre-fix) | mean 18.83ms, std 20.92ms, max 195.43ms, ~53fps |
+| Near-end (95%) | (not separately measured pre-fix) | mean 20.77ms, std 32.56ms, max 277.34ms, ~48fps |
+
+Median frame time stayed ~15.83ms (~63fps) at every checkpoint, both
+before and after -- the fix doesn't change steady-state cost, it shrinks
+the periodic spikes, most dramatically early/mid-playback where the
+registered capacity is smallest relative to `K`. Spikes still grow as
+capacity approaches `K` late in playback (expected -- the final state
+genuinely needs the full mesh registered), converging toward the original
+behavior by 100%. `PLAYBACK_LOOKAHEAD_BEADS` was tested at 1000 vs. 5000:
+negligible difference at mid/near-end checkpoints (spike size there is
+dominated by *revealed* progress, not the lookahead margin), so 5000 was
+kept for fewer total re-registration events at no measured cost.
+
+Visually verified at 50% and 100% revealed (overview + low-grazing angles):
+no gaps, misalignment, or missing geometry at the capacity-growth boundary.
+
+**Non-revertible unless:** a future profiling pass finds the remaining
+near-end spikes still unacceptable, at which point the fix is reducing
+displayed triangle count itself (bead-mesh LOD/decimation, S1.9's
+long-flagged future option) rather than further lookahead tuning -- this
+pass's checkpoint measurements show the spike near 100% progress is
+already close to the original full-K behavior by construction, not a
+tuning gap.
+
+**Verified on:** 2026-07-17
+
+**Addendum (2026-07-17):** a post-landing review found the regrowth
+condition as first written (`target_capacity > self._registered_bead_
+capacity`, with `target_capacity = new_revealed + PLAYBACK_LOOKAHEAD_BEADS`)
+reduces to `new_revealed_now > new_revealed_at_last_growth` -- since
+`PLAYBACK_LOOKAHEAD_BEADS` is constant, that's true on essentially every
+push that reveals any new bead at all, not just when progress actually
+outgrows the registered window. In practice this meant `register_surface_
+mesh()` (the expensive path) fired on nearly every render-stride push once
+printing started, growing toward `K` in lockstep with revealed progress
+rather than jumping in rare `PLAYBACK_LOOKAHEAD_BEADS`-sized chunks --
+`update_vertex_positions()` (the cheap path this fix was meant to make the
+common case) was effectively dead code. This plausibly explains this
+section's own "spikes still grow as capacity approaches K late in
+playback" observation as the bug, not an inherent limit. Fixed by gating
+growth on `finished or new_revealed >= self._registered_bead_capacity`
+instead of comparing the shifted target against the old capacity
+(`geometry_backend.py`, `advance_toolpath_playback()`). The frame-time
+table above was measured against the buggy version and hasn't been
+re-measured since.
