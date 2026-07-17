@@ -1007,3 +1007,59 @@ instead of comparing the shifted target against the old capacity
 (`geometry_backend.py`, `advance_toolpath_playback()`). The frame-time
 table above was measured against the buggy version and hasn't been
 re-measured since.
+
+## S1.21 Toolpath IK precompute persisted to disk, keyed on G-code content hash + build-plate pose
+
+**Decision:** roadmap 5.10. `run_toolpath_ik_precompute()` now tries
+`load_toolpath_precompute_cache()` before parsing the G-code; on a hit it
+returns immediately with `precompute_joint_path` already populated,
+skipping parsing and IK entirely. `step_toolpath_ik_precompute()` calls
+the new `save_toolpath_precompute_cache()` only on its successful-completion
+branch (never on an aborted or cancelled precompute), writing
+`assets/models/gcode/model.precompute.npz` (already covered by
+`.gitignore`'s `assets/models/gcode/*.npz` pattern).
+
+The cache key (`_toolpath_cache_meta()`) is a plain dict compared by
+equality, not a hash-of-hash: `{version, gcode_sha256, user_frame}`.
+`gcode_sha256` is a SHA-256 of the G-code file's bytes, hashed fresh from
+disk on every check -- content-based, not mtime-based, so a
+hand-edited-then-reverted file with an unchanged mtime still keys
+correctly. `user_frame` is the **full 4x4** `T_user_frame` (rounded to 6
+decimals to absorb float noise), not just the 3x3 rotation that
+`precompute_R_target` snapshots elsewhere -- waypoint XYZ positions are
+baked through `T_user_frame`'s translation too, in
+`build_toolpath_waypoints_world()`, so the translation has to be part of
+the key or a plate move that only translates (no rotation) would false-hit.
+`version` is a manual `PRECOMPUTE_CACHE_VERSION` bump point for future
+schema changes. The key is captured once, at precompute-start (mirroring
+`precompute_R_target`'s snapshot timing), not read live at save-time, so a
+plate move mid-precompute doesn't retroactively change what gets written.
+
+The roadmap's original draft text for 5.10 also listed "keyframe params"
+as part of the key -- that refers to a keyframe-interpolation feature that
+exists only on the divergent `planar-printing-prototype` branch. `main`'s
+waypoints are 1:1 with parsed G-code lines (S1.12); there's no keyframing
+concept on `main` to key on, so that element was dropped rather than
+invented. Ground clearance (`_branch_clears_ground`) is a hardcoded
+world-z=0 check with no tunable constant, so it's likewise not part of the
+key.
+
+Save is best-effort, wrapped in a bare `try/except: pass` -- a disk-write
+failure (full disk, permissions) must never surface as a failure of the
+precompute itself, which already succeeded in memory. Load is fail-open:
+any mismatch or exception (missing file, corrupt `.npz`, schema mismatch)
+is treated as a plain cache miss, falling through to the normal
+parse/solve path, never raising.
+
+This mechanism was prototyped first on the `planar-printing-prototype`
+branch (different state-variable names -- `toolpath_joint_path`,
+`toolpath_precompute_*` -- and an extra keyframe-params key element not
+applicable here) before being ported to `main`'s actual precompute
+architecture and variable names.
+
+**Non-revertible unless:** roadmap 5.11 (invalidating a precompute or
+playback run against a since-moved plate mid-session) turns out to need a
+different key shape than what's captured here -- this pass only handles
+the cross-session case (cache checked once, at the start of a fresh
+precompute), not staleness introduced after a precompute is already
+running or already loaded.

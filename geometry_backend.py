@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import hashlib
 import polyscope as ps
 import numpy as np
 import trimesh
@@ -77,6 +78,9 @@ PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # solve_ik_tcp_matrix + the ground-clearance filter at benchy scale (see
 # settled.md S1.13's verification), so this is roughly a 12ms slice per frame.
 
+GCODE_PRECOMPUTE_CACHE = os.path.join(GCODE_DIR, "model.precompute.npz")  # roadmap 5.10, settled.md S1.21
+PRECOMPUTE_CACHE_VERSION = 1  # Bump to invalidate all existing caches on a schema change
+
 
 class VisContent:
     """
@@ -111,6 +115,7 @@ class VisContent:
         self.precompute_ref = None
         self.precompute_joint_path = []
         self.precompute_status = ""
+        self.precompute_cache_meta = None  # Cache key captured at precompute-start, see run_toolpath_ik_precompute()
 
         # Progressive-reveal playback state -- roadmap Stage5_README.md 5.7,
         # settled.md S1.16. Mirrors the precompute state above: playback_running
@@ -702,6 +707,74 @@ class VisContent:
         return joint_path, f"Solved {len(joint_path)} waypoint(s)"
 
 
+    def _toolpath_cache_meta(self, user_frame):
+        """Cache-key dict for the toolpath precompute cache -- roadmap
+        Stage5_README.md 5.10, settled.md S1.21. Compared by dict equality,
+        not a hash-of-hash, so any single differing element is an
+        unambiguous miss. Hashes the G-code file fresh from disk by content
+        (SHA-256), not mtime -- a hand-edited-then-reverted file with an
+        unchanged mtime still keys correctly. user_frame is the full 4x4
+        build-plate pose, not just precompute_R_target's 3x3 rotation --
+        waypoint XYZ positions are baked through T_user_frame's translation
+        too (build_toolpath_waypoints_world). Rounded to 6 decimals to
+        absorb float noise from repeated matrix ops without causing
+        false-negative cache misses."""
+        with open(os.path.join(GCODE_DIR, GCODE_FILE), "rb") as f:
+            gcode_sha256 = hashlib.sha256(f.read()).hexdigest()
+        return {
+            "version": PRECOMPUTE_CACHE_VERSION,
+            "gcode_sha256": gcode_sha256,
+            "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
+        }
+
+
+    def save_toolpath_precompute_cache(self):
+        """Best-effort write of a just-completed precompute to
+        GCODE_PRECOMPUTE_CACHE, tagged with the key captured at
+        precompute-start (self.precompute_cache_meta) -- roadmap
+        Stage5_README.md 5.10. Called only from step_toolpath_ik_precompute()'s
+        successful-completion branch, never on an aborted/cancelled
+        precompute. Wrapped in a bare except: a cache-write failure (disk
+        full, permissions) must never surface as a failure of the
+        precompute itself, which already succeeded in memory."""
+        try:
+            np.savez(
+                GCODE_PRECOMPUTE_CACHE,
+                joint_path=np.asarray(self.precompute_joint_path, dtype=np.float32),
+                meta=np.array(json.dumps(self.precompute_cache_meta)))
+        except Exception:
+            pass
+
+
+    def load_toolpath_precompute_cache(self):
+        """Attempt to load a previously-saved precompute instead of
+        re-solving -- roadmap Stage5_README.md 5.10. Rebuilds the cache key
+        from the live self.T_user_frame (safe here since this only ever
+        runs before any solving has started for the session) and compares
+        it by dict equality against the cached meta. Any mismatch
+        (different G-code content, moved plate, version bump) or any error
+        (missing files, corrupt npz) is treated as a plain cache miss --
+        fails open, letting the caller fall through to the normal
+        parse/solve path; never raises."""
+        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
+        if not (os.path.exists(GCODE_PRECOMPUTE_CACHE) and os.path.exists(filepath)):
+            return False
+        try:
+            cached = np.load(GCODE_PRECOMPUTE_CACHE, allow_pickle=False)
+            if json.loads(cached["meta"].item()) != self._toolpath_cache_meta(self.T_user_frame):
+                return False
+            joint_path = cached["joint_path"].astype(float)
+        except Exception:
+            return False
+
+        self.precompute_joint_path = list(joint_path)
+        self.precompute_index = len(joint_path)
+        self.precompute_total = len(joint_path)
+        self.precompute_running = False
+        self.precompute_status = f"Loaded {len(joint_path)} waypoint(s) from cache"
+        return True
+
+
     def run_toolpath_ik_precompute(self, joint_limits, reference_joint_angles=None):
         """Start or resume the chunked toolpath IK precompute -- roadmap
         Stage5_README.md 5.6. Mirrors the GUI's playback Run button
@@ -715,8 +788,15 @@ class VisContent:
         via parse_gcode() + build_toolpath_waypoints_world(), not a cached
         result from load_gcode() (which only keeps extruding-G1 preview
         beads, not the raw 1:1 waypoint list).
+
+        Before parsing, tries load_toolpath_precompute_cache() -- on a hit,
+        returns immediately with a completed path already loaded, skipping
+        G-code parsing and IK entirely (roadmap Stage5_README.md 5.10).
         """
         if self.precompute_waypoints is None:
+            if self.load_toolpath_precompute_cache():
+                return
+
             filepath = os.path.join(GCODE_DIR, GCODE_FILE)
             if not os.path.exists(filepath):
                 self.precompute_status = "No G-code file found"
@@ -736,6 +816,7 @@ class VisContent:
             self.precompute_joint_path = []
             self.precompute_ref = (
                 reference_joint_angles if reference_joint_angles is not None else self.current_joint_angles)
+            self.precompute_cache_meta = self._toolpath_cache_meta(self.T_user_frame)
 
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
@@ -759,6 +840,7 @@ class VisContent:
         self.precompute_total = 0
         self.precompute_joint_path = []
         self.precompute_status = ""
+        self.precompute_cache_meta = None
 
 
     def step_toolpath_ik_precompute(self):
@@ -800,6 +882,7 @@ class VisContent:
         if self.precompute_index >= self.precompute_total:
             self.precompute_running = False
             self.precompute_status = f"Solved {self.precompute_total} waypoint(s)"
+            self.save_toolpath_precompute_cache()
         else:
             self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
 
