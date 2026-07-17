@@ -120,8 +120,7 @@ class UI_Menu:
 
             if psim.Button("Move"):
                 self.content.load_build_plate(self.bp_target_pos, self.bp_target_rpy)
-                self.content.load_gcode()  # Keep the toolpath preview in sync with the new pose
-                self.bp_status = "Build plate moved"
+                self.bp_status = "Build plate moved -- click 'Load G-code preview' to refresh"
 
             psim.SameLine()
 
@@ -129,8 +128,7 @@ class UI_Menu:
                 self.bp_target_pos = np.array(USER_FRAME_ORIGIN_MM, dtype=float)
                 self.bp_target_rpy = np.zeros(3)
                 self.content.load_build_plate()
-                self.content.load_gcode()
-                self.bp_status = "Reset to default"
+                self.bp_status = "Reset to default -- click 'Load G-code preview' to refresh"
 
             psim.Spacing()
             psim.Spacing()
@@ -146,7 +144,7 @@ class UI_Menu:
                 if pos is not None:
                     self.bp_target_pos = pos
                     self.bp_target_rpy = rpy
-                    self.content.load_gcode()
+                    self.bp_status = "Loaded saved position -- click 'Load G-code preview' to refresh"
                 else:
                     self.bp_status = status
 

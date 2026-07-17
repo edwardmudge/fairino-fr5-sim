@@ -265,6 +265,10 @@ reload call.
 
 **Verified on:** 2026-07-09
 
+**Superseded by:** S1.23 -- the button-triggered `load_gcode()` calls
+this decision added were removed; the preview no longer auto-reloads on
+any of the three buttons.
+
 ## S1.9 G-code preview renders as a swept bead surface mesh; bead height comes from the printed Z sequence, not parsed slicer metadata; bead width assumes a fixed filament diameter
 
 **Decision:** `load_gcode()` (`geometry_backend.py`) now builds a solid
@@ -1063,3 +1067,84 @@ different key shape than what's captured here -- this pass only handles
 the cross-session case (cache checked once, at the start of a fresh
 precompute), not staleness introduced after a precompute is already
 running or already loaded.
+
+**Resolved by:** S1.22 -- 5.11 reused this key shape as-is
+(`precompute_cache_meta["user_frame"]`) for the in-session check, so no
+change was needed here after all.
+
+## S1.22 In-session precompute/playback invalidation on plate move, compared against the same pose captured at precompute-start
+
+**Decision:** roadmap 5.11. `load_build_plate()` (`geometry_backend.py`)
+-- the single function all three Build Plate Orientation buttons (Move,
+Reset, Load Saved Position) call -- now compares the freshly-set
+`self.T_user_frame` (rounded to 6 decimals) against
+`self.precompute_cache_meta["user_frame"]`, the pose snapshotted at
+`run_toolpath_ik_precompute()`'s start (S1.21). On a mismatch:
+
+1. `cancel_toolpath_ik_precompute()` is called (the same reset the
+   Cancel button triggers), wiping `precompute_waypoints`/
+   `precompute_joint_path`/`precompute_cache_meta`/`precompute_running`,
+   followed by a clearer `precompute_status` explaining the plate moved.
+2. Playback state is reset directly (`playback_running`,
+   `playback_index`, `playback_total`, `gcode_bead_verts_full`) rather
+   than relying on `precompute_joint_path` alone becoming empty --
+   without this, a previously-initialized-but-idle playback would skip
+   re-init (`run_toolpath_playback()`'s `gcode_bead_verts_full is None`
+   guard) and index into the now-empty joint path with a stale
+   `playback_index`, crashing instead of refusing cleanly.
+3. The check is skipped entirely while `precompute_cache_meta is None`
+   (no precompute has run yet this session), so moving the plate before
+   ever precomputing is unchanged.
+
+This exposed a real gap in `load_toolpath_precompute_cache()` (S1.21):
+on a disk-cache hit it populated `precompute_joint_path` but never set
+`precompute_cache_meta`, so a precompute loaded from disk (the common
+path -- instant load at the start of a session) had no recorded pose for
+this check to compare against, and a subsequent plate move would go
+unnoticed. Fixed by setting `precompute_cache_meta = cached_meta` once
+the cache's meta has matched the live pose (the dict that comparison
+already validated, not a fresh `_toolpath_cache_meta()` call).
+
+The comparison reads `precompute_cache_meta["user_frame"]` directly
+instead of calling `_toolpath_cache_meta()` again, since that method also
+re-hashes the G-code file from disk -- unnecessary I/O for a pure pose
+check, and a needless failure point when no G-code is loaded yet.
+
+**Reason:** S1.21 only checks the cache key once, at the start of a
+fresh `run_toolpath_ik_precompute()` call -- a precompute or playback
+already sitting in memory (completed, paused, or mid-progress) had no
+mechanism to notice the plate moved out from under it, so pressing "Run
+Precompute" again would silently no-op/resume against the old pose, and
+playback would drive the arm through stale joint angles while the (then
+still auto-reloading) preview mesh showed the new pose -- see S1.23 for
+why that preview auto-reload was also removed as part of this stage.
+
+**Verified on:** 2026-07-17
+
+## S1.23 G-code preview no longer auto-reloads on plate move; supersedes S1.8's button-triggered reload
+
+**Decision:** roadmap 5.11. `gui_panel.py`'s Move, Reset, and Load Saved
+Position button handlers no longer call `self.content.load_gcode()`
+after `load_build_plate()`. Each sets `bp_status` to prompt an explicit
+"Load G-code preview" click instead.
+
+**Reason:** S1.8's automatic reload meant the preview mesh always
+tracked the plate while the precompute/playback state (S1.22's subject)
+silently went stale -- an inconsistent mix of automatic and stale
+behavior that made the staleness bug easy to miss (a user moving the
+plate would see the preview jump correctly and reasonably assume
+everything else followed). Removing the auto-reload makes plate-move
+behavior consistent end-to-end: nothing -- preview, precompute, or
+playback -- auto-refreshes on a plate move; every part requires an
+explicit user action, each surfaced with a status message saying so.
+This doesn't affect the correctness of a fresh precompute:
+`run_toolpath_ik_precompute()` re-parses the G-code and reads
+`self.T_user_frame` live, independent of whatever the preview mesh
+currently displays.
+
+**Non-revertible unless:** plate repositioning becomes continuous/live
+(same condition S1.8 itself named), at which point a real per-frame
+pipeline would be needed for the preview regardless of what triggers a
+reload.
+
+**Verified on:** 2026-07-17

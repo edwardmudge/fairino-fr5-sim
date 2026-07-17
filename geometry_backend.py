@@ -180,13 +180,33 @@ class VisContent:
         replaces the prior structures of the same names. position_mm marks
         the plate's resting/bottom face -- the raw mesh's local origin sits
         at its top face instead, so local vertices are shifted up by
-        PLATE_THICKNESS_MM before the transform to compensate."""
+        PLATE_THICKNESS_MM before the transform to compensate.
+
+        Also invalidates any in-memory toolpath precompute/playback solved
+        against the plate's previous pose -- roadmap Stage5_README.md 5.11,
+        settled.md S1.22. The cross-session disk cache (5.10/S1.21) already
+        keys on pose, but that's only checked once, at the start of a fresh
+        precompute; without this, resuming/replaying an already-loaded
+        precompute after a plate move would silently drive the arm through
+        the old pose's joint path."""
         roll, pitch, yaw = np.deg2rad(rpy_deg)
         R = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
 
         self.T_user_frame = np.eye(4)
         self.T_user_frame[:3, :3] = R
         self.T_user_frame[:3, 3] = position_mm
+
+        if self.precompute_cache_meta is not None:
+            new_pose = np.round(self.T_user_frame, 6).tolist()
+            if new_pose != self.precompute_cache_meta["user_frame"]:
+                self.cancel_toolpath_ik_precompute()
+                self.precompute_status = "Build plate moved -- precompute invalidated, run again"
+
+                self.playback_running = False
+                self.playback_index = 0
+                self.playback_total = 0
+                self.gcode_bead_verts_full = None
+                self.playback_status = ""
 
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
         plate_verts_local = plate.vertices + np.array([0.0, 0.0, PLATE_THICKNESS_MM])
@@ -761,7 +781,8 @@ class VisContent:
             return False
         try:
             cached = np.load(GCODE_PRECOMPUTE_CACHE, allow_pickle=False)
-            if json.loads(cached["meta"].item()) != self._toolpath_cache_meta(self.T_user_frame):
+            cached_meta = json.loads(cached["meta"].item())
+            if cached_meta != self._toolpath_cache_meta(self.T_user_frame):
                 return False
             joint_path = cached["joint_path"].astype(float)
         except Exception:
@@ -772,6 +793,10 @@ class VisContent:
         self.precompute_total = len(joint_path)
         self.precompute_running = False
         self.precompute_status = f"Loaded {len(joint_path)} waypoint(s) from cache"
+        # Record the pose this load matched, so a later plate move can be
+        # detected as staleness (roadmap 5.11, settled.md S1.22) even though
+        # this path skipped run_toolpath_ik_precompute()'s own snapshot.
+        self.precompute_cache_meta = cached_meta
         return True
 
 
