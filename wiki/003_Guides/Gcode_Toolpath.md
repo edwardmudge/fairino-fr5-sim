@@ -121,7 +121,13 @@ per-structure transparency-mode opt-in found), not on rendering cost.
    S1.19, S1.20.
 10. The mesh is registered via `ps.register_surface_mesh("G-code Print",
     ...)` and colored `GCODE_COLOR` — same-name re-registration replaces
-    the prior mesh, no explicit clear needed.
+    the prior mesh on reload, no explicit clear needed for that case. An
+    explicit `clear_gcode_preview()` also exists (the GUI's "Clear G-code
+    preview" button, shown next to "Load G-code preview" once a preview is
+    loaded) to remove it outright — it reuses
+    `_reset_toolpath_playback_state()`, so it also resets playback state
+    since the same `"G-code Print"` structure is shared with the playback
+    reveal mesh.
 11. `load_gcode()` is called only from the "Load G-code preview" button
     (`gui_panel.py`) — **not** from the Build Plate Orientation panel's
     Move/Reset/Load Saved Position buttons. Repositioning the plate does
@@ -192,13 +198,16 @@ Module-level constants in `geometry_backend.py`:
 ## Code anchors
 
 - `geometry_backend.py`: `parse_gcode()`, `load_gcode()`,
-  `_build_gcode_beads()` (including its `bead_face_prefix` return value),
-  `_BEAD_BOX_FACE_TEMPLATE`, `GCODE_DIR`, `GCODE_FILE`,
-  `FILAMENT_DIAMETER_MM`, `GCODE_COLOR`, `GCODE_MOVE_RE`,
+  `clear_gcode_preview()`, `_build_gcode_beads()` (including its
+  `bead_face_prefix` return value), `_BEAD_BOX_FACE_TEMPLATE`, `GCODE_DIR`,
+  `GCODE_FILE`, `FILAMENT_DIAMETER_MM`, `GCODE_COLOR`, `GCODE_MOVE_RE`,
   `CAP_CULL_COLINEAR_DOT_MIN`, `CAP_CULL_WIDTH_TOL_MM`.
 - `gui_panel.py`: "Load G-code preview" button ("I/O Operations" section) is
   the only caller of `load_gcode()` — the Move/Reset/Load Saved Position
-  buttons ("Build Plate Orientation" section) do not call it (S1.23).
+  buttons ("Build Plate Orientation" section) do not call it (S1.23). A
+  "Clear G-code preview" button appears next to it, conditionally, once
+  `self.content.gcode_print_handle is not None`, and calls
+  `clear_gcode_preview()`.
 - `assets/models/gcode/square_test.gcode` — the original verification
   fixture; not loaded by default (that's now `model.gcode`), but usable
   by temporarily swapping `GCODE_FILE`.

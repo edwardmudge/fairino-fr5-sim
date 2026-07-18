@@ -452,8 +452,17 @@ class VisContent:
         if len(verts_world) == 0:
             return
 
-        handle = ps.register_surface_mesh("G-code Print", verts_world, faces)
-        handle.set_color(GCODE_COLOR)
+        self.gcode_print_handle = ps.register_surface_mesh("G-code Print", verts_world, faces)
+        self.gcode_print_handle.set_color(GCODE_COLOR)
+
+
+    def clear_gcode_preview(self):
+        """Mirrors the GUI's toggled "Clear G-code preview" button: removes
+        the "G-code Print" mesh and resets playback state, since the same
+        structure is reused for the playback reveal animation -- leaving
+        playback_index pointed at now-discarded bead arrays would break the
+        next Run Toolpath. Safe to call with nothing loaded."""
+        self._reset_toolpath_playback_state()
 
 
     def build_toolpath_waypoints_world(self, gcode_points):

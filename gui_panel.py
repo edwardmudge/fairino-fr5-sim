@@ -87,7 +87,12 @@ class UI_Menu:
         if psim.TreeNode("I/O Operations"):
             if psim.Button("Load G-code preview"):
                 self.content.load_gcode()
-            
+
+            if self.content.gcode_print_handle is not None:
+                psim.SameLine()
+                if psim.Button("Clear G-code preview"):
+                    self.content.clear_gcode_preview()
+
             psim.Spacing()
             psim.Spacing()
 

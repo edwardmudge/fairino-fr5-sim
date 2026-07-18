@@ -30,7 +30,7 @@ corresponding FR5 arm configuration in an interactive 3D window.
 | Tool head + TCP tracking | done | See `wiki/003_Guides/TCP_Frame.md` |
 | Analytical IK | done | Closed-form solver, multi-solution — see `settled.md` S1.4/S1.5 |
 | TCP trajectory recording | done | See `wiki/003_Guides/TCP_Trajectory.md` |
-| G-code toolpath preview | done | G0/G1-only parser, fixed `model.gcode` path, registered via an explicit "Load G-code preview" click — does **not** auto-reload on plate reposition (that auto-reload was removed, see `settled.md` S1.23) — see `wiki/003_Guides/Gcode_Toolpath.md`, `settled.md` S1.7/S1.8 |
+| G-code toolpath preview | done | G0/G1-only parser, fixed `model.gcode` path, registered via an explicit "Load G-code preview" click — does **not** auto-reload on plate reposition (that auto-reload was removed, see `settled.md` S1.23); removable via a conditionally-shown "Clear G-code preview" button (`clear_gcode_preview()`) — see `wiki/003_Guides/Gcode_Toolpath.md`, `settled.md` S1.7/S1.8 |
 | Build-plate position/orientation | done | Re-posable via Move/Reset/Save/Load Position buttons — see `wiki/003_Guides/BuildPlate_UserFrame.md`, `settled.md` S1.6 |
 | Toolpath IK precompute | done | Chunked (`PRECOMPUTE_CHUNK_SIZE` waypoints/frame), pausable/resumable/cancellable, ground-clearance filtered — see `settled.md` S1.14/S1.15 |
 | Toolpath precompute disk cache | done | `assets/models/gcode/model.precompute.npz`, keyed on G-code SHA-256 + build-plate pose + version; loaded before re-solving on `run_toolpath_ik_precompute()` — see `settled.md` S1.21 |
