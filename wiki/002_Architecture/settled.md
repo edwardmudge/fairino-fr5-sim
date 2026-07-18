@@ -213,7 +213,7 @@ positioning), `G20` (inch units), or any other G/M/T-code is discarded
 by the existing `if code not in (0, 1): continue` filter in
 `parse_gcode()` -- a software-side filter, not an assumption that Cura
 will never emit them. `GCODE_DIR`/`GCODE_FILE` remain hardcoded
-constants, now `assets/models/gcode/model.gcode` -- a **fixed**
+constants, now `assets/models/planar/gcode/model.gcode` -- a **fixed**
 name/location every Cura export is saved to, not hand-edited per
 session; no file-picker/text-input was added.
 
@@ -784,7 +784,7 @@ reported playback still felt laggy after that change. Raised
    5.10/5.11).
 2. **Root-cause measurement**, using a script that loads the real
    ~187,000-line `model.gcode` and a cached keyframe-interpolated joint
-   path (`assets/models/gcode/model.precompute.npz`, sha256-verified
+   path (`assets/models/planar/gcode/model.precompute.npz`, sha256-verified
    against the current G-code + default plate pose, borrowed purely as a
    fast way to get a real dense joint path for a *rendering* benchmark --
    not evidence that keyframe interpolation was adopted). Real bead mesh:
@@ -858,7 +858,7 @@ update frequency), but cap culling is a genuine, zero-risk reduction in
 what actually gets drawn -- not an approximation, since the culled faces
 are geometrically proven to never be visible.
 
-Measured on the real benchy (`assets/models/gcode/model.gcode`,
+Measured on the real benchy (`assets/models/planar/gcode/model.gcode`,
 127,677 beads): 107,939 boundaries (85%) are index-chained, but the
 curved-hull shape means most consecutive segments turn slightly, so only
 30,640 pass the full colinear+width-matched test -- **8.0% of triangles**
@@ -1021,8 +1021,8 @@ returns immediately with `precompute_joint_path` already populated,
 skipping parsing and IK entirely. `step_toolpath_ik_precompute()` calls
 the new `save_toolpath_precompute_cache()` only on its successful-completion
 branch (never on an aborted or cancelled precompute), writing
-`assets/models/gcode/model.precompute.npz` (already covered by
-`.gitignore`'s `assets/models/gcode/*.npz` pattern).
+`assets/models/planar/gcode/model.precompute.npz` (already covered by
+`.gitignore`'s `assets/models/planar/gcode/*.npz` pattern).
 
 The cache key (`_toolpath_cache_meta()`) is a plain dict compared by
 equality, not a hash-of-hash: `{version, gcode_sha256, user_frame}`.

@@ -12,3 +12,4 @@ Ideas here may later be rejected or superseded; if this contradicts
 ## Entries
 
 - [`2026-07-09_2d3d_printing_roadmap.md`](2026-07-09_2d3d_printing_roadmap.md) — Stage 5 (2D planar printer) & Stage 6 (curved-surface 3D printing) plan draft. **Superseded** by `tutorials/Stage5_README.md` and `tutorials/Stage6_README.md` — kept here as history per this folder's own convention, not corrected.
+- [`2026-07-18_curved_surface_assets.md`](2026-07-18_curved_surface_assets.md) — Survey of the `assets/models/curved/` RX/TX toolpath assets: measured properties, two corrections to the first-pass reading, the Dijkstra constraint, and the two still-open supervisor questions. Fed into `tutorials/Stage6_README.md`.

@@ -94,7 +94,7 @@ the full record.
   Arcs (`G2`/`G3`) and relative positioning (`G91`) are discarded **in
   software** by decision, not assumed absent from the input file
   (`settled.md` S1.7).
-- A fixed load path, `assets/models/gcode/model.gcode` — every Cura
+- A fixed load path, `assets/models/planar/gcode/model.gcode` — every Cura
   export overwrites the same file; no file-picker UI.
 - The toolpath preview stays in sync with the plate: Move, Reset, and
   Load Saved Position each reload and re-transform the curve against the

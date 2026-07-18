@@ -10,7 +10,7 @@ A static preview of a parsed G-code file's deposited material, drawn on
 the build plate as a solid **swept bead surface mesh** — a box per
 extruding segment, sized from the actual extrusion and layer data, not a
 thin wireframe. Clicking "Load G-code preview" (I/O Operations panel)
-parses `assets/models/gcode/model.gcode` — the fixed name/location every
+parses `assets/models/planar/gcode/model.gcode` — the fixed name/location every
 Cura export is saved to — maps its points into world space via the
 plate's `T_user_frame`, and registers an orange mesh named `"G-code
 Print"` covering only the `G1` (feed) segments that actually extrude —
@@ -142,9 +142,10 @@ per-structure transparency-mode opt-in found), not on rendering cost.
 This is a G0/G1-only line-segment parser, not a general G-code
 interpreter — **by decision**, not just an unbuilt gap: see `settled.md`
 S1.7. It's the project's accepted general-purpose G-code loader, used for
-real Cura exports (the original `square_test.gcode` fixture still exists
-at `assets/models/gcode/square_test.gcode` but isn't the default anymore
-— see the dynamic file loading bullet below); a third-party tokenizer
+real Cura exports (the original `square_test.gcode` verification fixture
+no longer exists on disk — it was dropped during the Stage 6-prep reorg
+that moved `assets/models/gcode/` to `assets/models/planar/gcode/` — see
+the dynamic file loading bullet below); a third-party tokenizer
 (`AndyEveritt/GcodeParser`) was evaluated and
 rejected (generic tokenizer only, no modal-position/G91/arc handling —
 wouldn't have removed any of the actual parsing work). Known
@@ -170,7 +171,7 @@ gaps/non-goals, and where each would need to hook in if ever revisited:
   one uniform-colored mesh. Could color-code by feed rate (`F`) or by
   Z-height/layer.
 - **No dynamic file loading** — the path is the hardcoded `GCODE_DIR`/
-  `GCODE_FILE` constants (`assets/models/gcode/model.gcode`), matching
+  `GCODE_FILE` constants (`assets/models/planar/gcode/model.gcode`), matching
   every other asset loader in this project (no file dialog anywhere in
   the codebase). `GCODE_FILE` is a **fixed** name, not hand-edited per
   session — Cura is configured to always export to `model.gcode`, so a
@@ -191,7 +192,7 @@ Module-level constants in `geometry_backend.py`:
 
 | Constant | Effect |
 |---|---|
-| `GCODE_DIR` / `GCODE_FILE` | Path to the loaded G-code file — `assets/models/gcode/model.gcode`, a fixed name Cura always exports to. |
+| `GCODE_DIR` / `GCODE_FILE` | Path to the loaded G-code file — `assets/models/planar/gcode/model.gcode`, a fixed name Cura always exports to. |
 | `GCODE_COLOR` | RGB color of the bead mesh. |
 | `FILAMENT_DIAMETER_MM` | Assumed filament diameter (mm) used to convert extruded `E` into a bead volume — see `settled.md` S1.9. |
 
@@ -212,9 +213,9 @@ Module-level constants in `geometry_backend.py`:
   `_init_toolpath_playback()` claiming `"G-code Print"` for the playback
   reveal — so the button never appears just because a toolpath run is
   using the mesh.
-- `assets/models/gcode/square_test.gcode` — the original verification
-  fixture; not loaded by default (that's now `model.gcode`), but usable
-  by temporarily swapping `GCODE_FILE`.
+- `square_test.gcode` — the original verification fixture; no longer
+  present on disk (removed during the Stage 6-prep reorg), so `GCODE_FILE`
+  currently has nothing else to swap to.
 - `wiki/002_Architecture/settled.md` S1.3 — why this bypasses the Delta
   pipeline and draws only `G1` segments; S1.7 — why the parser stays
   G0/G1-only and custom (not a third-party tokenizer); S1.8 — the original

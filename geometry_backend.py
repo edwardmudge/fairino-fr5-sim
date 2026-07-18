@@ -48,7 +48,7 @@ USER_FRAME_ORIGIN_MM = np.array([-600.0, -300.0, 0.0])
 USER_FRAME_SCALE_MM = 50.0  # Fixed axes drawn at the user frame, world units (mm)
 BUILD_PLATE_POSITION_FILE = os.path.join(BUILD_PLATE_DIR, "saved_position.json")  # GUI Save/Load Position buttons
 
-GCODE_DIR = "assets/models/gcode"
+GCODE_DIR = "assets/models/planar/gcode"
 GCODE_FILE = "model.gcode"  # Fixed name -- overwritten by each new Cura export, never hand-edited
 GCODE_COLOR = (1.0, 0.55, 0.0)  # Orange, so it doesn't visually merge with the Trajectory curve
 # Assumed, not parsed -- Cura's exported G-code carries no filament/nozzle-diameter

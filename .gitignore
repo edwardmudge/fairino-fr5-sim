@@ -20,6 +20,12 @@ imgui.ini
 # OS cruft
 Thumbs.db
 .DS_Store
-assets/models/3dbenchy.stl
-assets/models/gcode/*.gcode
-assets/models/gcode/*.npz
+assets/models/planar/3dbenchy.stl
+assets/models/planar/gcode/*.gcode
+assets/models/planar/gcode/*.npz
+
+# Curved-surface pipeline verification dumps (scratch output, ~239 MB).
+# Listed explicitly rather than as _verify_* so a differently-named future
+# dump shows up in git status instead of being silently ignored.
+assets/models/curved/_verify_hardmin/
+assets/models/curved/_verify_interpolation/
