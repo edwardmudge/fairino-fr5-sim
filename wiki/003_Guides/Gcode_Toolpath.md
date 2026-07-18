@@ -206,8 +206,12 @@ Module-level constants in `geometry_backend.py`:
   the only caller of `load_gcode()` — the Move/Reset/Load Saved Position
   buttons ("Build Plate Orientation" section) do not call it (S1.23). A
   "Clear G-code preview" button appears next to it, conditionally, once
-  `self.content.gcode_print_handle is not None`, and calls
-  `clear_gcode_preview()`.
+  `self.content.gcode_preview_loaded` is `True`, and calls
+  `clear_gcode_preview()`. That flag is set only by `load_gcode()`'s
+  success path and cleared both by `clear_gcode_preview()` and by
+  `_init_toolpath_playback()` claiming `"G-code Print"` for the playback
+  reveal — so the button never appears just because a toolpath run is
+  using the mesh.
 - `assets/models/gcode/square_test.gcode` — the original verification
   fixture; not loaded by default (that's now `model.gcode`), but usable
   by temporarily swapping `GCODE_FILE`.

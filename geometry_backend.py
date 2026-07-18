@@ -119,6 +119,7 @@ class VisContent:
         self.gcode_bead_face_prefix = None      # (K+1,) cumulative triangle count, see _build_gcode_beads
         self.gcode_bead_verts_current = None    # (K*8,3) working copy, mutated as beads reveal
         self.gcode_print_handle = None          # Polyscope handle, reused across advance() calls
+        self.gcode_preview_loaded = False       # True only while the static preview (not playback) owns "G-code Print"
         self._registered_bead_capacity = 0      # How many beads are actually registered
         # with Polyscope right now, see PLAYBACK_LOOKAHEAD_BEADS
 
@@ -454,6 +455,7 @@ class VisContent:
 
         self.gcode_print_handle = ps.register_surface_mesh("G-code Print", verts_world, faces)
         self.gcode_print_handle.set_color(GCODE_COLOR)
+        self.gcode_preview_loaded = True
 
 
     def clear_gcode_preview(self):
@@ -946,6 +948,7 @@ class VisContent:
         self.gcode_bead_verts_full = None
         self.playback_status = ""
         self.gcode_print_handle = None
+        self.gcode_preview_loaded = False
         ps.remove_surface_mesh("G-code Print", error_if_absent=False)
 
 
@@ -992,6 +995,10 @@ class VisContent:
 
         K = len(reveal_index)
         self._registered_bead_capacity = min(PLAYBACK_LOOKAHEAD_BEADS, K)
+        # From here "G-code Print" belongs to playback's reveal, not the
+        # static preview -- the Clear button should stay hidden until an
+        # explicit Load click claims the mesh again.
+        self.gcode_preview_loaded = False
         self.gcode_print_handle = ps.register_surface_mesh(
             "G-code Print",
             self.gcode_bead_verts_current[:self._registered_bead_capacity * 8],

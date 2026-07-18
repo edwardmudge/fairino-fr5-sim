@@ -1,6 +1,12 @@
 # Fairino FR5 Simulation
 
-A Python-based 3D visualisation tool for a 6-degree-of-freedom Fairino FR5 manipulator.
+A Python-based 3D visualisation tool for a 6-degree-of-freedom Fairino FR5 manipulator that simulates 3D-printing toolpaths on a repositionable build plate.
+
+## Demo
+
+### Planar printing
+
+![Planar printing demo](docs/media/planar_printing.gif)
 
 ## Dependencies
 
