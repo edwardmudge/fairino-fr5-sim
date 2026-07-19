@@ -1411,3 +1411,71 @@ output is bit-identical; drove real `render()` frames via `ps.frame_tick()`
 to confirm the FK resync fires only while not playing and the new
 Build Plate `BeginDisabled` stays balanced across every
 playback/precompute state).
+
+## S1.29 Curved-model placement (roadmap 6.1) uses a translation-only 4x4 centered on the plate's own local bbox, composed with T_user_frame -- same static-geometry pattern as S1.2/S1.3
+
+**Decision:** `load_curved_model()` places the 55 toolpath-curve PLY files
+(reconstructed into 70 polylines, one combined `register_curve_network` per
+layer -- RX, TX) and 3 surface OBJ meshes with a `T_placement` computed from
+measured bounding boxes, not fixed constants: the raw CAD-local points are
+first rotated `CURVED_MODEL_ROTATE_X_DEG` (90°) about local X (the CAD "+z is
+up" assumption -- see below -- turned out wrong), then the *rotated*
+assembly's combined XY bbox-center (curves + all 3 surfaces) is translated
+to the build plate mesh's own local XY bbox-center (derived from
+`plate.bounds`, not hardcoded -- the plate mesh's local origin is a corner,
+not its center), and Z is translated so the rotated assembly's lowest point
+lands at `PLATE_THICKNESS_MM` in plate-local space, matching the same
+resting-face/top-face compensation `load_build_plate()`/
+`build_toolpath_waypoints_world()` already apply. `T_curved = T_user_frame @
+T_placement` is then applied once via a new shared `transform_points()`
+helper (also backfilled into the 3 pre-existing call sites that used to
+inline the same two-line homogeneous-multiply pattern). Static workpiece
+geometry: one-time placement, no Delta transform, same as S1.2/S1.3.
+
+**Amendment (2026-07-19, same day):** the rotation was added after the
+initial translation-only version shipped -- the user confirmed the curves/
+surfaces loaded in the right place but the model itself needed rotating 90°
+about the build plate's local X (red) axis, plate and arm staying put. The
+sign was tested both ways (screenshotted, not guessed): `+90°` about local X
+puts the printable ridge-pattern surface face-up/outward (physically
+correct -- the arm has to reach it); `-90°` puts it face-down into the
+plate (confirmed wrong, unprintable). The rotation is applied to the raw
+local points about the CAD-local origin, before the centering/lift step, so
+the existing bbox-based centering logic re-derives correctly from the
+*rotated* bbox with no other changes needed.
+
+Reconstructing the 70 polylines from the 55 files' disjoint edge-soup PLY
+format needed one correction beyond the roadmap's original "chain-walk from
+a degree-1 endpoint" description: 6 of the 70 pieces
+(`RX_0`/`RX_22`/`RX_27`/`TX_17`/`TX_2`/`TX_6`) are closed loops with no
+degree-1 node at all -- an endpoint-only walk silently drops them. Vertex
+dedup rounds to 3 decimal places (0.001mm); coarser rounding under-merges
+(float export noise), finer rounding fails to merge true duplicates.
+
+**Reason:** The roadmap (`tutorials/Stage6_README.md` 6.1) calls for
+translation-only placement, kept as a single cheap-to-fix 4x4, because the
+CAD data's "+z is up" assumption is unverified (open question, see the
+roadmap and `wiki/001_Inbox/2026-07-18_curved_surface_assets.md`). Deriving
+both the plate-center target and the assembly bbox from measured geometry
+(rather than hand-picked constants) means the placement stays correct if
+either asset is ever re-exported with a different bbox. Verified against
+the real assets: 70 total pieces (35 RX-file-groups, 35 TX-file-groups),
+world min-Z lands exactly on the plate's print surface, combined bbox
+diagonal ~296mm, and RX/TX median nearest-surface distance ~0.46mm/0.38mm
+(asset survey measured 0.48mm/0.37mm on the same files independently).
+
+**Non-revertible unless:** the CAD "+z up" assumption changes again (e.g. a
+re-exported asset drop with a different orientation convention) --
+`CURVED_MODEL_ROTATE_X_DEG` is the one constant to revisit, same
+cheap-to-fix framing as before, now confirmed exercised once already.
+
+**Verified on:** 2026-07-19 -- numeric script cross-checked piece count,
+world-Z clearance, bbox diagonal, and RX/TX surface proximity against an
+independent re-derivation of the same placement math (re-run after the
+rotation amendment, all figures unchanged since rotation doesn't affect
+size/distance); visual check via offscreen `ps.screenshot()` (arm hidden,
+since its zero-pose links reach directly over the plate and occlude the
+view) confirmed RX and TX curves each visibly trace a ridge pattern on
+their own surface, sitting entirely above the plate with nothing poking
+below it, and confirmed the rotated placement puts the printable surface
+face-up with `Surface_Bot` naturally inside/beneath it.

@@ -65,6 +65,28 @@ CAP_CULL_WIDTH_TOL_MM = 0.01
 
 GCODE_MOVE_RE = re.compile(r"([A-Za-z])\s*(-?\d+\.?\d*)")
 
+CURVED_MODEL_DIR = "assets/models/curved"
+CURVED_RX_FILES = [f"RX_{i}.ply" for i in range(28)]  # RX_0..RX_27, all on Surface_RX_Offset
+CURVED_TX_FILES = [f"TX_{i}.ply" for i in range(27)]  # TX_0..TX_26, all on Surface_TX_Base
+CURVED_SURFACE_RX_OFFSET_FILE = "Surface_RX_Offset.obj"
+CURVED_SURFACE_TX_BASE_FILE = "Surface_TX_Base.obj"
+CURVED_SURFACE_BOT_FILE = "Surface_Bot.obj"  # underlying shoulder body, not a print surface -- collision body in 6.5
+
+# Float export noise keeps true duplicate vertices apart past ~3dp -- verified
+# on RX_0.ply (108 raw verts -> exactly 54 nodes, matching the asset survey).
+CURVE_DEDUPE_DECIMALS = 3
+
+CURVED_MODEL_ROTATE_X_DEG = 90.0  # CAD "+z up" assumption was wrong (Stage6_README.md
+# open question) -- +90 about the plate's local X puts the printable ridge surface
+# face-up; -90 was tested and puts it face-down into the plate, confirmed wrong.
+
+RX_CURVE_COLOR = (0.85, 0.15, 0.15)  # red
+TX_CURVE_COLOR = (0.15, 0.35, 0.85)  # blue
+CURVE_RADIUS_MM = 0.5  # thin vs. TRAJECTORY_RADIUS_MM (2.0) -- 70 pieces shouldn't dominate the view
+SURFACE_RX_OFFSET_COLOR = (0.93, 0.80, 0.80)  # pale rose, curves read clearly on top
+SURFACE_TX_BASE_COLOR = (0.80, 0.85, 0.93)    # pale blue
+SURFACE_BOT_COLOR = (0.55, 0.55, 0.55)        # neutral gray, not a print target
+
 PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # per-frame batch well under a 60fps budget. Measured ~0.5ms/waypoint for
 # solve_ik_tcp_matrix + the ground-clearance filter at benchy scale (see
@@ -122,6 +144,8 @@ class VisContent:
         self.gcode_preview_loaded = False       # True only while the static preview (not playback) owns "G-code Print"
         self._registered_bead_capacity = 0      # How many beads are actually registered
         # with Polyscope right now, see PLAYBACK_LOOKAHEAD_BEADS
+
+        self.curved_model_loaded = False  # True once load_curved_model() has registered its structures -- roadmap 6.1/6.6
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -191,8 +215,7 @@ class VisContent:
 
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
         plate_verts_local = plate.vertices + np.array([0.0, 0.0, PLATE_THICKNESS_MM])
-        homo = np.hstack([plate_verts_local, np.ones((len(plate_verts_local), 1))])
-        plate_verts_world = (self.T_user_frame @ homo.T).T[:, :3]
+        plate_verts_world = transform_points(self.T_user_frame, plate_verts_local)
         plate_handle = ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
         plate_handle.set_color(PLATE_COLOR)
 
@@ -423,8 +446,7 @@ class VisContent:
         faces = faces_full[keep_row]
         bead_face_prefix = np.concatenate([[0], np.cumsum(keep_row.sum(axis=1))])
 
-        homo = np.hstack([verts_local, np.ones((len(verts_local), 1))])
-        verts_world = (self.T_user_frame @ homo.T).T[:, :3]
+        verts_world = transform_points(self.T_user_frame, verts_local)
 
         return verts_world, faces, reveal_waypoint_index, bead_face_prefix
 
@@ -467,6 +489,90 @@ class VisContent:
         self._reset_toolpath_playback_state()
 
 
+    def _register_curve_layer(self, name, pieces_local, T_placement, color):
+        """Combine one layer's reconstructed pieces (open + closed) into a
+        single Polyscope curve network -- one structure per layer, not per
+        piece, so a future layer toggle (roadmap 6.6) can show/hide a whole
+        pass at once."""
+        nodes_local, edge_blocks, offset = [], [], 0
+        for piece in pieces_local:
+            n = len(piece)
+            nodes_local.append(piece)
+            edge_blocks.append(np.column_stack([np.arange(n - 1), np.arange(1, n)]) + offset)
+            offset += n
+        nodes_world = transform_points(T_placement, np.vstack(nodes_local))
+        handle = ps.register_curve_network(name, nodes_world, np.vstack(edge_blocks))
+        handle.set_color(color)
+        handle.set_radius(CURVE_RADIUS_MM, relative=False)
+        return handle
+
+
+    def load_curved_model(self):
+        """Load the 55 toolpath-curve PLY files and 3 surface OBJ meshes from
+        CURVED_MODEL_DIR and place them above the build plate -- roadmap
+        Stage6_README.md 6.1. Static workpiece geometry, same as
+        load_build_plate()/load_gcode(): one-time T_user_frame multiply, no
+        Delta transform (settled.md S1.2/S1.3). Safe to call repeatedly;
+        Polyscope replaces the prior structures of the same names.
+
+        Placement is translation plus one fixed rotation (Stage6_README.md's
+        Open Questions: the CAD "+z up" assumption was unverified and turned
+        out wrong -- CURVED_MODEL_ROTATE_X_DEG about local X puts the
+        printable ridge surface face-up, confirmed by which side the
+        surface faced when tested at +90 vs -90): rotate the raw-local
+        points about the CAD-local origin, then center the rotated
+        assembly's XY bbox over the plate mesh's own local XY bbox-center
+        and lift so its lowest point sits at the plate-local print surface
+        -- z=0 after the same PLATE_THICKNESS_MM compensation
+        load_build_plate()/build_toolpath_waypoints_world() already apply
+        (position_mm marks the plate's resting/bottom face, not its top)."""
+        rx_pieces_local = [p for f in CURVED_RX_FILES
+                            for p in reconstruct_polylines(*read_ply_polyline(os.path.join(CURVED_MODEL_DIR, f)))]
+        tx_pieces_local = [p for f in CURVED_TX_FILES
+                            for p in reconstruct_polylines(*read_ply_polyline(os.path.join(CURVED_MODEL_DIR, f)))]
+
+        surface_rx = self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_SURFACE_RX_OFFSET_FILE))
+        surface_tx = self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_SURFACE_TX_BASE_FILE))
+        surface_bot = self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_SURFACE_BOT_FILE))
+
+        R = rot_x(np.deg2rad(CURVED_MODEL_ROTATE_X_DEG))[:3, :3]
+
+        def rotate(pts):
+            return pts @ R.T
+
+        rx_pieces_local = [rotate(p) for p in rx_pieces_local]
+        tx_pieces_local = [rotate(p) for p in tx_pieces_local]
+        surface_rx_verts = rotate(surface_rx.vertices)
+        surface_tx_verts = rotate(surface_tx.vertices)
+        surface_bot_verts = rotate(surface_bot.vertices)
+
+        all_local = np.vstack(rx_pieces_local + tx_pieces_local
+                               + [surface_rx_verts, surface_tx_verts, surface_bot_verts])
+        assembly_min, assembly_max = all_local.min(axis=0), all_local.max(axis=0)
+
+        plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
+        plate_min, plate_max = plate.bounds
+
+        T_placement = np.eye(4)
+        T_placement[:2, 3] = (plate_min[:2] + plate_max[:2]) / 2.0 - (assembly_min[:2] + assembly_max[:2]) / 2.0
+        T_placement[2, 3] = -assembly_min[2] + PLATE_THICKNESS_MM
+        T_curved = self.T_user_frame @ T_placement
+
+        self._register_curve_layer("Curved Toolpath RX", rx_pieces_local, T_curved, RX_CURVE_COLOR)
+        self._register_curve_layer("Curved Toolpath TX", tx_pieces_local, T_curved, TX_CURVE_COLOR)
+
+        for name, verts_local, mesh, color in (
+            ("Surface RX Offset", surface_rx_verts, surface_rx, SURFACE_RX_OFFSET_COLOR),
+            ("Surface TX Base", surface_tx_verts, surface_tx, SURFACE_TX_BASE_COLOR),
+            ("Surface Bot", surface_bot_verts, surface_bot, SURFACE_BOT_COLOR),
+        ):
+            verts_world = transform_points(T_curved, verts_local)
+            handle = ps.register_surface_mesh(name, verts_world, mesh.faces)
+            handle.set_color(color)
+
+        self.curved_model_loaded = True
+
+
     def build_toolpath_waypoints_world(self, gcode_points):
         """
         Map parse_gcode()'s plate-local waypoints to world-space 6-DOF
@@ -494,8 +600,7 @@ class VisContent:
         pts_local = np.array([p for p, _, _ in gcode_points], dtype=float)
         is_feed = [f for _, _, f in gcode_points]
         pts_local[:, 2] += PLATE_THICKNESS_MM
-        homo = np.hstack([pts_local, np.ones((len(pts_local), 1))])
-        pts_world = (self.T_user_frame @ homo.T).T[:, :3]
+        pts_world = transform_points(self.T_user_frame, pts_local)
         R_target = self.T_user_frame[:3, :3].copy()
         return list(zip(pts_world, is_feed)), R_target
 
@@ -1345,6 +1450,98 @@ def _bbox_corners(verts):
     lo, hi = verts.min(axis=0), verts.max(axis=0)
     xs, ys, zs = np.meshgrid([lo[0], hi[0]], [lo[1], hi[1]], [lo[2], hi[2]], indexing='ij')
     return np.stack([xs.ravel(), ys.ravel(), zs.ravel()], axis=1)
+
+
+def transform_points(T, points):
+    """Apply a 4x4 homogeneous transform to an Nx3 point array."""
+    homo = np.hstack([points, np.ones((len(points), 1))])
+    return (T @ homo.T).T[:, :3]
+
+
+def read_ply_polyline(filepath):
+    """Read an ASCII PLY containing only `element vertex` + `element edge`
+    (no faces) -- these reject trimesh.load(force='mesh'), which needs
+    faces to produce anything but a degenerate empty mesh. Returns
+    (verts: Nx3 float64, edges: Mx2 int) exactly as declared in the header;
+    edges are a disjoint segment soup in file order, not a walkable curve
+    -- see reconstruct_polylines()."""
+    with open(filepath) as f:
+        lines = f.readlines()
+    n_vertex = n_edge = header_end = None
+    for i, line in enumerate(lines):
+        if line.startswith("element vertex"):
+            n_vertex = int(line.split()[-1])
+        elif line.startswith("element edge"):
+            n_edge = int(line.split()[-1])
+        elif line.startswith("end_header"):
+            header_end = i + 1
+            break
+    v_end = header_end + n_vertex
+    e_end = v_end + n_edge
+    verts = np.loadtxt(lines[header_end:v_end], dtype=np.float64).reshape(n_vertex, 3)
+    edges = np.loadtxt(lines[v_end:e_end], dtype=int).reshape(n_edge, 2)
+    return verts, edges
+
+
+def reconstruct_polylines(verts, edges, decimals=CURVE_DEDUPE_DECIMALS):
+    """Reassemble a PLY's disjoint edge soup into walkable polyline pieces.
+    Coordinates are deduped by rounding -- float export noise keeps true
+    duplicate points apart past ~3dp (verified: RX_0.ply's 108 raw vertices
+    collapse to exactly 54 nodes at 3dp). A few files also carry one
+    degenerate zero-length edge whose endpoints round to the same node --
+    dropped, it carries no path information.
+
+    Every node has degree <= 2 (no branching, confirmed across all 55
+    files) but not every component has a degree-1 endpoint: 6 files
+    (RX_0/RX_22/RX_27/TX_17/TX_2/TX_6) are single closed loops. Open
+    components are walked from a degree-1 node; any component with none
+    left is a closed loop, walked from an arbitrary node back to itself.
+    Verified lossless (every non-self-loop edge consumed exactly once)
+    across all 55 files -- 70 pieces total, matching the asset survey.
+
+    Returns a list of Nx3 float arrays, one per piece; closed pieces repeat
+    their start point as the last row so every piece can be treated
+    identically as a consecutive-edge stride (see _register_curve_layer)."""
+    rounded = np.round(verts, decimals)
+    uniq, inv = np.unique(rounded, axis=0, return_inverse=True)
+    inv = inv.reshape(-1)
+
+    adjacency = {i: set() for i in range(len(uniq))}
+    for a, b in edges:
+        ua, ub = int(inv[a]), int(inv[b])
+        if ua == ub:
+            continue
+        adjacency[ua].add(ub)
+        adjacency[ub].add(ua)
+
+    visited_nodes = set()
+    n_edges_consumed = 0
+
+    def walk(start):
+        nonlocal n_edges_consumed
+        chain = [start]
+        visited_nodes.add(start)
+        prev, cur = None, start
+        while True:
+            nbrs = [n for n in adjacency[cur] if n != prev]
+            if not nbrs:
+                break
+            nxt = nbrs[0]
+            n_edges_consumed += 1
+            chain.append(nxt)
+            if nxt == start:
+                break
+            visited_nodes.add(nxt)
+            prev, cur = cur, nxt
+        return uniq[chain]
+
+    pieces = [walk(n) for n, adj in adjacency.items() if len(adj) == 1 and n not in visited_nodes]
+    pieces += [walk(n) for n in adjacency if n not in visited_nodes]
+
+    n_unique_edges = len({(min(int(a), int(b)), max(int(a), int(b)))
+                           for a, b in ((inv[a], inv[b]) for a, b in edges) if a != b})
+    assert n_edges_consumed == n_unique_edges, "reconstruct_polylines dropped an edge"
+    return pieces
 
 
 def dh_transform(a, alpha, d, theta):

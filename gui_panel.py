@@ -93,6 +93,9 @@ class UI_Menu:
                 if psim.Button("Clear G-code preview"):
                     self.content.clear_gcode_preview()
 
+            if psim.Button("Load Curved Model"):
+                self.content.load_curved_model()
+
             psim.Spacing()
             psim.Spacing()
 
