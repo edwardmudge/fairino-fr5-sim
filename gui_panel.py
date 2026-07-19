@@ -1,7 +1,8 @@
 import polyscope.imgui as psim
 import numpy as np
 
-from geometry_backend import USER_FRAME_ORIGIN_MM, PRECOMPUTE_CHUNK_SIZE
+from geometry_backend import (USER_FRAME_ORIGIN_MM, PRECOMPUTE_CHUNK_SIZE,
+                               GEODESIC_LAYER_RX, GEODESIC_LAYER_NAMES)
 
 # FR5 practical joint slider ranges (degrees), asymmetric per joint.
 # Source: docs/FR5_Joint_Limits.md "Practical Slider Ranges"
@@ -41,6 +42,8 @@ class UI_Menu:
         self.bp_status = ""
         self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100
         # -- snapped down automatically if it ever outruns precompute
+        self.geodesic_sample_layer = GEODESIC_LAYER_RX  # which layer "Show Sample Geodesic" draws on
+        self.geodesic_sample_most_curved = False  # False = a realistic travel move, True = the highest-ratio pair
 
     def _section_gap(self):
         """Uniform small gap between the numbered top-level sections below."""
@@ -59,6 +62,7 @@ class UI_Menu:
         """This function needs to be called by Polyscope every frame"""
         self.content.record_trajectory_point()
         self.content.step_toolpath_ik_precompute()
+        self.content.step_geodesic_precompute()
         self.content.advance_toolpath_playback(max(1, int(self.playback_speed)))
         if self.content.playback_waiting:
             # Snap down reactively the moment playback hits precompute's throughput
@@ -95,6 +99,50 @@ class UI_Menu:
 
             if psim.Button("Load Curved Model"):
                 self.content.load_curved_model()
+
+            # Minimal geodesic controls for roadmap 6.2's verify step, same
+            # spirit as the bare "Load Curved Model" button above -- the layer
+            # selector and Clear pair are 6.6.
+            if self.content.curved_model_loaded:
+                if self.content.geodesic_running:
+                    if psim.Button("Pause Geodesics"):
+                        self.content.pause_geodesic_precompute()
+                else:
+                    if psim.Button("Build Geodesics"):
+                        self.content.run_geodesic_precompute()
+
+                psim.SameLine()
+
+                if psim.Button("Cancel Geodesics"):
+                    self.content.cancel_geodesic_precompute()
+
+                if self.content.geodesic_loaded:
+                    psim.SameLine()
+                    if psim.Button("Show Sample Geodesic"):
+                        self.content.show_sample_geodesic(
+                            layer=self.geodesic_sample_layer,
+                            mode="most_curved" if self.geodesic_sample_most_curved else "representative")
+
+                    # Which layer the sample draws on. The sample isolates its
+                    # host surface, so RX is viewable despite sitting inside
+                    # Surface_TX_Base. A selector gating load/precompute/
+                    # playback is still 6.6's job -- this one only picks the
+                    # sample.
+                    for i, layer_name in enumerate(GEODESIC_LAYER_NAMES):
+                        if i:
+                            psim.SameLine()
+                        _, self.geodesic_sample_layer = psim.RadioButton(
+                            layer_name, self.geodesic_sample_layer, i)
+
+                    psim.SameLine()
+                    _, self.geodesic_sample_most_curved = psim.Checkbox(
+                        "Most-curved pair", self.geodesic_sample_most_curved)
+
+                total = self.content.geodesic_total
+                fraction = (self.content.geodesic_index / total) if total else 0.0
+                psim.ProgressBar(fraction, overlay=f"{fraction * 100:.0f}%" if total else "")
+
+            psim.TextWrapped(self.content.geodesic_status)
 
             psim.Spacing()
             psim.Spacing()

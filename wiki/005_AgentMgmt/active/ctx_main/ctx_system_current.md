@@ -1,7 +1,7 @@
 ---
 status: active
 scope: current-truth
-last_verified_against_code: 2026-07-17
+last_verified_against_code: 2026-07-19
 ---
 
 # Agent Boot File — FR5 Simulator (Current State)
@@ -36,6 +36,9 @@ corresponding FR5 arm configuration in an interactive 3D window.
 | Toolpath precompute disk cache | done | `assets/models/planar/gcode/model.precompute.npz`, keyed on G-code SHA-256 + build-plate pose + version; loaded before re-solving on `run_toolpath_ik_precompute()` — see `settled.md` S1.21 |
 | Toolpath playback | done | Progressive-reveal (beads start invisible, revealed as playback crosses them), render-throttled (`PLAYBACK_RENDER_STRIDE`, `PLAYBACK_LOOKAHEAD_BEADS`) — see `settled.md` S1.16/S1.17-S1.20 |
 | Precompute/playback invalidation on plate move | done | In-session: `load_build_plate()` compares the new pose against the pose captured at precompute-start and invalidates both if it differs — see `settled.md` S1.22 |
+| Curved-surface model loading (Stage 6.1) | done | 55 toolpath PLY files (reconstructing to 70 polylines) + 3 surface OBJ meshes placed above the plate via a "Load Curved Model" button; retains the placed geometry in world coordinates for 6.2 — see `wiki/003_Guides/CurvedModel_Loading.md`, `settled.md` S1.29/S1.30 |
+| Geodesic routing over print surfaces (Stage 6.2) | done | Two per-surface CSR graphs + hand-rolled `heapq` Dijkstra producing two 70×70 geodesic cost matrices, chunked one source per frame; in-memory only, no disk cache — see `wiki/003_Guides/CurvedModel_Geodesics.md`, `settled.md` S1.31 |
+| Curved-surface print ordering (Stage 6.3) | not started | Cost matrices from 6.2 exist; nothing consumes them yet |
 
 ## Directory Structure
 
@@ -66,4 +69,4 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-See `wiki/002_Architecture/settled.md` (S1.1–S1.24).
+See `wiki/002_Architecture/settled.md` (S1.1–S1.31).

@@ -72,12 +72,12 @@ later sessions don't re-derive it.
 | RX curves lie on | `Surface_RX_Offset.obj` — median point→surface 0.477 mm (vs 2.06 mm to the other two) |
 | TX curves lie on | `Surface_TX_Base.obj` — median 0.368 mm (vs 2.07 / 4.04 mm) |
 | Branching | None. Every node in all 55 files has degree ≤ 2; 0/55 files contain a junction |
-| Piece count | 70 disjoint open polylines — 35 components across 28 RX files, 35 across 27 TX files |
+| Piece count | 70 disjoint polylines — 35 components across 28 RX files, 35 across 27 TX files. ⚠ *Not all open: 6 are closed loops (`RX_0`/`RX_22`/`RX_27`, `TX_2`/`TX_6`/`TX_17`) — corrected during 6.1, see `settled.md` S1.29* |
 | Gaps between pieces | endpoint → nearest other endpoint: median 8.87 mm, max 20.61 mm |
 | Segment length | mean ≈ 1.5–2.0 mm, max ≈ 4.1 mm |
 | Coordinate frame | CAD-local mm. bbox x∈[-225, -38] y∈[12, 169] z∈[-137, +24] — mostly below z=0 |
-| Overall size | bbox diagonal 287 mm |
-| Mesh sizes | `Bot` / `RX_Offset` 30,284 v / 59,943 f; `TX_Base` 45,430 v / 90,089 f. None watertight |
+| Overall size | bbox diagonal ⚠ *287 mm as first recorded here doesn't reproduce; re-measured 2026-07-19 as **294.3 mm** for the curves alone and **296.4 mm** for curves + all 3 surfaces. `settled.md` S1.29's ~296 mm is the figure to use* |
+| Mesh sizes | `Bot` / `RX_Offset` 30,284 v / 59,943 f; `TX_Base` 45,430 v / 90,089 f. None watertight — ⚠ *but **not disconnected**: 6.2 measured each print surface as exactly **one** connected component with every vertex reachable (`settled.md` S1.31). "Not watertight" here means an open shell with a rim (623 boundary edges on `RX_Offset`), not a fragmented one* |
 | `Bot` vs `RX_Offset` | *Not* vertex-corresponding — face arrays differ, so per-vertex subtraction is meaningless |
 | Real vs scratch size | 8.5 MB of input data; 239 MB of `_verify_*` dumps |
 
@@ -96,8 +96,14 @@ edge 1 = (2, 3)     v3 = (-84.808334, 75.438103, -126.235435)   <- == v0
 ```
 
 Edge 1 does not start where edge 0 ends; it *ends* where edge 0 *starts*.
-Reconstructing a polyline needs coordinate dedupe → adjacency map → chain walk
-from a degree-1 endpoint. `RX_0` has 108 vertices collapsing to 54 unique nodes.
+Reconstructing a polyline needs coordinate dedupe → adjacency map → chain walk.
+`RX_0` has 108 vertices collapsing to 54 unique nodes.
+
+⚠ *This note originally said "chain walk **from a degree-1 endpoint**". That
+is insufficient and was corrected during 6.1: 6 of the 70 pieces are closed
+loops with no degree-1 node at all, and an endpoint-only walk silently drops
+them (64 instead of 70). See `settled.md` S1.29 and
+[`CurvedModel_Loading.md`](../003_Guides/CurvedModel_Loading.md).*
 
 **2. RX is not "the toolpath" and TX is not "the surface".** Both are toolpath
 curve sets — every one of the 55 PLY files is vertex+edge with zero faces. The
@@ -113,11 +119,11 @@ traces separated by a dielectric gap. Combined with the shoulder-sensor context
 above, this reads as a **capacitive tactile sensor**: TX (transmit) and RX
 (receive) electrode layers, printed conformally onto the shoulder mockup.
 
-*The "capacitive" reading is inference from the geometry, not something stated
-by the supervisor.* It is load-bearing for the roadmap, though: if it holds,
-RX and TX are two separate ordered print passes rather than one merged path,
-and `Surface_Bot.obj` is a collision body rather than a print target. Worth
-confirming (open question 3).
+*The "capacitive" reading was inference from the geometry, not something
+originally stated by the supervisor; confirmed 2026-07-19 (see Open
+questions, item 3).* RX and TX are two separate ordered print passes rather
+than one merged path, and `Surface_Bot.obj` is a collision body rather than
+a print target.
 
 The earlier RF/ridge-waveguide guess in the first version of this note is
 dropped — it was based on the "ridge network" filenames in `_verify_*`, which
@@ -139,8 +145,14 @@ with one algorithm used twice:
    next curve's start cuts *through* the shoulder shell. Dijkstra over the
    surface mesh's edge graph (weight = edge length) returns a path that hugs
    the surface instead. The gaps are real — median 8.87 mm, max 20.61 mm.
-2. **Print ordering.** Those same geodesic distances form the cost matrix over
-   the 140 curve endpoints that decides which order the 70 pieces print in.
+2. **Print ordering.** Those same geodesic distances form the cost matrix that
+   decides which order the 70 pieces print in.
+
+⚠ *Superseded in detail by 6.2 (`settled.md` S1.31): this is **two** 70×70
+matrices, one per layer on its own surface — explicitly not one merged 140×140
+matrix, since a geodesic between an RX and a TX endpoint is meaningless on
+either mesh. And it needs 113 Dijkstra runs, not 140: distinct endpoints
+frequently snap to the same mesh vertex (58 unique sources for RX, 55 for TX).*
 
 Note there is no `scipy` in the `fairino-fr5-sim` environment (confirmed), so
 this is either a new dependency or a `heapq` hand-roll. The from-scratch
@@ -152,16 +164,26 @@ principle in `AGENTS.md` favours `heapq`.
    build plate, above `z=0`. The source data is CAD-local mm (bbox reaches
    z = -137), so a placement transform is required — it is *not* already in
    robot world coordinates.
-2. **Are the `_verify_*` folders part of the asset contract, or scratch
-   output?** *Still open.* They look like debug dumps from the
-   curve-generation pipeline (likely Rhino/Grasshopper, given the MeshLab OBJ
-   export and disjoint-segment PLY format) rather than something Stage 6 code
-   should load. They are now gitignored on that assumption — reversible if the
-   answer comes back "contract".
-3. **What do RX/TX denote, and which curve(s) get printed?** *Still open.* The
-   measured evidence (two curve sets on two offset surfaces) supports the
-   two-electrode-layer reading above, but confirmation would settle whether
-   they're two passes of one print, two separate prints, or something else.
+2. ~~**Are the `_verify_*` folders part of the asset contract, or scratch
+   output?**~~ **Answered (2026-07-19):** scratch — safe to ignore. Confirms
+   the gitignore assumption below; no reversal needed.
+3. ~~**What do RX/TX denote, and which curve(s) get printed?**~~ **Answered
+   (2026-07-19):** RX and TX are two layers of the printed sensor, offset
+   from each other to represent the print's thickness — confirming the
+   two-electrode-layer reading above. TX is the underlying/base layer and
+   prints first; RX (the offset layer) second. See `settled.md` S1.30.
+
+   ⚠ **Partially reopened, same day** — the *two-layer* reading holds, but
+   the *print order* is now in doubt. Measuring the three surfaces against
+   each other during Stage 6.2 gives median nearest-surface gaps
+   `Surface_Bot` → `Surface_RX_Offset` **2.00 mm** → `Surface_TX_Base`
+   **4.02 mm**, with TX outside RX at 100% of 3,000 sampled points, and each
+   layer's curves following its own surface. The physical stack is therefore
+   **BOT → RX → TX**: `RX_Offset` is the layer against the shoulder body, so
+   at face value **RX** is laid down first, not TX. The filenames say TX is
+   the base; the geometry says otherwise. Open for the supervisor — it
+   decides roadmap 6.3's pass order and the sign of 6.4's hover-offset
+   normal. See S1.30's caveat.
 4. ~~**Storage/tracking plan.**~~ **Resolved** by the gitignore change below.
 
 ## Storage
@@ -179,8 +201,8 @@ are listed explicitly rather than as a `_verify_*` glob so that a
 differently-named future dump shows up in `git status` instead of being
 silently swallowed.
 
-Predicated on open question 2 — trivially reversible, since gitignoring deletes
-nothing.
+Confirmed correct by the answer to open question 2 above (2026-07-19) — was
+trivially reversible either way, since gitignoring deletes nothing.
 
 ## Next step
 

@@ -1479,3 +1479,279 @@ view) confirmed RX and TX curves each visibly trace a ridge pattern on
 their own surface, sitting entirely above the plate with nothing poking
 below it, and confirmed the rotated placement puts the printable surface
 face-up with `Surface_Bot` naturally inside/beneath it.
+
+## S1.30 RX/TX curve layers and `_verify_*` folders confirmed -- two sensor-print layers offset by print thickness (TX base first), `_verify_*` is scratch
+
+**Decision:** Per the user, the two remaining Stage 6 asset open questions
+(roadmap 6.1 / `wiki/001_Inbox/2026-07-18_curved_surface_assets.md`) are
+resolved:
+
+- `_verify_hardmin/` and `_verify_interpolation/` are scratch debug dumps,
+  not asset contract -- no Stage 6 code should read them. The existing
+  gitignore stays as-is.
+- RX and TX are two layers of the printed sensor, offset from each other to
+  represent the print's thickness. TX is the underlying/base layer --
+  printing starts there, then RX (the offset layer) on top. This confirms
+  the two-electrode-layer reading in the asset survey's "Working
+  interpretation" section and the print order roadmap 6.3/"What You Build"
+  already assumed.
+
+**Reason:** Both were flagged as open questions because the RX/TX-as-two-
+passes and `_verify_*`-as-scratch readings were inferred from measured
+geometry and file naming (S1.29, the asset survey), not confirmed. Roadmap
+6.3 (print order) and 6.5 (`Surface_Bot.obj` as a collision body, not a
+print target) were built on that inference and explicitly flagged as
+subject to change if it turned out wrong.
+
+**Non-revertible unless:** a future asset drop changes the RX/TX
+relationship (e.g. a third layer, or the offset no longer represents
+thickness) -- 6.3's two-pass ordering and 6.5's collision treatment of
+`Surface_Bot.obj` are the code that would need to change.
+
+**Verified on:** 2026-07-19 -- user confirmation; no new geometry
+measurement needed, since the underlying geometry was already measured in
+S1.29 and the asset survey.
+
+**⚠ Caveat added 2026-07-19 (open question, decision NOT changed) --
+measured geometry contradicts the recorded print order.** While
+implementing 6.2, the three surfaces were measured against each other:
+median nearest-surface gap `Surface_Bot` -> `Surface_RX_Offset` = **2.00mm**
+-> `Surface_TX_Base` = **4.02mm**, with `TX_Base` outside `RX_Offset` for
+100% of 3,000 sampled points, and each layer's own curves following its own
+surface. So the physical stack is **BOT -> RX -> TX**: `RX_Offset` is the
+layer sitting against the shoulder body, and `TX_Base` is 2mm outboard of
+it. Taken at face value that implies **RX is laid down first**, the reverse
+of this entry.
+
+The filenames (`Surface_TX_Base`, `Surface_RX_Offset`) support this entry as
+written; the geometry supports the opposite. This is left as an **open
+question for the supervisor**, not a reversal -- the decision above came
+from direct user confirmation, and measurement alone shouldn't silently
+overturn it.
+
+Nothing in 6.2 depends on the answer (each layer routes on its own surface
+independently). It does decide roadmap **6.3**'s pass order and the sign of
+**6.4**'s hover-offset surface normal, so it must be resolved before either
+lands.
+
+
+## S1.31 Geodesic routing (roadmap 6.2) -- two per-surface CSR graphs, hand-rolled heapq Dijkstra, one solve per unique snapped vertex, retained predecessor rows
+
+**Decision:** Shortest paths that stay on the print surfaces are computed as
+follows, and `load_curved_model()` now retains the geometry they run over:
+
+- **Two graphs, one per print surface**, never merged. RX routes on
+  `Surface_RX_Offset`, TX on `Surface_TX_Base`; the passes don't interleave
+  (S1.30), so a cross-layer geodesic is meaningless and never computed. Two
+  70x70 cost matrices, not one 140x140.
+- **`load_curved_model()` retains world-space state** --
+  `curved_pieces_world`, `curved_surface_verts_world`,
+  `curved_surface_faces`, `T_curved`. Previously it discarded all of this.
+  World rather than local because everything downstream (6.3 hover offsets,
+  6.4 normals, 6.5 IK) works in the arm's frame. `Surface_Bot` is rendered
+  but not retained -- it is a 6.5 collision body, not a print surface.
+- **Hand-rolled `heapq` Dijkstra**, no `scipy` dependency added.
+- **Flat CSR adjacency returned as Python lists, not numpy arrays.**
+  Measured: identical algorithm and layout, only the container differs, and
+  the bare Dijkstra loop runs ~139ms with numpy element indexing vs ~81ms
+  with lists on Surface_TX_Base -- about 1.7x (numpy boxes a scalar per
+  element access). `.tolist()` costs ~11ms once. *(Corrected 2026-07-19: an
+  earlier version of this entry claimed 174ms vs 83ms / 2.1x, taken from a
+  measurement that was never independently re-run. The decision stands; the
+  margin is 1.7x, not 2.1x.)*
+- **One Dijkstra per unique snapped vertex, not per endpoint** -- 58 unique
+  for RX and 55 for TX, so 113 runs rather than the 140 the roadmap assumed.
+  Duplicate endpoint rows are filled from the same solve by a mask.
+- **Predecessor rows retained** ((S,V) int32, ~17MB) so any individual path
+  is a walk-back via `geodesic_path_nodes()` and never a re-solve. Full
+  `dist` rows are *not* retained -- each is sliced to its 70 endpoint
+  columns and dropped.
+- **Unreachable pairs are `inf`/`None`, reported not aborted.** Unlike
+  `step_toolpath_ik_precompute()`, which aborts the whole job at its first
+  bad waypoint, `step_geodesic_precompute()` has no failure branch:
+  Dijkstra cannot fail, an unreachable target is data, and discarding a
+  70x70 matrix over one disconnected pair would throw away the 4,830 other
+  off-diagonal entries with it.
+- **One whole Dijkstra source per frame** (`GEODESIC_CHUNK_SOURCES = 1`),
+  pumped from `render()` like the Stage 5 precompute.
+- **Geodesic state is a 2-element list** indexed by
+  `GEODESIC_LAYER_RX`/`GEODESIC_LAYER_TX`, not an `_rx`/`_tx` attribute
+  pair -- a divergence from the flat `precompute_*` naming next door.
+- **No disk cache in 6.2.** The run is ~8.4s; 6.5 already schedules
+  per-layer cache files and is the natural place for one.
+
+**Reason:** Each was a real fork. Merged-vs-separate graphs decides whether
+the cost matrices mean anything physically. World-vs-local retention decides
+whether every downstream consumer pays a transform. The Python-list CSR
+looks like a mistake in a numpy codebase without the measurement, and it is
+what makes one-source-per-frame chunking viable at all. Per-unique-vertex
+solving is a 19% saving that also guarantees duplicate rows agree with their
+twin rather than being solved twice and hoping. Retaining predecessor rows
+is what separates "we know the distances" from "we can emit the travel
+move", which is what 6.3 actually needs. The `inf`-not-abort divergence is
+the one a reader is most likely to "fix" into symmetry with its sibling.
+The 2-element list shape is worth recording because it *is* inconsistent
+with the neighbouring naming, deliberately.
+
+**Also settled -- zeros in the cost matrix are real and plentiful.**
+`cost[i][j] == 0.0` for `i != j` whenever two endpoints snap to the same
+vertex. **Counting convention matters here** and an earlier version of this
+entry mixed the two, making the arithmetic look wrong: the matrix is
+symmetric, so one endpoint *pair* produces two *entries*. Measured, as
+entries: 24 off-diagonal zeros in RX (16 from different pieces = 8 pairs,
+8 from a piece's own two ends = 4 pieces), and 30 in TX (18 = 9 pairs, 12 =
+6 pieces). Of the pieces with coincident ends, six across both layers are
+the exact closed loops from S1.29; the rest are near-loops sitting ~0.001mm
+apart, one dedupe quantum short of merging. All are correct, but 6.3's
+greedy chain will face many tied zero-cost moves, so its tie-breaking is a
+real design decision, and `cost[2p][2p+1] == 0.0` on a closed loop must not
+be read as free travel to a different place.
+
+**Also settled -- two consequences of snapping that 6.3 must handle.**
+
+- *Endpoints that look mid-curve.* 16 RX / 18 TX endpoints lie within 0.5mm
+  of another piece's line (the same abutting pieces as the different-piece
+  zeros above, counted as endpoints rather than pairs). Since all 35 pieces
+  of a layer render as one combined curve network, the join is invisible and
+  a path terminating at a genuine piece end appears to stop halfway along a
+  curve. Not a bug -- but it makes visual inspection of piece boundaries
+  unreliable without rendering the endpoints explicitly.
+- *Paths don't quite reach the curve.* A geodesic starts and ends at the
+  snapped mesh vertex, median ~0.36mm and max 0.68mm from the actual curve
+  endpoint. A travel move built straight from these nodes leaves a
+  sub-millimetre gap at both ends. **6.3 (or 6.5's waypoint builder) must
+  decide** whether to close it by appending the true endpoints or accept it
+  as within positioning tolerance.
+
+**Also settled -- the print surfaces are single connected components.** The
+asset survey records both meshes as "not watertight", which is true but does
+not imply disconnected. Measured: RX 30,284/30,284 vertices and TX
+45,430/45,430 reachable, one component each, zero unreachable pairs. The
+unreachability path exists so a future asset drop fails loudly, not because
+the current one needs it -- do not build component-handling machinery.
+
+**Non-revertible unless:** a future asset drop ships a surface large enough
+that one Dijkstra no longer fits a frame budget (the escape hatch is a
+pop-count budget inside `dijkstra_surface` plus carried partial state, which
+is why one-source-per-frame is recorded as a choice rather than a default),
+or a fragmented surface makes unreachable pairs common enough that
+reporting-not-aborting is the wrong call. Adding `scipy` to the environment
+would also reopen the hand-rolled-Dijkstra and brute-force-snap decisions.
+
+**Verified on:** 2026-07-19 -- against the shipped assets. Both cost
+matrices (70,70), symmetric to 1e-9, zero diagonal, all finite, and
+elementwise >= the straight-line distance between the same snapped vertices
+(a surface-constrained path can never beat the chord, so this catches a
+chording bug arithmetically). Sample RX pair 36->30: geodesic 317.1mm over
+254 nodes vs 218.9mm chord; every consecutive step 1.583mm or less, under
+the mesh's 1.907mm max edge, with segment lengths summing exactly to the
+reported cost -- so every step is a real triangle edge. A 400-point sample
+along one chord dives up to 51.9mm into the shell interior while every
+geodesic node sits on the surface by construction. Visually confirmed by
+offscreen screenshot (arm hidden, as in S1.29): green geodesic draped over
+`Surface RX Offset`, magenta chord passing through open space beneath it.
+Interaction verified: build-without-model, pause-freezes, resume-without-
+restart, cancel-clears-and-removes-curves, sample-before-ready,
+reload-invalidates, plate-move-invalidates.
+
+**Amended 2026-07-19 -- sample-geodesic presentation (`show_sample_geodesic`).**
+As first shipped, the verification aid was unusable and its own verification
+was invalid. Both are fixed:
+
+- **It rendered nothing visible.** The default layer is RX, and
+  `Surface_RX_Offset` is sealed inside `Surface_TX_Base` (see S1.30's caveat
+  -- TX sits a uniform 2mm outboard). The green geodesic drew *inside* the
+  TX shell; the only visible artifact was the magenta comparison chord
+  leaving the surface into open space, which reads as a broken geodesic.
+  `show_sample_geodesic()` now **isolates its host surface** -- hides the
+  other layer's surface and curves plus `Surface_Bot`, ghosts the host to
+  `GEODESIC_HOST_TRANSPARENCY` -- snapshotting prior visibility into
+  `_geodesic_isolation_prior` and restoring it in
+  `_abort_geodesic_precompute()`, so the aid isn't a one-way trip through
+  the user's view settings. The isolate step is re-entrant: a second sample
+  doesn't record the already-isolated state as if it were the user's.
+- **Its verification was staged.** The original screenshot was taken with
+  the occluding surfaces manually disabled *by the verifying script*, so it
+  confirmed the geometry while proving nothing about the feature. **A visual
+  check must exercise the same code path the user triggers.** The replacement
+  screenshots change nothing but hiding the arm (whose zero-pose links
+  occlude the plate, as in S1.29).
+- **Its default pair was unrepresentative.** It picked the farthest-apart
+  endpoints -- 317mm, wrapping most of the dome, a traversal 6.3 will never
+  emit; real travel moves measure median 11.32mm (RX) / 10.46mm (TX). But
+  the naive correction is also wrong: the *shortest* inter-piece hop is
+  2.95mm over 3 nodes at geodesic/chord ratio **1.000**, a straight line,
+  because a curved surface is locally flat at that scale. `_pick_sample_pair()`
+  resolves this with two modes -- `"representative"` (default) takes the
+  most-curved of the hops a greedy chain would actually consider, giving
+  RX 14->43 at 26.1mm and ratio 1.110; `"most_curved"` takes the highest
+  ratio at any distance, RX 48->6 at 250mm and ratio 1.724. Both must mask
+  out same-piece pairs **and** zero-cost pairs, of which there are 16 (RX) /
+  18 (TX) entries between different pieces -- an unguarded argmin returns one
+  and reconstructs a degenerate single-node path. **Both defaults are chosen
+  outliers, not typical**: the median ratio is 1.08 over all ~4,744 valid
+  pairs and ~1.003 over realistic hops, so a typical travel move is very
+  nearly straight and neither sample should be read as showing typical
+  curvature.
+- The chord is drawn **only in most_curved mode**, where the comparison is
+  the point; at representative scale it overlaps the geodesic and adds
+  clutter. The status line now reports the **ratio**, which is what makes the
+  hugs-the-surface claim checkable when the picture alone is ambiguous.
+
+**Second amendment, 2026-07-19 -- pre-commit review.** A full audit of the
+above found two defects in the fix itself, both from verifying states rather
+than transitions:
+
+- **Visibility restore clobbered state it never captured.**
+  `_isolate_geodesic_layer()` snapshotted only `is_enabled()`, but the
+  restore hardcoded `set_transparency(1.0)` on every surface in the
+  snapshot -- including ones isolation merely enabled/disabled. A
+  transparency the user had set themselves was silently reset. Now
+  `(enabled, transparency)` is snapshotted and restored from the snapshot.
+- **A stale chord survived a mode switch.** The chord was registered only in
+  `most_curved` mode but never *removed* in `representative` mode, so
+  switching modes left the previous pair's chord on screen beside an
+  unrelated path -- reproducing the exact "reads as a broken geodesic"
+  failure this amendment was written to eliminate. The chord is now removed
+  unconditionally before the mode is consulted. The original verification
+  line ("chord present in stress mode and absent in representative") tested
+  each mode independently and never the transition, which is how it slipped
+  through. **Verify transitions, not just states.**
+- **`"stress"` renamed to `"most_curved"`** (GUI: "Most-curved pair"). The
+  old name described why it was built, not what it selects.
+- **Timing figures corrected** -- see the 1.7x note above, and:
+  `dijkstra_surface()` as shipped costs ~50ms (RX) / ~85ms (TX), above the
+  bare loop because it also allocates `prev` and converts to numpy on
+  return. Full run ~8.4-9.1s. An earlier version of the guide's table quoted
+  ~170ms for TX, which was a measured worst *frame*, not the solve.
+
+**Also recorded -- geodesics can track the mesh rim.** Over 60 random
+endpoint pairs a mean 18% of path nodes lie on the surface's open boundary,
+and 11/60 pairs spend >20% of their nodes there. Geometrically correct --
+around a dome's rim genuinely can be the shortest surface path -- but a
+travel move that tracks the shell's open edge may not be physically
+desirable, so **6.3 should check this when it emits real travel moves**. The
+default sample pairs are unaffected.
+
+**Also recorded -- there is no "top surface" to constrain routing to.** The
+printed curves span z 2.7-159.0 against surfaces spanning z 0.9-159.0, with
+matching bounding boxes on all three axes: the pattern wraps the whole dome
+rather than sitting on a distinct top face. Each print surface is a single
+open sheet (623 boundary edges, 0 non-manifold, ~39,900mm^2 -- not a
+double-sided skin), so a path on it cannot pass through the interior.
+
+**Verified on:** 2026-07-19 -- unstaged screenshots on both layers through
+`show_sample_geodesic()` with no visibility changes but hiding the arm;
+visibility snapshot/restore round-trip across show -> cancel and across two
+successive samples; pair selection asserted distinct-piece and non-zero on
+both layers in both modes, with the representative pair inside the measured
+realistic hop range; reload-after-sample clears isolation.
+
+Re-verified 2026-07-19 after the second amendment, by **transition**: the
+chord round-trips most_curved -> representative -> most_curved as
+present/absent/present; a user-set transparency on `Surface Bot` (0.3) and
+`Surface TX Base` (0.7) survives show -> cancel byte-identical. Layer/surface
+correspondence checked numerically -- selecting RX puts every path node at
+0.0000mm from `Surface_RX_Offset` and 2.08mm from the TX surface, and vice
+versa. The untouched core was re-checked unchanged: both matrices (70,70),
+symmetric to 1e-9, zero diagonal, all finite, elementwise >= chord.

@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import heapq
 import hashlib
 import polyscope as ps
 import numpy as np
@@ -87,6 +88,27 @@ SURFACE_RX_OFFSET_COLOR = (0.93, 0.80, 0.80)  # pale rose, curves read clearly o
 SURFACE_TX_BASE_COLOR = (0.80, 0.85, 0.93)    # pale blue
 SURFACE_BOT_COLOR = (0.55, 0.55, 0.55)        # neutral gray, not a print target
 
+# Geodesic routing over the print surfaces -- roadmap 6.2. RX and TX are
+# separate passes on separate surfaces (settled.md S1.30), so every geodesic
+# structure is a 2-element list indexed by these rather than an _rx/_tx pair.
+GEODESIC_LAYER_RX = 0
+GEODESIC_LAYER_TX = 1
+GEODESIC_LAYER_NAMES = ("RX", "TX")
+
+GEODESIC_CHUNK_SOURCES = 1  # whole Dijkstra sources solved per step() call.
+# Measured per source: ~50ms on Surface_RX_Offset (30,284 verts), ~85ms on
+# Surface_TX_Base (45,430 verts / 135,518 edges) -- so ~12-20fps while running
+# and ~8.4-9.1s wall for the full 113-source job. One whole source is the
+# chunk granularity because sub-source chunking would mean carrying a live
+# heap plus partial dist/prev across frames -- real complexity for a job that
+# finishes in seconds.
+
+GEODESIC_CURVE_COLOR = (0.10, 0.80, 0.20)  # green -- distinct from RX red, TX blue, and the pale surfaces
+GEODESIC_CHORD_COLOR = (0.90, 0.20, 0.85)  # magenta -- the straight-line comparison, verification only
+GEODESIC_CURVE_RADIUS_MM = 1.5  # 3x CURVE_RADIUS_MM so a geodesic reads over the 70 toolpath curves
+GEODESIC_HOST_TRANSPARENCY = 0.55  # host surface is ghosted while a sample geodesic is shown, so
+# the path reads against the shell instead of being buried in it -- see _isolate_geodesic_layer()
+
 PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # per-frame batch well under a 60fps budget. Measured ~0.5ms/waypoint for
 # solve_ik_tcp_matrix + the ground-clearance filter at benchy scale (see
@@ -146,6 +168,34 @@ class VisContent:
         # with Polyscope right now, see PLAYBACK_LOOKAHEAD_BEADS
 
         self.curved_model_loaded = False  # True once load_curved_model() has registered its structures -- roadmap 6.1/6.6
+
+        # Retained curved-model geometry, world coordinates (already through
+        # T_curved) -- roadmap 6.2 needs the per-piece curves and the print
+        # surfaces that 6.1 previously computed and threw away. Both lists are
+        # indexed by GEODESIC_LAYER_RX/GEODESIC_LAYER_TX. Surface_Bot is
+        # deliberately absent: it's a 6.5 collision body, not a print surface.
+        self.curved_pieces_world = None        # list of 2 lists of (Ni,3) polylines
+        self.curved_surface_verts_world = None # list of 2 (V,3)
+        self.curved_surface_faces = None       # list of 2 (F,3), placement-invariant
+        self.T_curved = None                   # (4,4) placement actually used, for the staleness check
+        self._T_user_frame_at_curved_load = None  # Plate pose the world state above was built against
+
+        # Chunked geodesic precompute state, see run_geodesic_precompute()
+        self.geodesic_running = False
+        self.geodesic_index = 0
+        self.geodesic_total = 0
+        self.geodesic_status = ""
+        self.geodesic_loaded = False       # True only once both cost matrices are complete -- what 6.3 gates on
+        self.geodesic_graphs = None        # list of 2 CSR triples; None/not-None is the start-fresh/resume sentinel
+        self.geodesic_snap_nodes = None    # list of 2 (70,) endpoint -> vertex id on its own surface
+        self.geodesic_snap_dist = None     # list of 2 (70,) snap distances, evidence the snap is legitimate
+        self.geodesic_sources = None       # list of 2 (S,) unique snapped vertex ids
+        self.geodesic_source_row = None    # list of 2 (70,) endpoint -> row in sources/prev
+        self.geodesic_queue = None         # list of (layer, row) tuples, the flat work list
+        self.geodesic_prev = None          # list of 2 (S,V) int32 predecessor rows -- makes any path a walk-back
+        self.geodesic_cost = None          # list of 2 (70,70) float64, inf = unreachable
+        self.geodesic_unreachable = None   # list of 2 ints, count of inf entries per matrix
+        self._geodesic_isolation_prior = None  # {structure_name: was_enabled} while a sample is isolated
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -212,6 +262,14 @@ class VisContent:
             if new_pose != self.precompute_cache_meta["user_frame"]:
                 self.cancel_toolpath_ik_precompute()
                 self.precompute_status = "Build plate moved -- precompute invalidated, run again"
+
+        if self.T_curved is not None and not np.allclose(self.T_user_frame, self._T_user_frame_at_curved_load):
+            # The geodesic *costs* survive a plate move -- distances in mm are
+            # rigid-motion invariant. The retained world vertices and the
+            # stored paths do not, and 6.3 consumes the paths, not just the
+            # numbers, so invalidating is the honest call.
+            self._abort_geodesic_precompute()
+            self.geodesic_status = "Build plate moved -- geodesics invalidated, reload the curved model"
 
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
         plate_verts_local = plate.vertices + np.array([0.0, 0.0, PLATE_THICKNESS_MM])
@@ -525,7 +583,20 @@ class VisContent:
         and lift so its lowest point sits at the plate-local print surface
         -- z=0 after the same PLATE_THICKNESS_MM compensation
         load_build_plate()/build_toolpath_waypoints_world() already apply
-        (position_mm marks the plate's resting/bottom face, not its top)."""
+        (position_mm marks the plate's resting/bottom face, not its top).
+
+        Retains the placed geometry in world coordinates
+        (curved_pieces_world/curved_surface_verts_world/curved_surface_faces/
+        T_curved) for roadmap 6.2's geodesic routing, which needs the
+        per-piece curves and the two print surfaces in the frame the arm
+        works in. Surface_Bot is rendered but not retained -- it's a
+        collision body for 6.5, not a print surface."""
+        # Every world vertex below is about to be re-derived, so any geodesic
+        # solved against the previous load -- in flight or complete -- describes
+        # geometry that no longer exists.
+        self._abort_geodesic_precompute()
+        self.geodesic_status = ""
+
         rx_pieces_local = [p for f in CURVED_RX_FILES
                             for p in reconstruct_polylines(*read_ply_polyline(os.path.join(CURVED_MODEL_DIR, f)))]
         tx_pieces_local = [p for f in CURVED_TX_FILES
@@ -558,19 +629,385 @@ class VisContent:
         T_placement[2, 3] = -assembly_min[2] + PLATE_THICKNESS_MM
         T_curved = self.T_user_frame @ T_placement
 
-        self._register_curve_layer("Curved Toolpath RX", rx_pieces_local, T_curved, RX_CURVE_COLOR)
-        self._register_curve_layer("Curved Toolpath TX", tx_pieces_local, T_curved, TX_CURVE_COLOR)
+        # Transform once, then both retain and render the same arrays -- 6.2
+        # routes over these surfaces and needs them in the frame the arm works
+        # in, so world is computed here rather than at each registration site.
+        rx_pieces_world = [transform_points(T_curved, p) for p in rx_pieces_local]
+        tx_pieces_world = [transform_points(T_curved, p) for p in tx_pieces_local]
+        surface_rx_world = transform_points(T_curved, surface_rx_verts)
+        surface_tx_world = transform_points(T_curved, surface_tx_verts)
+        surface_bot_world = transform_points(T_curved, surface_bot_verts)
 
-        for name, verts_local, mesh, color in (
-            ("Surface RX Offset", surface_rx_verts, surface_rx, SURFACE_RX_OFFSET_COLOR),
-            ("Surface TX Base", surface_tx_verts, surface_tx, SURFACE_TX_BASE_COLOR),
-            ("Surface Bot", surface_bot_verts, surface_bot, SURFACE_BOT_COLOR),
+        self._register_curve_layer("Curved Toolpath RX", rx_pieces_world, np.eye(4), RX_CURVE_COLOR)
+        self._register_curve_layer("Curved Toolpath TX", tx_pieces_world, np.eye(4), TX_CURVE_COLOR)
+
+        for name, verts_world, mesh, color in (
+            ("Surface RX Offset", surface_rx_world, surface_rx, SURFACE_RX_OFFSET_COLOR),
+            ("Surface TX Base", surface_tx_world, surface_tx, SURFACE_TX_BASE_COLOR),
+            ("Surface Bot", surface_bot_world, surface_bot, SURFACE_BOT_COLOR),
         ):
-            verts_world = transform_points(T_curved, verts_local)
             handle = ps.register_surface_mesh(name, verts_world, mesh.faces)
             handle.set_color(color)
 
+        self.curved_pieces_world = [rx_pieces_world, tx_pieces_world]
+        self.curved_surface_verts_world = [surface_rx_world, surface_tx_world]
+        self.curved_surface_faces = [np.asarray(surface_rx.faces), np.asarray(surface_tx.faces)]
+        self.T_curved = T_curved
+        self._T_user_frame_at_curved_load = self.T_user_frame.copy()
         self.curved_model_loaded = True
+
+
+    def _layer_endpoints_world(self, layer):
+        """The 70 curve endpoints of one layer, in the order roadmap 6.3
+        indexes them: endpoint 2p is pieces[p][0] and 2p+1 is pieces[p][-1],
+        for p over curved_pieces_world[layer].
+
+        The 3 closed-loop pieces per layer (RX_0/22/27, TX_2/6/17) have
+        coincident ends, so their two endpoints are the same point -- they
+        snap to one vertex and their cost-matrix rows come out identical,
+        with cost[2p, 2p+1] == 0.0. That is correct, but 6.3's ordering must
+        not read that zero as free travel to somewhere else."""
+        return np.array([e for piece in self.curved_pieces_world[layer]
+                          for e in (piece[0], piece[-1])])
+
+
+    def run_geodesic_precompute(self):
+        """Start or resume the chunked geodesic precompute -- roadmap
+        Stage6_README.md 6.2. Mirrors run_toolpath_ik_precompute(): only
+        builds the graphs and resets progress if nothing is loaded yet
+        (geodesic_graphs is None -- true on the first call and again after
+        cancel_geodesic_precompute()); if a run is merely paused, resumes
+        stepping from geodesic_index with no rebuild.
+
+        Builds one graph per print surface, not one merged graph: RX travels
+        on Surface_RX_Offset and TX on Surface_TX_Base, the passes never
+        interleave (settled.md S1.30), and a geodesic between an RX and a TX
+        endpoint is meaningless on either mesh.
+
+        One Dijkstra runs per *unique snapped vertex*, not per endpoint --
+        measured 58 unique for RX and 55 for TX rather than 70 each, since
+        distinct endpoints often land on the same vertex, so this is 113
+        runs and not the 140 the roadmap assumed."""
+        if self.geodesic_graphs is None:
+            if not self.curved_model_loaded:
+                # Fail with a status message, never an exception: this runs
+                # from a button inside the per-frame Polyscope callback.
+                self.geodesic_status = "Load Curved Model first"
+                return
+
+            graphs, snap_nodes, snap_dist, sources, source_row, prev, cost = [], [], [], [], [], [], []
+            for layer in (GEODESIC_LAYER_RX, GEODESIC_LAYER_TX):
+                verts = self.curved_surface_verts_world[layer]
+                graphs.append(build_surface_graph(verts, self.curved_surface_faces[layer]))
+
+                idx, dist = nearest_vertex_index(verts, self._layer_endpoints_world(layer))
+                snap_nodes.append(idx)
+                snap_dist.append(dist)
+
+                uniq, row = np.unique(idx, return_inverse=True)
+                sources.append(uniq)
+                source_row.append(row)
+
+                prev.append(np.full((len(uniq), len(verts)), -1, dtype=np.int32))
+                cost.append(np.full((len(idx), len(idx)), np.inf))
+
+            self.geodesic_graphs = graphs
+            self.geodesic_snap_nodes = snap_nodes
+            self.geodesic_snap_dist = snap_dist
+            self.geodesic_sources = sources
+            self.geodesic_source_row = source_row
+            self.geodesic_prev = prev
+            self.geodesic_cost = cost
+            self.geodesic_unreachable = [0, 0]
+            self.geodesic_queue = [(layer, r)
+                                    for layer in (GEODESIC_LAYER_RX, GEODESIC_LAYER_TX)
+                                    for r in range(len(sources[layer]))]
+            self.geodesic_index = 0
+            self.geodesic_total = len(self.geodesic_queue)
+            self.geodesic_loaded = False
+
+        self.geodesic_running = True
+        self.geodesic_status = f"Building geodesics {self.geodesic_index}/{self.geodesic_total} sources"
+
+
+    def pause_geodesic_precompute(self):
+        """Stop advancing the geodesic precompute without discarding
+        progress. A following run_geodesic_precompute() continues from
+        geodesic_index."""
+        self.geodesic_running = False
+
+
+    def cancel_geodesic_precompute(self):
+        """Stop and discard the geodesic precompute entirely -- a following
+        run_geodesic_precompute() starts fresh."""
+        self._abort_geodesic_precompute()
+        self.geodesic_status = ""
+
+
+    def _abort_geodesic_precompute(self):
+        """Shared discard used by cancel_geodesic_precompute() and
+        load_curved_model(). Resets geodesic_index/total together, so a stale
+        index can't outlive the arrays it counted (the same failure
+        _abort_toolpath_ik_precompute() guards against, settled.md S1.24),
+        and removes the sample curves, which render vertex arrays this just
+        dropped. Does not touch geodesic_status, so a caller can set an
+        explanatory message first."""
+        self.geodesic_running = False
+        self.geodesic_loaded = False
+        self.geodesic_index = 0
+        self.geodesic_total = 0
+        self.geodesic_graphs = None
+        self.geodesic_snap_nodes = None
+        self.geodesic_snap_dist = None
+        self.geodesic_sources = None
+        self.geodesic_source_row = None
+        self.geodesic_queue = None
+        self.geodesic_prev = None
+        self.geodesic_cost = None
+        self.geodesic_unreachable = None
+        ps.remove_curve_network("Geodesic Sample", error_if_absent=False)
+        ps.remove_curve_network("Geodesic Chord", error_if_absent=False)
+        self._restore_geodesic_isolation()
+
+
+    def step_geodesic_precompute(self):
+        """Advance the in-progress geodesic precompute by up to
+        GEODESIC_CHUNK_SOURCES whole Dijkstra sources -- call every frame
+        from render(). No-ops unless geodesic_running.
+
+        Unlike step_toolpath_ik_precompute() there is no abort-on-failure
+        branch, deliberately: Dijkstra cannot fail. An unreachable target is
+        data (inf), not an error, and discarding a 70x70 matrix because one
+        pair sits on a disconnected mesh fragment would throw away the 4,830
+        other off-diagonal entries alongside it."""
+        if not self.geodesic_running:
+            return
+
+        end = min(self.geodesic_index + GEODESIC_CHUNK_SOURCES, self.geodesic_total)
+        for i in range(self.geodesic_index, end):
+            layer, row = self.geodesic_queue[i]
+            start, nbr, weight = self.geodesic_graphs[layer]
+            dist, prev = dijkstra_surface(start, nbr, weight, int(self.geodesic_sources[layer][row]))
+            self.geodesic_prev[layer][row] = prev
+
+            # One solve fills every endpoint row that snapped to this vertex,
+            # so the duplicate rows cost nothing and can't disagree with their
+            # twin. Only the 70 endpoint columns are kept -- retaining full
+            # dist rows would double the memory for data nothing reads.
+            fill = (self.geodesic_source_row[layer] == row)
+            self.geodesic_cost[layer][fill, :] = dist[self.geodesic_snap_nodes[layer]]
+
+            if row == 0:
+                # The first solve of a layer already covers the whole graph,
+                # so it is the reachability oracle -- no separate flood fill
+                # needed. Pausing (not just setting status) is what makes the
+                # warning readable: a plain status here would be overwritten
+                # by "Building geodesics N/M" one frame later. Build resumes
+                # the run through the normal pause/resume path.
+                n_bad = int(np.isinf(dist[self.geodesic_snap_nodes[layer]]).sum())
+                if n_bad:
+                    self.geodesic_index = i + 1
+                    self.geodesic_running = False
+                    self.geodesic_status = (f"{GEODESIC_LAYER_NAMES[layer]}: {n_bad}/"
+                                             f"{len(self.geodesic_snap_nodes[layer])} endpoints unreachable "
+                                             f"-- surface is fragmented (Build Geodesics resumes)")
+                    return
+
+        self.geodesic_index = end
+
+        if self.geodesic_index >= self.geodesic_total:
+            self.geodesic_running = False
+            self.geodesic_loaded = True
+            self.geodesic_unreachable = [int(np.isinf(c).sum()) for c in self.geodesic_cost]
+            if any(self.geodesic_unreachable):
+                self.geodesic_status = (f"Geodesics ready with {sum(self.geodesic_unreachable)} "
+                                         f"unreachable pair(s) -- surface is fragmented")
+            else:
+                spans = [c[np.isfinite(c)].max() for c in self.geodesic_cost]
+                self.geodesic_status = (f"Geodesics ready -- RX max {spans[GEODESIC_LAYER_RX]:.0f}mm, "
+                                         f"TX max {spans[GEODESIC_LAYER_TX]:.0f}mm")
+        else:
+            self.geodesic_status = f"Building geodesics {self.geodesic_index}/{self.geodesic_total} sources"
+
+
+    def _pick_sample_pair(self, layer, mode):
+        """Choose two endpoints to demonstrate a geodesic with. Returns
+        (endpoint_a, endpoint_b), or None if no valid pair exists.
+
+        Both modes must exclude two classes of pair that a bare argmin/argmax
+        would happily return:
+          - the two ends of the *same* piece (that isn't a travel move), and
+          - zero-cost pairs, where both endpoints snapped to one vertex
+            (settled.md S1.31). Those reconstruct to a single-node "path".
+            Counted as matrix entries (both (i,j) and (j,i)) there are 16 on
+            RX and 18 on TX between *different* pieces -- i.e. 8 and 9
+            distinct pairs.
+
+        mode="representative" -- the most curved of the travel moves 6.3 will
+        actually emit, i.e. over each endpoint's nearest other-piece endpoint,
+        the one with the highest geodesic/chord ratio. Measured RX 14->43,
+        26.1mm, ratio 1.11. The naive alternatives are both misleading: the
+        *farthest* pair (317mm) is a traversal 6.3 will never emit, and the
+        *shortest* hop is 2.95mm over 3 nodes at ratio 1.000 -- a straight
+        line, because a curved surface is locally flat at that scale.
+
+        mode="most_curved" -- the highest ratio at any distance (RX 48->6,
+        250mm, ratio 1.72), for the "does it chord through the shell"
+        question.
+
+        Both defaults are deliberately chosen outliers, not typical: the
+        median ratio is 1.08 over all ~4,744 valid pairs and ~1.003 over
+        realistic hops, so most travel moves are very nearly straight."""
+        cost = self.geodesic_cost[layer]
+        n = cost.shape[0]
+        verts = self.curved_surface_verts_world[layer][self.geodesic_snap_nodes[layer]]
+        chord = np.linalg.norm(verts[:, None, :] - verts[None, :, :], axis=-1)
+
+        piece = np.arange(n) // 2
+        valid = (piece[:, None] != piece[None, :]) & (cost > 1e-9) & np.isfinite(cost)
+        if not valid.any():
+            return None
+        ratio = np.where(valid, cost / np.maximum(chord, 1e-9), 0.0)
+
+        if mode == "most_curved":
+            return tuple(int(v) for v in np.unravel_index(np.argmax(ratio), ratio.shape))
+
+        # Restrict to each endpoint's nearest other-piece endpoint -- the set
+        # of hops a greedy nearest-endpoint chain would actually consider.
+        best = None
+        for i in range(n):
+            cand = np.where(valid[i])[0]
+            if not len(cand):
+                continue
+            j = int(cand[np.argmin(cost[i, cand])])
+            if best is None or ratio[i, j] > ratio[best[0], best[1]]:
+                best = (i, j)
+        return best
+
+
+    def show_sample_geodesic(self, layer=GEODESIC_LAYER_RX, mode="representative",
+                              endpoint_a=None, endpoint_b=None):
+        """Render one geodesic on its own surface -- roadmap 6.2's Verify
+        step. See _pick_sample_pair() for how the default pair is chosen.
+
+        Isolates the host surface first, because otherwise this shows
+        nothing: Surface_TX_Base sits a uniform ~2mm *outside*
+        Surface_RX_Offset (which is itself ~2mm outside Surface_Bot), so an
+        RX geodesic renders sealed inside the TX shell and is invisible. The
+        only thing that stayed visible was the straight comparison chord
+        leaving the surface into open space, which read as a broken
+        geodesic. Prior visibility is snapshotted and restored on clear, so
+        this isn't a one-way trip through the user's view settings.
+
+        The chord is drawn only in mode="most_curved", where the comparison
+        is the point -- at representative scale it overlaps the geodesic
+        almost exactly and adds only clutter."""
+        if not self.geodesic_loaded:
+            self.geodesic_status = "Build geodesics first"
+            return
+
+        cost = self.geodesic_cost[layer]
+        if endpoint_a is None or endpoint_b is None:
+            pair = self._pick_sample_pair(layer, mode)
+            if pair is None:
+                self.geodesic_status = f"{GEODESIC_LAYER_NAMES[layer]}: no valid sample pair"
+                return
+            endpoint_a, endpoint_b = pair
+        endpoint_a, endpoint_b = int(endpoint_a), int(endpoint_b)
+
+        row = int(self.geodesic_source_row[layer][endpoint_a])
+        nodes = geodesic_path_nodes(self.geodesic_prev[layer][row],
+                                     int(self.geodesic_snap_nodes[layer][endpoint_b]))
+        if nodes is None:
+            self.geodesic_status = f"{GEODESIC_LAYER_NAMES[layer]} {endpoint_a}->{endpoint_b}: unreachable"
+            return
+        if len(nodes) < 2:
+            # Only reachable with manual endpoint args -- _pick_sample_pair()
+            # excludes zero-cost pairs, but a caller-supplied pair snapping to
+            # one vertex would hand register_curve_network a 1-node polyline.
+            self.geodesic_status = (f"{GEODESIC_LAYER_NAMES[layer]} {endpoint_a}->{endpoint_b}: "
+                                     f"endpoints snap to the same vertex -- no path to show")
+            return
+
+        self._isolate_geodesic_layer(layer)
+
+        pts = self.curved_surface_verts_world[layer][nodes]  # already world, no transform needed
+        handle = self._register_curve_layer("Geodesic Sample", [pts], np.eye(4), GEODESIC_CURVE_COLOR)
+        handle.set_radius(GEODESIC_CURVE_RADIUS_MM, relative=False)
+
+        # Drop any previous chord before deciding whether to draw one: without
+        # this, switching most_curved -> representative leaves the old pair's
+        # chord on screen next to an unrelated path -- exactly the "looks like
+        # a broken geodesic" state this whole aid was rewritten to avoid.
+        ps.remove_curve_network("Geodesic Chord", error_if_absent=False)
+
+        chord_len = float(np.linalg.norm(pts[-1] - pts[0]))
+        if mode == "most_curved":
+            chord = np.array([pts[0], pts[-1]])
+            chord_handle = ps.register_curve_network("Geodesic Chord", chord, np.array([[0, 1]]))
+            chord_handle.set_color(GEODESIC_CHORD_COLOR)
+            chord_handle.set_radius(GEODESIC_CURVE_RADIUS_MM, relative=False)
+
+        # Report the ratio, not just the length: it's what makes "this hugs
+        # the surface" checkable when the picture alone is ambiguous.
+        length = float(cost[endpoint_a, endpoint_b])
+        self.geodesic_status = (f"{GEODESIC_LAYER_NAMES[layer]} {endpoint_a}->{endpoint_b} ({mode}): "
+                                 f"{length:.1f}mm over {len(nodes)} nodes vs {chord_len:.1f}mm chord "
+                                 f"-- ratio {length / max(chord_len, 1e-9):.3f}")
+
+
+    def _isolate_geodesic_layer(self, layer):
+        """Hide everything that would occlude a geodesic on `layer`'s surface
+        and ghost the host surface, snapshotting prior visibility into
+        _geodesic_isolation_prior so _restore_geodesic_isolation() can put it
+        all back. Re-entrant: an existing snapshot is left alone, so showing
+        two samples in a row doesn't record the already-isolated state as if
+        it were the user's."""
+        host = f"Surface {'RX Offset' if layer == GEODESIC_LAYER_RX else 'TX Base'}"
+        other = f"Surface {'TX Base' if layer == GEODESIC_LAYER_RX else 'RX Offset'}"
+
+        if self._geodesic_isolation_prior is None:
+            # Snapshot transparency alongside enabled state: the host gets
+            # ghosted below, and restoring a hardcoded 1.0 would silently
+            # undo any transparency the user had set themselves.
+            prior = {}
+            for name in (host, other, "Surface Bot"):
+                if ps.has_surface_mesh(name):
+                    h = ps.get_surface_mesh(name)
+                    prior[name] = (h.is_enabled(), h.get_transparency())
+            for name in ("Curved Toolpath RX", "Curved Toolpath TX"):
+                if ps.has_curve_network(name):
+                    prior[name] = (ps.get_curve_network(name).is_enabled(), None)
+            self._geodesic_isolation_prior = prior
+
+        for name in (other, "Surface Bot"):
+            if ps.has_surface_mesh(name):
+                ps.get_surface_mesh(name).set_enabled(False)
+        if ps.has_surface_mesh(host):
+            h = ps.get_surface_mesh(host)
+            h.set_enabled(True)
+            h.set_transparency(GEODESIC_HOST_TRANSPARENCY)
+
+        other_curves = f"Curved Toolpath {'TX' if layer == GEODESIC_LAYER_RX else 'RX'}"
+        if ps.has_curve_network(other_curves):
+            ps.get_curve_network(other_curves).set_enabled(False)
+
+
+    def _restore_geodesic_isolation(self):
+        """Put back the visibility _isolate_geodesic_layer() changed, from its
+        snapshot -- never to hardcoded defaults, which would clobber
+        transparency the user set themselves on a structure isolation only
+        ever enabled/disabled. Safe to call with nothing isolated."""
+        if self._geodesic_isolation_prior is None:
+            return
+        for name, (was_enabled, was_transparency) in self._geodesic_isolation_prior.items():
+            if ps.has_surface_mesh(name):
+                h = ps.get_surface_mesh(name)
+                h.set_enabled(was_enabled)
+                h.set_transparency(was_transparency)
+            elif ps.has_curve_network(name):
+                ps.get_curve_network(name).set_enabled(was_enabled)
+        self._geodesic_isolation_prior = None
 
 
     def build_toolpath_waypoints_world(self, gcode_points):
@@ -1542,6 +1979,115 @@ def reconstruct_polylines(verts, edges, decimals=CURVE_DEDUPE_DECIMALS):
                            for a, b in ((inv[a], inv[b]) for a, b in edges) if a != b})
     assert n_edges_consumed == n_unique_edges, "reconstruct_polylines dropped an edge"
     return pieces
+
+
+def build_surface_graph(verts, faces):
+    """Undirected edge graph of a triangle mesh -- roadmap 6.2 step 1. Nodes
+    are mesh vertices, edges are triangle edges, weights are Euclidean edge
+    lengths in whatever frame verts is given in (world mm, as called).
+
+    Returns CSR-style (neighbor_start, neighbor_index, neighbor_weight):
+    node u's neighbours are the slots neighbor_start[u]:neighbor_start[u+1].
+
+    Two representation choices worth not re-litigating:
+
+    Flat CSR rather than a list-of-lists adjacency, because Surface_TX_Base
+    has 271,036 directed entries -- a list[list[tuple]] allocates 45,430 lists
+    plus 271,036 tuples (tens of MB) through an interpreted build loop, where
+    this builds fully vectorised in ~0.27s.
+
+    Python lists rather than numpy arrays on return, which looks backwards
+    but is measured: identical algorithm and layout, only the container type
+    differs, and the bare Dijkstra loop runs ~139ms with numpy element
+    indexing vs ~81ms with lists on Surface_TX_Base -- about 1.7x. Numpy
+    boxes a fresh scalar on every element access; a list already holds native
+    ints/floats. (dijkstra_surface() itself costs ~50ms RX / ~85ms TX, above
+    the bare loop, because it also allocates prev and converts to numpy on
+    return.) The .tolist() below costs ~11ms, once."""
+    faces = np.asarray(faces)
+    e = np.sort(np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
+    e = np.unique(e, axis=0)  # each undirected edge once, however many triangles share it
+    both = np.vstack([e, e[:, ::-1]])
+    both = both[np.argsort(both[:, 0], kind='stable')]
+
+    counts = np.bincount(both[:, 0], minlength=len(verts))
+    start = np.concatenate([[0], np.cumsum(counts)])
+    weight = np.linalg.norm(np.asarray(verts)[both[:, 0]] - np.asarray(verts)[both[:, 1]], axis=1)
+    return start.tolist(), both[:, 1].tolist(), weight.tolist()
+
+
+def nearest_vertex_index(verts, query_points):
+    """Snap each query point to the nearest mesh vertex -- roadmap 6.2 step 2.
+    Returns (indices (Q,), distances (Q,)).
+
+    Brute force, deliberately: there is no scipy in this environment for a
+    KD-tree, and at this size none is needed -- the worst case here is 70
+    endpoints against Surface_TX_Base's 45,430 vertices, a 25MB intermediate
+    solved in ~109ms, once per precompute. Distances are returned rather than
+    discarded because they're the evidence the snap is legitimate: measured
+    max 0.684mm (RX) / 0.580mm (TX), comfortably inside the ~1.24mm median
+    mesh edge, so every endpoint lands on a vertex of the triangle it sits
+    over."""
+    verts = np.asarray(verts)
+    query_points = np.asarray(query_points)
+    d2 = ((verts[None, :, :] - query_points[:, None, :]) ** 2).sum(-1)
+    idx = np.argmin(d2, axis=1)
+    return idx, np.sqrt(d2[np.arange(len(query_points)), idx])
+
+
+def dijkstra_surface(neighbor_start, neighbor_index, neighbor_weight, source):
+    """Single-source shortest paths over a build_surface_graph() CSR graph --
+    roadmap 6.2 step 3. Hand-rolled heapq rather than a scipy dependency, per
+    AGENTS.md's from-scratch principle; standard lazy-deletion Dijkstra.
+
+    Returns (dist (V,) float64, prev (V,) int32). Unreachable nodes are
+    np.inf / -1. prev[source] is source itself -- a self-loop, not -1,
+    because the obvious -1 would make "I am the source" and "I am
+    unreachable" indistinguishable and leave geodesic_path_nodes() unable to
+    tell a valid termination from a broken walk."""
+    n = len(neighbor_start) - 1
+    dist = [float('inf')] * n
+    prev = [-1] * n
+    dist[source] = 0.0
+    prev[source] = source
+
+    heap = [(0.0, source)]
+    push, pop = heapq.heappush, heapq.heappop  # bound locally, this loop runs ~V log V times
+    while heap:
+        d, u = pop(heap)
+        if d > dist[u]:
+            continue  # stale entry left behind by a relaxation
+        for k in range(neighbor_start[u], neighbor_start[u + 1]):
+            v = neighbor_index[k]
+            nd = d + neighbor_weight[k]
+            if nd < dist[v]:
+                dist[v] = nd
+                prev[v] = u
+                push(heap, (nd, v))
+
+    return np.array(dist, dtype=np.float64), np.array(prev, dtype=np.int32)
+
+
+def geodesic_path_nodes(prev_row, target):
+    """Reconstruct one geodesic as a vertex-id list from a stored
+    dijkstra_surface() predecessor row -- source-first, both ends inclusive.
+    Returns [target] when target is the source, and None when unreachable.
+
+    A pure walk-back: this never re-runs Dijkstra, which is the whole reason
+    the (S,V) prev rows are retained rather than just the cost matrix.
+
+    Note for roadmap 6.3: the returned path begins and ends at *snapped mesh
+    vertices*, not at the curve endpoints themselves -- measured median
+    ~0.36mm apart, max 0.68mm (see nearest_vertex_index). So a travel move
+    built straight from these nodes leaves a sub-millimetre gap at both ends
+    where it meets the piece it is travelling from/to. 6.3 must either append
+    the true endpoints or accept that gap as within positioning tolerance."""
+    if prev_row[target] < 0:
+        return None
+    path = [int(target)]
+    while prev_row[path[-1]] != path[-1]:
+        path.append(int(prev_row[path[-1]]))
+    return path[::-1]
 
 
 def dh_transform(a, alpha, d, theta):

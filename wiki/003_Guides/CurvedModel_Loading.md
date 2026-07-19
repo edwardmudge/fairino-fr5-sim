@@ -95,6 +95,14 @@ measured-property writeup this guide's numbers come from.
    structure names mean repeat-clicking "Load Curved Model" is safe —
    Polyscope replaces the prior structures rather than accumulating
    duplicates.
+6. Retention: the placed assembly is kept in **world coordinates**
+   (`curved_pieces_world`, `curved_surface_verts_world`,
+   `curved_surface_faces`, `T_curved`) for roadmap 6.2's geodesic routing,
+   which needs the per-piece curves and the two print surfaces in the frame
+   the arm works in. `Surface_Bot` is rendered but not retained — it's a
+   6.5 collision body, not a print surface. Reloading aborts any geodesic
+   solved against the previous load, since every world vertex is re-derived
+   here (`settled.md` S1.31).
 
 ## Current scope and limitations
 
@@ -104,9 +112,10 @@ more:
 - **No layer selector or Clear button yet** (roadmap 6.6) — clicking "Load
   Curved Model" always loads both RX and TX together, and there's no way
   to unload it from the GUI yet.
-- **No travel-move routing or print ordering** (roadmap 6.2/6.3) — the 70
-  pieces aren't stitched into a print sequence, and there's no
-  shortest-path/geodesic logic over the surface meshes yet.
+- **No print ordering** (roadmap 6.3) — the 70 pieces aren't stitched into a
+  print sequence yet. The shortest-path/geodesic logic over the surface
+  meshes that 6.3 needs *does* now exist (roadmap 6.2) — see
+  [`CurvedModel_Geodesics.md`](CurvedModel_Geodesics.md).
 - **No per-waypoint surface-normal orientation** (roadmap 6.4) — nothing
   drives the arm through this yet, so orientation doesn't apply.
 - **No IK precompute/playback reuse** (roadmap 6.5).
