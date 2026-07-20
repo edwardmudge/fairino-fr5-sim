@@ -25,15 +25,16 @@ RX and TX are two stacked electrode layers printed as **separate ordered
 passes** that never interleave (`settled.md` S1.30). RX travels on
 `Surface_RX_Offset`, TX on `Surface_TX_Base`.
 
-⚠ **Which pass prints first is an open question.** S1.30 records TX first
-(user-confirmed, and supported by the filenames), but the measurement below
-puts `RX_Offset` against the shoulder body with TX outboard of it, implying
-RX goes down first. 6.2 doesn't care — each layer routes on its own surface
-independently — but 6.3 and 6.4 do. See S1.30's caveat. A geodesic between an RX endpoint and a TX endpoint is
-computed on neither mesh meaningfully and is never needed, so the two
-networks are kept fully separate: two graphs, two endpoint sets, two cost
-matrices. Merging them into one 140×140 matrix would produce a large block
-of numbers with no physical meaning.
+**RX prints first, TX second** (`settled.md` S1.32) — the fabrication
+sequence is RX → manual silicone fill → TX → manual silicone fill. 6.2
+doesn't depend on the order (each layer routes on its own surface
+independently); 6.3 and 6.4 do.
+
+A geodesic between an RX endpoint and a TX endpoint is computed on neither
+mesh meaningfully and is never needed, so the two networks are kept fully
+separate: two graphs, two endpoint sets, two cost matrices. Merging them into
+one 140×140 matrix would produce a large block of numbers with no physical
+meaning.
 
 Because the two passes are structurally identical, every geodesic structure
 on `VisContent` is a **2-element list** indexed by `GEODESIC_LAYER_RX` /

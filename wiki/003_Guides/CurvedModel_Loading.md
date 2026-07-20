@@ -124,10 +124,14 @@ more:
   zero rotation and nothing currently re-tilts it before loading the
   curved model — if that ever changes, `CURVED_MODEL_ROTATE_X_DEG` would
   need to become relative to the plate's actual pose rather than world X.
-- **What RX/TX semantically denote, and whether the `_verify_*` dumps in
+- ~~**What RX/TX semantically denote, and whether the `_verify_*` dumps in
   `assets/models/curved/` are asset contract or scratch, are still open
-  questions** — see `Stage6_README.md`'s Open Questions section. Nothing
-  in 6.1 reads the `_verify_*` folders.
+  questions.**~~ **Both answered** — RX and TX are the two electrode layers
+  of the sensor, printed as separate passes with **RX first** (`settled.md`
+  S1.30, S1.32); the `_verify_*` dumps are scratch. Nothing in 6.1 reads the
+  `_verify_*` folders. See `Stage6_README.md`'s Open Questions section for
+  the one question that remains (what fills the 2.00 mm under
+  `Surface_RX_Offset`).
 
 ## How to tune it
 

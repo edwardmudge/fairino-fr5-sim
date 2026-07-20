@@ -1480,7 +1480,7 @@ their own surface, sitting entirely above the plate with nothing poking
 below it, and confirmed the rotated placement puts the printable surface
 face-up with `Surface_Bot` naturally inside/beneath it.
 
-## S1.30 RX/TX curve layers and `_verify_*` folders confirmed -- two sensor-print layers offset by print thickness (TX base first), `_verify_*` is scratch
+## S1.30 RX/TX curve layers and `_verify_*` folders confirmed -- two sensor-print layers offset by print thickness (~~TX base first~~ -- print order superseded by S1.32: **RX** first), `_verify_*` is scratch
 
 **Decision:** Per the user, the two remaining Stage 6 asset open questions
 (roadmap 6.1 / `wiki/001_Inbox/2026-07-18_curved_surface_assets.md`) are
@@ -1490,11 +1490,11 @@ resolved:
   not asset contract -- no Stage 6 code should read them. The existing
   gitignore stays as-is.
 - RX and TX are two layers of the printed sensor, offset from each other to
-  represent the print's thickness. TX is the underlying/base layer --
-  printing starts there, then RX (the offset layer) on top. This confirms
-  the two-electrode-layer reading in the asset survey's "Working
-  interpretation" section and the print order roadmap 6.3/"What You Build"
-  already assumed.
+  represent the print's thickness. ~~TX is the underlying/base layer --
+  printing starts there, then RX (the offset layer) on top.~~ **← print
+  order superseded 2026-07-20 by S1.32: RX prints first.** The two-layer
+  reading stands and confirms the asset survey's "Working interpretation"
+  section; only the order was wrong.
 
 **Reason:** Both were flagged as open questions because the RX/TX-as-two-
 passes and `_verify_*`-as-scratch readings were inferred from measured
@@ -1533,6 +1533,14 @@ Nothing in 6.2 depends on the answer (each layer routes on its own surface
 independently). It does decide roadmap **6.3**'s pass order and the sign of
 **6.4**'s hover-offset surface normal, so it must be resolved before either
 lands.
+
+**✅ Caveat resolved 2026-07-20 -- see S1.32. The measured geometry was
+right: RX prints first.** The supervisor gave the fabrication sequence (RX ->
+manual silicone fill -> TX -> manual silicone fill), which supersedes the
+print-order half of this entry. The two-layer reading above is unaffected and
+stands. The caveat text is kept as the record of how the discrepancy was
+found -- and as a reminder that the filenames, not the measurements, were the
+misleading signal.
 
 
 ## S1.31 Geodesic routing (roadmap 6.2) -- two per-surface CSR graphs, hand-rolled heapq Dijkstra, one solve per unique snapped vertex, retained predecessor rows
@@ -1755,3 +1763,79 @@ correspondence checked numerically -- selecting RX puts every path node at
 0.0000mm from `Surface_RX_Offset` and 2.08mm from the TX surface, and vice
 versa. The untouched core was re-checked unchanged: both matrices (70,70),
 symmetric to 1e-9, zero diagonal, all finite, elementwise >= chord.
+
+
+## S1.32 Fabrication sequence confirmed (roadmap 6.3) -- RX prints first, manual silicone fill between passes, one live layer at a time
+
+**Decision:** The supervisor has given the physical fabrication sequence for
+the dual-layer sensing pad:
+
+> RX sensor layer -> fill the gaps with silicone -> TX sensor layer -> fill
+> the gaps with silicone. Silicone application is a **manual** process.
+
+Four things follow, and they close S1.30's open print-order caveat:
+
+- **RX is the first robot pass, TX the second.** This **supersedes the
+  print-order half of S1.30**, which recorded TX first. S1.30's substantive
+  claim -- that RX and TX are two electrode layers offset by the print's
+  thickness -- is unaffected and stands.
+- **Two separate toolpaths, run one at a time.** Each layer is ordered on its
+  own surface graph and printed as its own pass. There is never a toolpath,
+  cost matrix, precompute run, cache file or playback spanning both layers,
+  and never a travel move from the last RX piece to the first TX piece --
+  each pass starts and ends at rest. The manual silicone fill sits in that
+  gap and is **not modelled in the simulator**: no between-pass state
+  machine, no rendered fill. Switching the live layer is the user action that
+  represents it.
+- **The live layer drives scene visibility.** RX shows itself and everything
+  below it (`Curved Toolpath RX`, `Surface RX Offset`, `Surface Bot`) with
+  `Surface TX Base` and `Curved Toolpath TX` hidden; TX shows the whole
+  object, including the already-printed RX layer beneath it in its normal
+  colour. This is **functional, not cosmetic**: S1.31 measured
+  `Surface_RX_Offset` as sealed inside the `Surface_TX_Base` shell (a uniform
+  ~2mm outboard, 100% of 3,000 sampled points), so with TX_Base shown the RX
+  curves and their geodesics are not merely cluttered, they are *invisible* --
+  which is exactly why `_isolate_geodesic_layer()` had to exist for 6.2's
+  sample view. 6.6's layer selector generalises that existing
+  snapshot/restore pair rather than adding a second visibility mechanism
+  beside it.
+- **The 6.5 collision obstacle is per-pass.** RX clears `Surface_Bot` (nothing
+  is printed yet); TX clears `Surface_RX_Offset`, standing in for the cured RX
+  traces plus silicone fill that are physically present by then. Both keep the
+  nozzle-tip exemption S1.13's successor needs -- a strict "no contact with
+  the obstacle" test rejects every valid feed waypoint, since tip contact is
+  what printing is. `Surface_Bot` remains a collision body only, never a print
+  target (S1.30 unchanged on that point).
+
+**Assumption, not confirmed:** S1.31 measured a 2.00mm gap between
+`Surface_Bot` and `Surface_RX_Offset`, so RX printing first does not put RX
+in contact with the mockup. The working assumption is that a **silicone base
+layer is applied to the shoulder before the RX pass**, making
+`Surface_RX_Offset` that base's outer surface. This is an **open question for
+the supervisor**, recorded so the discrepancy isn't rediscovered later.
+Nothing in 6.3-6.6 depends on the answer -- it changes the interpretation of
+the gap, not any transform, route or clearance.
+
+**Reason:** Direct supervisor answer, and it resolves the contradiction
+S1.30's caveat left open in favour of the measured geometry. The stack
+measures BOT -> RX (2.00mm) -> TX (4.02mm) with `TX_Base` outside
+`RX_Offset` for 100% of sampled points, which is precisely a first-laid RX.
+The filenames (`Surface_TX_Base` reading as "the base layer") were the
+misleading signal, and the silicone dielectric fill between two electrode
+layers independently corroborates the capacitive-tactile-sensor reading the
+asset survey had inferred from geometry alone.
+
+The existing architecture needed no reversal to accommodate any of this: 6.2
+already built two per-surface graphs and two 70x70 cost matrices (S1.31), and
+6.5 already scheduled per-layer cache files. Only the pass *order*, the
+per-pass collision surface, and the visibility rule are new.
+
+**Non-revertible unless:** a future asset drop changes the layer relationship
+-- a third layer, or an offset that no longer represents print thickness. The
+code that would change is 6.3's pass sequencing, 6.5's per-pass collision
+surface, and 6.6's layer selector and visibility sets.
+
+**Verified on:** 2026-07-20 -- supervisor statement. No new geometry
+measurement needed: the stack ordering, the 2.00mm/4.02mm gaps and the
+enclosure of `RX_Offset` by `TX_Base` were all measured in S1.29/S1.31, and
+this entry adopts those numbers rather than re-deriving them.

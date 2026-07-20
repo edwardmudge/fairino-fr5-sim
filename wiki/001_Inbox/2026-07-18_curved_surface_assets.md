@@ -125,6 +125,14 @@ questions, item 3).* RX and TX are two separate ordered print passes rather
 than one merged path, and `Surface_Bot.obj` is a collision body rather than
 a print target.
 
+**Corroborated 2026-07-20 by the fabrication sequence** (`settled.md` S1.32).
+The supervisor's description of how the pad is made is: **RX layer → fill the
+gaps with silicone → TX layer → fill the gaps with silicone**, the silicone
+applied manually. A silicone dielectric deliberately filling the gap between
+two electrode layers is exactly what the capacitive reading above predicted,
+inferred at the time from geometry alone. It also settles the print order —
+**RX first** (see item 3 below).
+
 The earlier RF/ridge-waveguide guess in the first version of this note is
 dropped — it was based on the "ridge network" filenames in `_verify_*`, which
 more likely describe the curve-*generation* algorithm (ridge extraction on a
@@ -170,21 +178,32 @@ principle in `AGENTS.md` favours `heapq`.
 3. ~~**What do RX/TX denote, and which curve(s) get printed?**~~ **Answered
    (2026-07-19):** RX and TX are two layers of the printed sensor, offset
    from each other to represent the print's thickness — confirming the
-   two-electrode-layer reading above. TX is the underlying/base layer and
-   prints first; RX (the offset layer) second. See `settled.md` S1.30.
+   two-electrode-layer reading above. ~~TX is the underlying/base layer and
+   prints first; RX (the offset layer) second.~~ See `settled.md` S1.30.
 
-   ⚠ **Partially reopened, same day** — the *two-layer* reading holds, but
-   the *print order* is now in doubt. Measuring the three surfaces against
-   each other during Stage 6.2 gives median nearest-surface gaps
+   ⚠ **The print-order half was reopened the same day** — the *two-layer*
+   reading held, but the order was put in doubt. Measuring the three surfaces
+   against each other during Stage 6.2 gives median nearest-surface gaps
    `Surface_Bot` → `Surface_RX_Offset` **2.00 mm** → `Surface_TX_Base`
    **4.02 mm**, with TX outside RX at 100% of 3,000 sampled points, and each
    layer's curves following its own surface. The physical stack is therefore
    **BOT → RX → TX**: `RX_Offset` is the layer against the shoulder body, so
-   at face value **RX** is laid down first, not TX. The filenames say TX is
-   the base; the geometry says otherwise. Open for the supervisor — it
-   decides roadmap 6.3's pass order and the sign of 6.4's hover-offset
-   normal. See S1.30's caveat.
+   at face value **RX** is laid down first, not TX. The filenames said TX was
+   the base; the geometry said otherwise.
+
+   ✅ **Resolved 2026-07-20 — RX prints first** (`settled.md` S1.32). The
+   supervisor gave the fabrication sequence: RX → manual silicone fill → TX →
+   manual silicone fill. **The measurement was right and the filenames were
+   the misleading signal** — `Surface_TX_Base` reads as "the base layer" but
+   isn't one. Worth carrying forward: when a name and a measurement disagree
+   here, the measurement won.
 4. ~~**Storage/tracking plan.**~~ **Resolved** by the gitignore change below.
+5. ⚠ **NEW (2026-07-20) — what fills the 2.00 mm between `Surface_Bot` and
+   `Surface_RX_Offset`?** RX printing first means it isn't touching the
+   mockup. **Working assumption:** a silicone base layer is applied to the
+   shoulder before the RX pass, making `Surface_RX_Offset` that base's outer
+   surface. Not yet confirmed. Blocks nothing in 6.3–6.6 — it changes how the
+   gap is interpreted, not any transform, route or clearance.
 
 ## Storage
 
@@ -211,3 +230,139 @@ trivially reversible either way, since gitignoring deletes nothing.
 **planned**. It carries its own Open Questions section mirroring 2 and 3 above.
 Nothing has been written to `settled.md` yet — in particular 6.4 (per-waypoint
 orientation) contradicts S1.12 and needs a real decision first.
+
+## Implementation notes for 6.3–6.6 (moved from Stage6_README, 2026-07-20)
+
+`Stage6_README.md` was trimmed to match `Stage5_README.md`'s terser, human-
+readable style. The forward-looking implementation detail for the still-
+**planned** stages (6.3–6.6) is kept here instead of being deleted, since it
+doesn't have a `settled.md` entry yet.
+
+### 6.3 — Order the 70 Pieces
+
+- **Tied zero-cost moves are real, not a bug to avoid**: 16 (RX) / 18 (TX)
+  matrix entries — 8 and 9 endpoint pairs — sit on *different* pieces but
+  have geodesic cost exactly 0.0 because they snap to the same mesh vertex.
+  A bare `argmin` picks among them arbitrarily; tie-breaking is a genuine
+  design decision (`settled.md` S1.31).
+- **Snap gap**: a geodesic starts/ends at the snapped mesh vertex, median
+  ~0.36 mm / max 0.68 mm from the true curve endpoint. Decide explicitly
+  whether to append the true endpoints to close the gap or accept it as
+  within tolerance.
+- **Rim-hugging travel moves**: 6.2 measured a mean 18% of path nodes on the
+  surface's open boundary across random endpoint pairs (11/60 pairs above
+  20%). Geometrically correct (shortest path around a dome's rim can
+  genuinely go along the rim) but may not be physically desirable — worth a
+  sanity check once travel moves are rendered.
+- **Hover offset mechanics**: emit each travel move as the 6.2 geodesic
+  polyline offset outward along the local surface normal by a new
+  `CURVED_TRAVEL_HOVER_MM` constant (~3–5 mm, tune empirically). The normal
+  lookup (nearest-vertex `vertex_normals` via trimesh, no `scipy`) is pulled
+  forward from 6.4 into this stage since the hover offset needs it first;
+  6.4 then reuses the same lookup rather than re-implementing it. Outward =
+  away from `Surface_Bot`.
+
+### 6.4 — Per-Waypoint Orientation from Surface Normals
+
+This is an **architecture decision, not just code** — don't write it to
+`settled.md` until decided; it supersedes S1.12 and deserves its own entry
+explaining why the flat-plate assumption was correct at the time and what
+replaces it.
+
+- `settled.md` S1.12 snapshots one constant `R_target` for the whole path —
+  correct for a flat, non-tilting build plate, wrong for a curved one. It's
+  baked into `build_toolpath_waypoints_world()` (`geometry_backend.py:1013`,
+  returns a single `R_target` at `:1042`) and `precompute_R_target` (`:146`,
+  assigned at `:1393`), consumed as one shared matrix per waypoint at
+  `:1452`.
+- A curved surface needs a per-waypoint rotation from the local surface
+  normal, plus a decision about the remaining degree of freedom (rotation
+  about the nozzle axis) — most likely aligned to the path tangent.
+- Watch for normal flipping between adjacent waypoints. The resulting IK
+  branch discontinuity is what the reference-pose ranking in
+  `solve_ik_tcp_matrix` (`:1150`) exists to smooth, but it needs a sensible
+  sequence fed into it first.
+- **Outward = away from `Surface_Bot`** — fixed by the measured stack
+  geometry (BOT → RX 2.00 mm → TX 4.02 mm), independent of pass order.
+  Getting the sign wrong drives the nozzle *into* the mockup — verify
+  `mesh.vertex_normals`' orientation against the away-from-Bot direction
+  before trusting it; it's a property of the CAD export, not the physical
+  stack.
+
+### 6.5 — IK Precompute & Playback Reuse
+
+- **Open the precompute seam**: `run_toolpath_ik_precompute(joint_limits, ...)`
+  (`:1349`) hardcodes its own source data at `:1367-1400` (cache →
+  `GCODE_DIR` → `parse_gcode` → `build_toolpath_waypoints_world`) with no
+  parameter for injecting a waypoint list. Add a `waypoints=None` keyword, or
+  split out a `_begin_precompute(waypoints, R_target, ...)` helper.
+  Pre-populating `self.precompute_waypoints` from outside works but is an
+  undocumented backdoor — don't ship that.
+- Once 6.4 lands, `precompute_R_target` becomes an array (per-waypoint), not
+  a single matrix, and that has to flow through the whole precompute path.
+- **Bead rendering needs new constants**: the PLY curves carry no extrusion
+  `E` and layer-from-Z is meaningless on a conformal path, so add assumed
+  `CURVED_BEAD_WIDTH_MM` / `CURVED_BEAD_HEIGHT_MM` (same spirit as the
+  existing assumed `FILAMENT_DIAMETER_MM`) and feed the existing bead-box
+  template with a constant cross-section along feed segments.
+- **Cache goes per-layer**: `GCODE_PRECOMPUTE_CACHE` is one fixed filename —
+  can't serve TX, RX, and the planar benchy without thrashing. Use per-source
+  files (`curved_rx.precompute.npz`, `curved_tx.precompute.npz`).
+  `_toolpath_cache_meta()` (`:1276`) keys on G-code hash + plate pose — add a
+  curve/surface hash field and bump `PRECOMPUTE_CACHE_VERSION` (`:118`) so
+  old caches are rejected rather than silently misapplied.
+- **Collision obstacle is per-pass**, because the two passes see a different
+  physical world:
+
+  | Pass | Obstacle | Why |
+  | --- | --- | --- |
+  | RX (first) | `Surface_Bot` | nothing is printed yet |
+  | TX (second) | `Surface_RX_Offset` | stands in for the cured RX traces + silicone fill now present |
+
+  Using `Surface_Bot` for both would let the TX pass drive the arm straight
+  through 2 mm of already-printed sensor without complaint.
+  `_branch_clears_ground()` (`geometry_backend.py:1815`) currently only
+  tests literal world `z=0` (`settled.md` S1.13) — a shoulder mockup on the
+  plate needs clearance against the obstacle mesh, not a ground plane.
+- **Design caveat**: "no part of the moving geometry may contact the
+  obstacle mesh" rejects *every valid feed waypoint*, since the nozzle tip
+  touching the surface is exactly what printing is. The check must apply
+  strict clearance to the arm links/nozzle body while exempting (or giving
+  tolerance to) the tip region near the TCP.
+- `Surface_Bot` is rendered but **not retained** — `load_curved_model()`
+  keeps only the two print surfaces in world space
+  (`geometry_backend.py:652-657`, per S1.31). This stage needs `Surface_Bot`
+  retained too before it can collide against it.
+
+### 6.6 — GUI Wiring
+
+- New numbered `psim.TreeNode` section in `gui_panel.py`'s `render()`,
+  following the existing structure. New per-frame pump line at the top of
+  `render()` alongside the existing three (`gui_panel.py:60-62`).
+- Layer selector: a radio pair (RX first, TX second) — 6.2 already added a
+  minimal RX/TX `psim.RadioButton` pair for the sample geodesic
+  (`gui_panel.py:131-135`); reuse that idiom. Check
+  `docs/Polyscope_Quickstart.md` for the `(changed, value)` return signature
+  before using it (`AGENTS.md` rule).
+- Selecting a layer re-applies the visibility set from the "One live layer at
+  a time" table in `Stage6_README.md`. Build this by **generalising**
+  `_isolate_geodesic_layer()` / `_restore_geodesic_isolation()`
+  (`geometry_backend.py:959` / `:996`), which already implement
+  snapshot-and-restore of per-structure visibility for exactly this reason.
+  Do not add a second visibility mechanism beside them — two would fight
+  over the same Polyscope structures, and S1.31's amendment records a real
+  bug from restore clobbering state it never captured.
+- Load/Clear pair following the conditional-clear pattern at
+  `gui_panel.py:88-94` — Clear gated on a **backend-owned** boolean flag, not
+  UI state.
+- Clear-sample button for the geodesic view: removes the sample/chord curves
+  and calls `_restore_geodesic_isolation()` **without**
+  `_abort_geodesic_precompute()` — as of 6.2 the only way back to normal
+  visibility is Cancel Geodesics, which also discards the ~8.4 s cost
+  matrices.
+- Gate controls during playback with `psim.BeginDisabled(...)` (`settled.md`
+  S1.27) — including the layer selector, so the live pass can't be switched
+  mid-playback.
+- Verify the *transitions*, not just the states: a user-set visibility or
+  transparency should survive a load → select → clear round trip — S1.31's
+  amendment records a real bug here.
