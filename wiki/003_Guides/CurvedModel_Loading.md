@@ -119,12 +119,15 @@ more:
 - **No layer selector or Clear button yet** (roadmap 6.6) — clicking "Load
   Curved Model" always loads both RX and TX together, and there's no way
   to unload it from the GUI yet.
-- **No print ordering** (roadmap 6.3) — the 70 pieces aren't stitched into a
-  print sequence yet. The shortest-path/geodesic logic over the surface
-  meshes that 6.3 needs *does* now exist (roadmap 6.2) — see
-  [`CurvedModel_Geodesics.md`](CurvedModel_Geodesics.md).
-- **No per-waypoint surface-normal orientation** (roadmap 6.4) — nothing
-  drives the arm through this yet, so orientation doesn't apply.
+- **Print ordering now exists** (roadmap 6.3, done) — the 70 pieces are
+  stitched into a per-layer print sequence with hover travel moves, built
+  on the 6.2 geodesic logic. See [`settled.md`](../002_Architecture/settled.md)
+  S1.35 and [`CurvedModel_Geodesics.md`](CurvedModel_Geodesics.md).
+- **Per-waypoint surface-normal orientation now exists** (roadmap 6.4, done)
+  — each feed point gets a TCP orientation with Z along the outward surface
+  normal (`build_orientation_frames()`, `settled.md` S1.36). Note this only
+  *computes and visualises* the frames; nothing drives the arm through them
+  yet — that IK wiring is 6.5.
 - **No IK precompute/playback reuse** (roadmap 6.5).
 - **The 90° rotation is a fixed constant**, not derived from the build
   plate's live orientation. This is fine today since the plate defaults to

@@ -113,6 +113,14 @@ CURVED_ORDER_CMAP = np.array([
 ])
 CURVED_ORDER_FEED_RADIUS_MM = 0.8  # slightly over CURVE_RADIUS_MM (0.5) so the overlay reads on the base curve
 
+# Per-waypoint TCP orientation triads -- roadmap 6.4. Smaller than the
+# 50mm TCP frame: hundreds are drawn along the shell, so they must read as
+# local surface normals, not clutter. Only every ORIENT_FRAME_STRIDE-th
+# waypoint gets a triad, keeping the overlay legible.
+ORIENT_FRAME_SCALE_MM = 6.0
+ORIENT_FRAME_STRIDE = 12
+ORIENT_FRAME_COLORS = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])  # X red, Y green, Z blue
+
 PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # per-frame batch well under a 60fps budget. Measured ~0.5ms/waypoint for
 # solve_ik_tcp_matrix + the ground-clearance filter at benchy scale (see
@@ -212,6 +220,13 @@ class VisContent:
         self.curved_travel_total = None        # list of len(CURVED_LAYERS) optimized inter-piece travel (mm)
         self.curved_travel_naive = None        # list of len(CURVED_LAYERS) file-order travel (mm), the baseline
         self.curved_order_status = ""
+
+        # Per-waypoint TCP orientation frames, see build_orientation_frames()
+        # -- roadmap 6.4. Derived from the print order above, so cleared with
+        # it in _abort_geodesic_precompute().
+        self.curved_orient_loaded = False      # True once build_orientation_frames() has run -- what 6.5 gates on
+        self.curved_orient_frames = None       # list of len(CURVED_LAYERS) lists of (pos_world (3,), R_target (3,3)), print order
+        self.curved_orient_status = ""
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -829,12 +844,18 @@ class VisContent:
             for name in self.curved_layer_names:
                 ps.remove_curve_network(f"Curved Travel {name}", error_if_absent=False)
                 ps.remove_curve_network(f"Curved Order Feed {name}", error_if_absent=False)
+                ps.remove_curve_network(f"Curved Orient Frames {name}", error_if_absent=False)
         self.curved_order_loaded = False
         self.curved_print_order = None
         self.curved_travel_moves = None
         self.curved_travel_total = None
         self.curved_travel_naive = None
         self.curved_order_status = ""
+
+        # The 6.4 orientation frames derive from the print order just dropped.
+        self.curved_orient_loaded = False
+        self.curved_orient_frames = None
+        self.curved_orient_status = ""
 
 
     def step_geodesic_precompute(self):
@@ -926,6 +947,16 @@ class VisContent:
             self.curved_order_status = "Build geodesics first"
             return
 
+        # A fresh order invalidates any 6.4 orientation frames built against the
+        # previous one -- drop their state and rendered triads so a re-order
+        # can't leave a stale overlay behind.
+        if self.curved_orient_loaded:
+            for name in self.curved_layer_names:
+                ps.remove_curve_network(f"Curved Orient Frames {name}", error_if_absent=False)
+            self.curved_orient_loaded = False
+            self.curved_orient_frames = None
+            self.curved_orient_status = ""
+
         n_layers = len(self.curved_layer_names)
         self.curved_print_order = [None] * n_layers
         self.curved_travel_moves = [None] * n_layers
@@ -994,6 +1025,87 @@ class VisContent:
                                      f"max {max(rim_frac) * 100:.0f}% travel nodes on rim")
 
 
+    def build_orientation_frames(self):
+        """Attach a per-waypoint TCP orientation to every printed feed point,
+        holding the nozzle perpendicular to the curved surface -- roadmap 6.4.
+        Synchronous, gated on curved_order_loaded (walks the stored print
+        order, no re-solve). Supersedes the flat-plate single-constant
+        R_target of settled.md S1.12 for the curved path.
+
+        Per feed point the target TCP orientation R (base frame, 3x3) is:
+          - Z = the outward surface normal (nozzle approaches along -Z, into
+            the surface). Matches the planar convention where R_target's
+            third column is the plate's outward +Z; the outward sign is
+            already fixed away from Surface_Bot at load (S1.35), so it's safe.
+          - X, Y = a fixed world reference projected into the tangent plane,
+            NOT the path tangent. The nozzle is rotationally symmetric about
+            its axis, so this DOF is free; pinning it to a constant world
+            direction keeps the frame from spinning as the toolpath meanders
+            (only the normal tilts it), minimising wrist travel. The
+            reference axis is chosen per point as whichever world axis is most
+            perpendicular to Z, so the projection never collapses and adjacent
+            frames stay close (no flip as the normal sweeps past an axis)."""
+        if not self.curved_order_loaded:
+            self.curved_orient_status = "Build print order first"
+            return
+
+        n_layers = len(self.curved_layer_names)
+        self.curved_orient_frames = [None] * n_layers
+        world_axes = np.eye(3)
+
+        for layer in range(n_layers):
+            # Feed points in print order -- the exact derivation build_print_order
+            # uses for its ordered-feed overlay (reversed when entered at 2p+1).
+            ordered_pieces = [self.curved_pieces_world[layer][p][::-1] if entry & 1
+                              else self.curved_pieces_world[layer][p]
+                              for p, entry in self.curved_print_order[layer]]
+            points = np.vstack(ordered_pieces)  # (W,3) all feed waypoints
+
+            # One outward normal per waypoint via nearest surface vertex --
+            # same normal source 6.3's travel hover samples from.
+            snap, _ = nearest_vertex_index(self.curved_surface_verts_world[layer], points)
+            normals = self.curved_surface_vnormals_world[layer][snap]  # (W,3), outward unit
+
+            frames = []
+            for pos, z in zip(points, normals):
+                z = z / np.linalg.norm(z)
+                a = world_axes[np.argmin(np.abs(world_axes @ z))]  # most perpendicular to z
+                x = a - np.dot(a, z) * z
+                x /= np.linalg.norm(x)
+                y = np.cross(z, x)
+                R = np.column_stack([x, y, z])
+                frames.append((pos, R))
+            self.curved_orient_frames[layer] = frames
+
+            self._register_orientation_frames(
+                f"Curved Orient Frames {self.curved_layer_names[layer]}", frames)
+
+        self.curved_orient_loaded = True
+        counts = "; ".join(f"{self.curved_layer_names[l]}: {len(self.curved_orient_frames[l])} waypoints"
+                           for l in range(n_layers))
+        self.curved_orient_status = f"Orientation frames ready -- {counts}"
+
+
+    def _register_orientation_frames(self, name, frames):
+        """Draw a downsampled batch of TCP orientation triads as one curve
+        network (every ORIENT_FRAME_STRIDE-th frame), X red / Y green / Z blue
+        -- same colour scheme as create_coordinate_frame, batched across many
+        origins like _register_curve_layer."""
+        sampled = frames[::ORIENT_FRAME_STRIDE]
+        nodes, edges, colors, offset = [], [], [], 0
+        for pos, R in sampled:
+            tips = pos + ORIENT_FRAME_SCALE_MM * R.T  # rows: +X, +Y, +Z tips
+            nodes.append(np.vstack([pos, tips]))
+            edges.append(np.array([[0, 1], [0, 2], [0, 3]]) + offset)
+            colors.append(ORIENT_FRAME_COLORS)
+            offset += 4
+        handle = ps.register_curve_network(name, np.vstack(nodes), np.vstack(edges))
+        handle.add_color_quantity("axis_colors", np.vstack(colors),
+                                  defined_on='edges', enabled=True)
+        handle.set_radius(CURVE_RADIUS_MM, relative=False)
+        return handle
+
+
     def apply_live_layer_visibility(self, layer):
         """Show only `layer`'s geometry and hide every other layer's -- the
         strict one-layer-at-a-time view for verifying a print pass on its own,
@@ -1002,7 +1114,7 @@ class VisContent:
         invisible with TX shown.
 
         Per configured layer, the surface / ordered-feed overlay / travel network
-        are enabled only for `layer`; the base toolpath curve shows only when its
+        / orientation-frame triads are enabled only for `layer`; the base toolpath curve shows only when its
         overlay is absent (the gradient overlay supersedes it, so they don't
         z-fight). The obstacle mesh is left as-is -- it's shared mockup context.
         Every structure is guarded, since overlays/travel don't exist until a
@@ -1019,10 +1131,11 @@ class VisContent:
             base_curve = cfg["curve_structure_name"]
             overlay = f"Curved Order Feed {self.curved_layer_names[i]}"
             travel = f"Curved Travel {self.curved_layer_names[i]}"
+            orient = f"Curved Orient Frames {self.curved_layer_names[i]}"
 
             if ps.has_surface_mesh(surface):
                 ps.get_surface_mesh(surface).set_enabled(visible)
-            for name in (overlay, travel):
+            for name in (overlay, travel, orient):
                 if ps.has_curve_network(name):
                     ps.get_curve_network(name).set_enabled(visible)
             if ps.has_curve_network(base_curve):

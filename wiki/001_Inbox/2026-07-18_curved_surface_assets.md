@@ -239,6 +239,12 @@ trivially reversible either way, since gitignoring deletes nothing.
 Nothing has been written to `settled.md` yet — in particular 6.4 (per-waypoint
 orientation) contradicts S1.12 and needs a real decision first.
 
+> **Update 2026-07-21:** superseded. 6.1–6.4 have since landed and are recorded
+> in `settled.md` — 6.1 (S1.29/S1.30), 6.2 (S1.31), 6.3 (S1.35), and 6.4
+> (**S1.36**), where the per-waypoint orientation decision that supersedes S1.12
+> is made: TCP Z = outward surface normal, spin pinned to a fixed world
+> reference (not the path tangent). 6.5/6.6 remain planned.
+
 ## Implementation notes for 6.3–6.6 (moved from Stage6_README, 2026-07-20)
 
 `Stage6_README.md` was trimmed to match `Stage5_README.md`'s terser, human-

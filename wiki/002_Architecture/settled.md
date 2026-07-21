@@ -2061,3 +2061,76 @@ Verified headless: overlays registered with the right per-order edge counts
 (RX 2492 / TX 1965) and oriented at the entry end; selecting either layer
 enables only its structures and disables the others (base curves off while
 overlays exist); reload removes both overlay and travel networks.
+
+
+## S1.36 Per-waypoint tool orientation (roadmap 6.4) -- TCP Z = outward surface normal, in-plane axes pinned to a fixed world reference, not the path tangent
+
+**Supersedes S1.12's single-constant `R_target` for the curved path.** S1.12
+snapshots one TCP orientation (`T_user_frame[:3,:3]`) for a whole G-code path --
+correct then, because the build plate is flat and doesn't tilt mid-print, so the
+nozzle prints perpendicular everywhere with one orientation. A curved shell has a
+different surface normal at every point, so one orientation would drive the nozzle
+into the mockup on the steep parts. `build_orientation_frames()`
+(`geometry_backend.py`, roadmap 6.4) replaces the single matrix with a
+**per-waypoint** `R_target`.
+
+**Decision:** For each printed feed point, the target TCP orientation (base frame,
+3x3) is built from an orthonormal basis:
+
+- **Z axis = the outward surface normal.** The nozzle approaches along `-Z`, into
+  the surface. This *is* the S1.12 convention generalised: the flat plate's
+  `R_target` third column is the plate's outward `+Z`, and at rpy=0 that reduces to
+  `R = I` with the nozzle pointing straight down. Normals come from the
+  already-outward `curved_surface_vnormals_world` (S1.35), sampled per feed point
+  by nearest surface vertex (`nearest_vertex_index`, the same normal source 6.3's
+  hover uses). The outward sign is fixed against `Surface_Bot` at load, so no
+  re-check is needed -- a wrong sign would drive the nozzle into the mockup.
+- **In-plane axes (X, Y) pinned to a fixed world reference, NOT the path tangent.**
+  A print nozzle is rotationally symmetric about its own axis, so the spin DOF is
+  physically free. Pinning it to a constant world direction means the frame only
+  *tilts* as the normal changes and never *spins* as the toolpath meanders --
+  minimising wrist (J6) travel, i.e. "as stable and straight as possible" (user
+  directive). Tangent-alignment (the README's tentative suggestion) would be the
+  opposite: J6 chasing every wiggle. The reference axis is chosen **per point as
+  whichever of world X/Y/Z is most perpendicular to Z** (`argmin |a . z|`), so the
+  projection `x = normalize(a - (a.z)z)` never collapses and adjacent frames stay
+  close -- no flip as a normal sweeps past a world axis. `y = z x x` closes the
+  right-handed basis.
+
+**Scope -- 6.4 computes and visualises only; IK is 6.5.** The frames are stored per
+layer as `curved_orient_frames` (list of `(pos_world, R_target)` in print order) --
+exactly the array 6.5 will feed to `run_toolpath_ik_precompute` -- and rendered as
+a downsampled triad overlay `Curved Orient Frames <name>` (every
+`ORIENT_FRAME_STRIDE`-th waypoint, X red / Y green / Z blue, the coord-frame edge-
+colour pattern batched across origins like `_register_curve_layer`). No IK is
+solved here. Gated on `curved_order_loaded`; a re-order or reload invalidates the
+frames (state cleared, triads removed) so a stale overlay can't outlive its order.
+`apply_live_layer_visibility` toggles the triads with the rest of the live layer.
+
+**Reason:** Z = outward normal is the direct meaning of "nozzle perpendicular to
+the surface" and keeps continuity with the flat-plate convention it replaces.
+Fixing the free spin DOF to a world reference (rather than the tangent) is the
+right call *because* the nozzle is symmetric: nothing about the print depends on
+it, so the tie-breaker is arm-motion stability, and a constant reference minimises
+tool roll. Per-point most-perpendicular axis selection is a branchless degeneracy
+guard that also keeps neighbours smooth, feeding the S1.5 reference-pose ranking a
+sensible sequence when 6.5 wires in IK.
+
+**Non-revertible unless:** a future tool is *not* rotationally symmetric about its
+axis (a directional applicator, a blade), in which case the spin DOF becomes
+physically meaningful and would track the path tangent (or a process-defined
+direction) instead of a world reference; or nearest-vertex normals prove too
+faceted on a finer verify, warranting barycentric interpolation across the
+containing face (a normal-source refinement, not a convention change).
+
+**Verified on:** 2026-07-21 -- headless. Basis construction over 20000 random
+normals: `|R^T R - I| < 1e-15`, `det(R) = +1`, `R[:,2]` equals the normal exactly,
+and the most-perpendicular axis pick avoids projection collapse near every world
+axis. Full pipeline on the shipped RX/TX assets (load -> geodesics -> order ->
+orient): RX 2527 waypoints / 211 triads, TX 2000 / 167; every stored `R`
+orthonormal to 6.7e-16 with `det = +1` and `R[:,2]` equal to the nearest-vertex
+outward normal to 0.0 -- i.e. Z is numerically normal to the surface at every
+waypoint; live-layer selection enables only the selected layer's triads; a
+re-order clears `curved_orient_loaded` and removes both triad networks. Remaining:
+the interactive eyeball (README 6.4 verify -- triad Z reads outward and
+perpendicular on a steep part of the shell), which needs the GUI window.

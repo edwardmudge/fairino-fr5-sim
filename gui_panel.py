@@ -136,6 +136,15 @@ class UI_Menu:
                         self.content.apply_live_layer_visibility(self.live_layer)
                     psim.TextWrapped(self.content.curved_order_status)
 
+                    # Roadmap 6.4: attach a per-waypoint TCP orientation
+                    # (nozzle normal to the surface) to each feed point and
+                    # draw the frames as triads. Gated on a built print order.
+                    if self.content.curved_order_loaded:
+                        if psim.Button("Build Orientation Frames"):
+                            self.content.build_orientation_frames()
+                            self.content.apply_live_layer_visibility(self.live_layer)
+                        psim.TextWrapped(self.content.curved_orient_status)
+
                 total = self.content.geodesic_total
                 fraction = (self.content.geodesic_index / total) if total else 0.0
                 psim.ProgressBar(fraction, overlay=f"{fraction * 100:.0f}%" if total else "")
