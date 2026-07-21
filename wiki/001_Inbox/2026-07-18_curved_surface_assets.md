@@ -239,18 +239,24 @@ trivially reversible either way, since gitignoring deletes nothing.
 Nothing has been written to `settled.md` yet — in particular 6.4 (per-waypoint
 orientation) contradicts S1.12 and needs a real decision first.
 
-> **Update 2026-07-21:** superseded. 6.1–6.4 have since landed and are recorded
-> in `settled.md` — 6.1 (S1.29/S1.30), 6.2 (S1.31), 6.3 (S1.35), and 6.4
-> (**S1.36**), where the per-waypoint orientation decision that supersedes S1.12
+> **Update 2026-07-21:** superseded. 6.1–6.5 have since landed and are recorded
+> in `settled.md` — 6.1 (S1.29/S1.30), 6.2 (S1.31), 6.3 (S1.35), 6.4
+> (S1.36), where the per-waypoint orientation decision that supersedes S1.12
 > is made: TCP Z = outward surface normal, spin pinned to a fixed world
-> reference (not the path tangent). 6.5/6.6 remain planned.
+> reference (not the path tangent) — and 6.5 (**S1.37**), which feeds that
+> per-waypoint orientation through Stage 5's IK machinery via a per-waypoint
+> tangent-plane nozzle-clearance check instead of the obstacle-mesh plan
+> below. Only 6.6 (GUI wiring) remains planned.
 
 ## Implementation notes for 6.3–6.6 (moved from Stage6_README, 2026-07-20)
 
 `Stage6_README.md` was trimmed to match `Stage5_README.md`'s terser, human-
-readable style. The forward-looking implementation detail for the still-
-**planned** stages (6.3–6.6) is kept here instead of being deleted, since it
-doesn't have a `settled.md` entry yet.
+readable style. The forward-looking implementation detail below was written
+before 6.3–6.5 existed and is kept for the historical record rather than
+deleted — each landed sub-stage now has a ✅ banner pointing at its
+as-built `settled.md` entry and dedicated guide in
+`wiki/003_Guides/CurvedModel_*.md`. Only 6.6 (GUI wiring) is still planned
+with no `settled.md` entry of its own.
 
 **Update 2026-07-20 (settled.md S1.33):** curved-surface printing was
 generalized to a configurable layer list, with the RX/TX-specific wiring
@@ -267,6 +273,13 @@ expressed there as list order (RX first). Generic job-shaped tuning values
 `geometry_backend.py`, the same way `FILAMENT_DIAMETER_MM` does for Stage 5.
 
 ### 6.3 — Order the 70 Pieces
+
+> ✅ **Landed 2026-07-21.** The bullets below were written before
+> implementation and are kept for the historical record of what was
+> anticipated correctly (the tied zero-cost moves, the snap gap) vs. what
+> wasn't (the hover-offset mechanics turned out simpler than sketched here).
+> The as-built record is `settled.md` **S1.35** and the guide
+> [`CurvedModel_PrintOrder.md`](../003_Guides/CurvedModel_PrintOrder.md).
 
 - **Tied zero-cost moves are real, not a bug to avoid**: 16 (RX) / 18 (TX)
   matrix entries — 8 and 9 endpoint pairs — sit on *different* pieces but
@@ -291,6 +304,14 @@ expressed there as list order (RX first). Generic job-shaped tuning values
   away from `Surface_Bot`.
 
 ### 6.4 — Per-Waypoint Orientation from Surface Normals
+
+> ✅ **Landed 2026-07-21 as `settled.md` S1.36.** The bullets below predate
+> that decision — in particular, "most likely aligned to the path tangent"
+> two bullets down turned out to be the wrong guess: the nozzle's rotational
+> symmetry means that DOF is free, so it's pinned to a fixed world reference
+> instead, to minimise wrist spin rather than track the path. As-built
+> record: `settled.md` **S1.36** and the guide
+> [`CurvedModel_Orientation.md`](../003_Guides/CurvedModel_Orientation.md).
 
 This is an **architecture decision, not just code** — don't write it to
 `settled.md` until decided; it supersedes S1.12 and deserves its own entry
@@ -318,6 +339,17 @@ replaces it.
   stack.
 
 ### 6.5 — IK Precompute & Playback Reuse
+
+> ✅ **Landed 2026-07-21 as `settled.md` S1.37.** Most bullets below matched
+> what was built (the precompute-seam split, the per-waypoint `R_target`, the
+> per-layer cache). **The "Collision obstacle is per-pass" and "Design
+> caveat" bullets did not** — a real obstacle-mesh check per pass was tried
+> in the plan and rejected as too slow and as rejecting every real printing
+> pose; it was replaced by a per-waypoint tangent-plane (supporting-
+> hyperplane) check against the nozzle tip only, no obstacle mesh at all. See
+> the guide's *Why the obstacle-mesh plan was rejected* section for the full
+> reasoning. As-built record: `settled.md` **S1.37** and the guide
+> [`CurvedModel_IKPrecompute.md`](../003_Guides/CurvedModel_IKPrecompute.md).
 
 - **Open the precompute seam**: `run_toolpath_ik_precompute(joint_limits, ...)`
   (`:1349`) hardcodes its own source data at `:1367-1400` (cache →

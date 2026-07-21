@@ -106,10 +106,11 @@ measured-property writeup this guide's numbers come from.
    (`curved_pieces_world`, `curved_surface_verts_world`,
    `curved_surface_faces`, `T_curved`) for roadmap 6.2's geodesic routing,
    which needs the per-piece curves and the two print surfaces in the frame
-   the arm works in. `Surface_Bot` is rendered but not retained — it's a
-   6.5 collision body, not a print surface. Reloading aborts any geodesic
-   solved against the previous load, since every world vertex is re-derived
-   here (`settled.md` S1.31).
+   the arm works in. `Surface_Bot` is rendered but not retained — 6.5 ended
+   up **not** needing it as a collision mesh (a per-waypoint tangent-plane
+   check replaced the obstacle-mesh idea, `settled.md` S1.37). Reloading
+   aborts any geodesic solved against the previous load, since every world
+   vertex is re-derived here (`settled.md` S1.31).
 
 ## Current scope and limitations
 
@@ -121,14 +122,20 @@ more:
   to unload it from the GUI yet.
 - **Print ordering now exists** (roadmap 6.3, done) — the 70 pieces are
   stitched into a per-layer print sequence with hover travel moves, built
-  on the 6.2 geodesic logic. See [`settled.md`](../002_Architecture/settled.md)
-  S1.35 and [`CurvedModel_Geodesics.md`](CurvedModel_Geodesics.md).
+  on the 6.2 geodesic logic. See
+  [`CurvedModel_PrintOrder.md`](CurvedModel_PrintOrder.md), `settled.md` S1.35.
 - **Per-waypoint surface-normal orientation now exists** (roadmap 6.4, done)
   — each feed point gets a TCP orientation with Z along the outward surface
-  normal (`build_orientation_frames()`, `settled.md` S1.36). Note this only
-  *computes and visualises* the frames; nothing drives the arm through them
-  yet — that IK wiring is 6.5.
-- **No IK precompute/playback reuse** (roadmap 6.5).
+  normal (`build_orientation_frames()`). 6.4 itself only *computed and
+  visualised* the frames; wiring them through IK was 6.5. See
+  [`CurvedModel_Orientation.md`](CurvedModel_Orientation.md), `settled.md` S1.36.
+- **IK precompute now reuses Stage 5's machinery per layer** (roadmap 6.5,
+  done) — `run_curved_toolpath_ik_precompute(layer, ...)` feeds the same
+  chunked solver from `build_curved_toolpath_waypoints_world(layer)`, with
+  per-waypoint `R_target` and nozzle-tip tangent-plane clearance instead of
+  an obstacle mesh. `geometry_backend.py`-only; no GUI button and no curved
+  playback yet (roadmap 6.6). See
+  [`CurvedModel_IKPrecompute.md`](CurvedModel_IKPrecompute.md), `settled.md` S1.37.
 - **The 90° rotation is a fixed constant**, not derived from the build
   plate's live orientation. This is fine today since the plate defaults to
   zero rotation and nothing currently re-tilts it before loading the

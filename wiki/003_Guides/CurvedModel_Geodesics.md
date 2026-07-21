@@ -17,7 +17,8 @@ reconstructed. Roadmap 6.3 consumes these to decide the print order of the
 70 curve pieces and to emit the travel moves between them.
 
 Nothing here drives the arm. 6.2 produces routes and distances only;
-per-waypoint orientation is 6.4 and IK/playback is 6.5.
+per-waypoint orientation was added in 6.4 and IK/playback reuse in 6.5 (both
+done, `settled.md` S1.36/S1.37).
 
 The geodesic engine is generic and project-agnostic (settled.md S1.33): it
 builds one graph per *configured* layer, however many `CURVED_LAYERS`
@@ -56,7 +57,9 @@ This diverges from the flat `precompute_*` naming next door; see
    is in **world coordinates**, already through `T_curved`, because
    everything downstream — 6.3's hover offsets, 6.4's normals, 6.5's IK —
    works in the frame the arm works in. `Surface_Bot` is rendered but not
-   retained: it is a collision body for 6.5, not a print surface.
+   retained: 6.5 ended up **not** needing it as a collision mesh (a
+   per-waypoint tangent-plane check replaced the obstacle-mesh idea,
+   `settled.md` S1.37).
 
 2. **`build_surface_graph(verts, faces)`** — nodes are mesh vertices, edges
    are triangle edges, weights are Euclidean edge lengths. Returns a
@@ -267,16 +270,18 @@ Clear-button territory.
 
 ## Current scope and limitations
 
-- **Print ordering is done** (6.3, `settled.md` S1.35) — `build_print_order()`
-  consumes these cost matrices and predecessor rows: greedy + 2-opt per layer,
-  emitting hover travel moves.
-- **Travel-move hover offset is done** (6.3) — the nozzle follows each geodesic
-  offset outward by `CURVED_TRAVEL_HOVER_MM` along the from-scratch surface
-  normals (`compute_vertex_normals`), so it clears the mockup.
-- **No disk cache** — the run takes ~8.4–9.1 s and is recomputed per session.
-  Roadmap 6.5 already schedules per-layer cache files; that is the natural
-  place to add one, keyed on a surface hash rather than the plate pose,
-  since costs are pose-invariant.
+- **Print ordering is done** (6.3, done) — `build_print_order()` consumes
+  these cost matrices and predecessor rows: greedy + 2-opt per layer, emitting
+  hover travel moves. See
+  [`CurvedModel_PrintOrder.md`](CurvedModel_PrintOrder.md), `settled.md` S1.35.
+- **Per-waypoint orientation and IK precompute are done** (6.4/6.5) — see
+  [`CurvedModel_Orientation.md`](CurvedModel_Orientation.md) and
+  [`CurvedModel_IKPrecompute.md`](CurvedModel_IKPrecompute.md), `settled.md`
+  S1.36/S1.37. Note 6.5's per-layer caches are for the **IK precompute**, not
+  this stage — the geodesic run below still has no disk cache of its own.
+- **No disk cache for the geodesic run itself** — it takes ~8.4–9.1 s and is
+  recomputed every session. Would key on a surface hash rather than the plate
+  pose, since costs are pose-invariant; nothing currently adds one.
 - **Minimal GUI only** — Build/Pause, Cancel, plus an RX/TX radio that isolates
   the live layer (6.3, `apply_live_layer_visibility()`) and a Build Print Order
   button (6.3). There is **no Clear** and no selector gating which layer is
@@ -317,4 +322,6 @@ engine reads `VisContent.curved_layer_names` (populated by
   S1.33 — the generic-mechanism / study-config split.
 - `wiki/003_Guides/CurvedModel_Loading.md` — how the geometry this routes
   over gets loaded and placed.
+- `wiki/003_Guides/CurvedModel_PrintOrder.md` — what 6.3 does with these cost
+  matrices and predecessor rows.
 - `tutorials/Stage6_README.md` — sub-stage 6.2 and what 6.3-6.6 do with it.

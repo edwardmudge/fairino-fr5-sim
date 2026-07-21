@@ -99,6 +99,13 @@ GEODESIC_CHUNK_SOURCES = 1  # whole Dijkstra sources solved per step() call.
 # wet traces instead of scraping them. ~3-5mm is a plausible non-contact hop for
 # a soft elastomer bead; tune empirically. Used by build_print_order().
 CURVED_TRAVEL_HOVER_MM = 4.0
+# Assumed, not measured -- how deep the nozzle tip may sit *inward* of its own
+# waypoint's surface tangent plane during a curved precompute clearance check.
+# The tip prints on the surface (signed distance ~0, sometimes slightly negative
+# after mesh discretisation), so it alone gets this inward slack; the 6 arm-link
+# meshes get zero tolerance. ~1mm is a plausible nozzle-contact depth; tune
+# empirically like the other assumed job constants. Used by _branch_clears_ground().
+CURVED_TIP_CLEARANCE_TOLERANCE_MM = 1.0
 # Solid warm red -- the non-printing hops. Deliberately outside the ordered-feed
 # gradient's purple->teal->yellow ramp below, so "printing" (gradient) vs
 # "moving" (this flat colour) read apart at a glance. Used by build_print_order().
@@ -127,7 +134,14 @@ PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # settled.md S1.13's verification), so this is roughly a 12ms slice per frame.
 
 GCODE_PRECOMPUTE_CACHE = os.path.join(GCODE_DIR, "model.precompute.npz")  # roadmap 5.10, settled.md S1.21
-PRECOMPUTE_CACHE_VERSION = 1  # Bump to invalidate all existing caches on a schema change
+PRECOMPUTE_CACHE_VERSION = 2  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5)
+
+
+def curved_precompute_cache_path(layer_name):
+    """Per-layer precompute cache file for the curved passes -- roadmap 6.5.
+    One file per print layer (RX, TX) so the planar benchy and each curved
+    pass keep independent caches instead of thrashing a single fixed file."""
+    return os.path.join(CURVED_MODEL_DIR, f"curved_{layer_name.lower()}.precompute.npz")
 
 
 class VisContent:
@@ -161,6 +175,8 @@ class VisContent:
         self.precompute_joint_path = []
         self.precompute_status = ""
         self.precompute_cache_meta = None  # Cache key captured at precompute-start, see run_toolpath_ik_precompute()
+        self.precompute_cache_path = None  # Which cache file this precompute writes to (per-layer for curved, roadmap 6.5)
+        self.precompute_tip_tolerance_mm = None  # Non-None -> curved run; enables per-waypoint tangent-plane clearance
 
         # Progressive-reveal playback state -- playback_index persists across
         # pause, only reset_toolpath_playback() zeroes it.
@@ -1051,7 +1067,6 @@ class VisContent:
 
         n_layers = len(self.curved_layer_names)
         self.curved_orient_frames = [None] * n_layers
-        world_axes = np.eye(3)
 
         for layer in range(n_layers):
             # Feed points in print order -- the exact derivation build_print_order
@@ -1061,20 +1076,8 @@ class VisContent:
                               for p, entry in self.curved_print_order[layer]]
             points = np.vstack(ordered_pieces)  # (W,3) all feed waypoints
 
-            # One outward normal per waypoint via nearest surface vertex --
-            # same normal source 6.3's travel hover samples from.
-            snap, _ = nearest_vertex_index(self.curved_surface_verts_world[layer], points)
-            normals = self.curved_surface_vnormals_world[layer][snap]  # (W,3), outward unit
-
-            frames = []
-            for pos, z in zip(points, normals):
-                z = z / np.linalg.norm(z)
-                a = world_axes[np.argmin(np.abs(world_axes @ z))]  # most perpendicular to z
-                x = a - np.dot(a, z) * z
-                x /= np.linalg.norm(x)
-                y = np.cross(z, x)
-                R = np.column_stack([x, y, z])
-                frames.append((pos, R))
+            R_array = self._orientation_frames_for_points(layer, points)
+            frames = list(zip(points, R_array))
             self.curved_orient_frames[layer] = frames
 
             self._register_orientation_frames(
@@ -1084,6 +1087,75 @@ class VisContent:
         counts = "; ".join(f"{self.curved_layer_names[l]}: {len(self.curved_orient_frames[l])} waypoints"
                            for l in range(n_layers))
         self.curved_orient_status = f"Orientation frames ready -- {counts}"
+
+
+    def _orientation_frames_for_points(self, layer, points):
+        """Per-point TCP orientation matrices holding the nozzle perpendicular
+        to the curved surface -- the frame math shared by build_orientation_frames
+        (6.4, feed points only) and build_curved_toolpath_waypoints_world (6.5,
+        feed + travel). points is (N,3) world positions; returns (N,3,3).
+
+        Z is the outward surface normal from the nearest surface vertex (the
+        verts array is only the nearest-vertex query target; the normals live in
+        the separate curved_surface_vnormals_world array). X/Y are a fixed world
+        reference projected into the tangent plane (whichever world axis is most
+        perpendicular to Z, so the projection never collapses and adjacent frames
+        don't flip) -- the nozzle is rotationally symmetric about its axis, so
+        this DOF is free and pinning it keeps the wrist from spinning."""
+        world_axes = np.eye(3)
+        snap, _ = nearest_vertex_index(self.curved_surface_verts_world[layer], points)
+        normals = self.curved_surface_vnormals_world[layer][snap]  # (N,3), outward unit
+        frames = np.empty((len(points), 3, 3))
+        for i, z in enumerate(normals):
+            z = z / np.linalg.norm(z)
+            a = world_axes[np.argmin(np.abs(world_axes @ z))]  # most perpendicular to z
+            x = a - np.dot(a, z) * z
+            x /= np.linalg.norm(x)
+            y = np.cross(z, x)
+            frames[i] = np.column_stack([x, y, z])
+        return frames
+
+
+    def build_curved_toolpath_waypoints_world(self, layer):
+        """Merge a layer's ordered feed pieces and inter-piece travel hops into
+        one oriented waypoint list -- the curved analogue of
+        build_toolpath_waypoints_world (roadmap 6.5). Walks curved_print_order,
+        interleaving each oriented feed piece (curved_pieces_world[p], reversed
+        when entered at 2p+1, same convention build_print_order/
+        build_orientation_frames use) with the travel polyline that follows it
+        (curved_travel_moves[k], already bookended with lifted true endpoints).
+
+        Returns (waypoints, R_target_array), the same tuple shape as
+        build_toolpath_waypoints_world so it's a drop-in alternate precompute
+        source: waypoints is a list of (pos_world_mm (3,), is_feed_move bool);
+        R_target_array is (N,3,3), one orientation per waypoint (feed and travel
+        both get a surface-normal frame)."""
+        order = self.curved_print_order[layer]
+        travel = self.curved_travel_moves[layer]
+        # build_print_order appends one travel polyline per consecutive-piece gap
+        # (zip(order, order[1:])) but skips a gap whose geodesic is unreachable
+        # (never on the shipped single-component surfaces). Assert the 1:1 pairing
+        # so a future non-trivial surface fails loud rather than stitching the
+        # wrong travel move to the wrong gap.
+        assert len(travel) == len(order) - 1, (
+            f"layer {layer}: {len(travel)} travel moves for {len(order)} pieces "
+            f"(expected {len(order) - 1}); a geodesic gap was skipped")
+
+        positions, is_feed = [], []
+        for k, (p, entry) in enumerate(order):
+            piece = self.curved_pieces_world[layer][p]
+            piece = piece[::-1] if entry & 1 else piece
+            positions.append(piece)
+            is_feed.extend([True] * len(piece))
+            if k < len(travel):
+                hop = travel[k]
+                positions.append(hop)
+                is_feed.extend([False] * len(hop))
+
+        points = np.vstack(positions)
+        R_target_array = self._orientation_frames_for_points(layer, points)
+        waypoints = [(pos, feed) for pos, feed in zip(points, is_feed)]
+        return waypoints, R_target_array
 
 
     def _register_orientation_frames(self, name, frames):
@@ -1427,41 +1499,65 @@ class VisContent:
         }
 
 
-    def save_toolpath_precompute_cache(self):
-        """Best-effort write of a just-completed precompute to
-        GCODE_PRECOMPUTE_CACHE, tagged with the key captured at
-        precompute-start (self.precompute_cache_meta) -- roadmap
-        Stage5_README.md 5.10. Called only from step_toolpath_ik_precompute()'s
-        successful-completion branch, never on an aborted/cancelled
-        precompute. Wrapped in a bare except: a cache-write failure (disk
-        full, permissions) must never surface as a failure of the
+    def _curved_toolpath_cache_meta(self, layer, waypoints, R_target_array, user_frame):
+        """Cache-key dict for a curved-layer precompute -- roadmap 6.5, the
+        curved analogue of _toolpath_cache_meta. There's no single curved
+        source file to hash (unlike the one G-code file), so this hashes the
+        *derived* arrays that actually drive the solve -- waypoint positions,
+        feed flags, and per-waypoint orientations -- rounded to 6dp to absorb
+        float noise. Any re-order or re-orient changes that hash and correctly
+        invalidates the cache. user_frame is folded in the same way as the
+        planar meta so a plate move is also caught."""
+        positions = np.array([p for p, _ in waypoints], dtype=float)
+        feed = np.array([f for _, f in waypoints], dtype=bool)
+        h = hashlib.sha256()
+        h.update(np.round(positions, 6).tobytes())
+        h.update(feed.tobytes())
+        h.update(np.round(np.asarray(R_target_array, dtype=float), 6).tobytes())
+        return {
+            "version": PRECOMPUTE_CACHE_VERSION,
+            "layer_name": self.curved_layer_names[layer],
+            "curve_sha256": h.hexdigest(),
+            "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
+        }
+
+
+    def save_toolpath_precompute_cache(self, cache_path=GCODE_PRECOMPUTE_CACHE):
+        """Best-effort write of a just-completed precompute to cache_path,
+        tagged with the key captured at precompute-start
+        (self.precompute_cache_meta) -- roadmap Stage5_README.md 5.10 (planar,
+        default path), 6.5 (curved, per-layer path). Called only from
+        step_toolpath_ik_precompute()'s successful-completion branch, never on
+        an aborted/cancelled precompute. Wrapped in a bare except: a cache-write
+        failure (disk full, permissions) must never surface as a failure of the
         precompute itself, which already succeeded in memory."""
         try:
             np.savez(
-                GCODE_PRECOMPUTE_CACHE,
+                cache_path,
                 joint_path=np.asarray(self.precompute_joint_path, dtype=np.float32),
                 meta=np.array(json.dumps(self.precompute_cache_meta)))
         except Exception:
             pass
 
 
-    def load_toolpath_precompute_cache(self):
-        """Attempt to load a previously-saved precompute instead of
-        re-solving -- roadmap Stage5_README.md 5.10. Rebuilds the cache key
-        from the live self.T_user_frame (safe here since this only ever
-        runs before any solving has started for the session) and compares
-        it by dict equality against the cached meta. Any mismatch
-        (different G-code content, moved plate, version bump) or any error
-        (missing files, corrupt npz) is treated as a plain cache miss --
-        fails open, letting the caller fall through to the normal
-        parse/solve path; never raises."""
-        filepath = os.path.join(GCODE_DIR, GCODE_FILE)
-        if not (os.path.exists(GCODE_PRECOMPUTE_CACHE) and os.path.exists(filepath)):
-            return False
+    def load_toolpath_precompute_cache(self, cache_path=GCODE_PRECOMPUTE_CACHE, meta_builder=None):
+        """Attempt to load a previously-saved precompute from cache_path instead
+        of re-solving -- roadmap Stage5_README.md 5.10 (planar), 6.5 (curved).
+        Compares the cached meta by dict equality against the key from
+        meta_builder() (default: the planar _toolpath_cache_meta from the live
+        T_user_frame; the curved caller passes its own already-computed meta).
+        Any mismatch (different source, moved plate, version bump) or any error
+        (missing cache file, corrupt npz, missing source file) is treated as a
+        plain cache miss -- fails open, letting the caller fall through to the
+        normal parse/solve path; never raises. No explicit os.path.exists gate:
+        np.load and meta_builder() both raise on a missing file and the broad
+        except below turns that into a clean miss."""
+        if meta_builder is None:
+            meta_builder = lambda: self._toolpath_cache_meta(self.T_user_frame)
         try:
-            cached = np.load(GCODE_PRECOMPUTE_CACHE, allow_pickle=False)
+            cached = np.load(cache_path, allow_pickle=False)
             cached_meta = json.loads(cached["meta"].item())
-            if cached_meta != self._toolpath_cache_meta(self.T_user_frame):
+            if cached_meta != meta_builder():
                 return False
             joint_path = cached["joint_path"].astype(float)
         except Exception:
@@ -1479,6 +1575,29 @@ class VisContent:
         return True
 
 
+    def _begin_toolpath_precompute(self, waypoints, R_target_array, joint_limits,
+                                   reference_joint_angles, cache_meta, cache_path,
+                                   tip_tolerance_mm=None):
+        """Load a freshly-built waypoint source into precompute state -- the
+        shared seam behind run_toolpath_ik_precompute (planar) and
+        run_curved_toolpath_ik_precompute (curved), roadmap 6.5. R_target_array
+        is (N,3,3), one target orientation per waypoint (settled.md S1.12's
+        constant becomes a per-waypoint array). tip_tolerance_mm None keeps the
+        z=0 clearance check; a value switches step_ to the per-waypoint tangent-
+        plane check. cache_path is where a completed solve is written."""
+        self.precompute_waypoints = waypoints
+        self.precompute_R_target = R_target_array
+        self.precompute_joint_limits = joint_limits
+        self.precompute_index = 0
+        self.precompute_total = len(waypoints)
+        self.precompute_joint_path = []
+        self.precompute_ref = (
+            reference_joint_angles if reference_joint_angles is not None else self.current_joint_angles)
+        self.precompute_cache_meta = cache_meta
+        self.precompute_cache_path = cache_path
+        self.precompute_tip_tolerance_mm = tip_tolerance_mm
+
+
     def run_toolpath_ik_precompute(self, joint_limits, reference_joint_angles=None):
         """Start or resume the chunked toolpath IK precompute -- roadmap
         Stage5_README.md 5.6. Mirrors the GUI's playback Run button
@@ -1493,28 +1612,34 @@ class VisContent:
         result from load_gcode() (which only keeps extruding-G1 preview
         beads, not the raw 1:1 waypoint list).
 
-        Before parsing, tries load_toolpath_precompute_cache() -- on a hit,
-        returns immediately with a completed path already loaded, skipping
-        G-code parsing and IK entirely (roadmap Stage5_README.md 5.10).
+        The cache key (_toolpath_cache_meta) only hashes the G-code file, not a
+        full parse, so it's computed up front and the cache is checked *before*
+        parsing -- a hit skips the 187k-line parse and IK entirely (roadmap
+        Stage5_README.md 5.10). parse_gcode runs on the miss path only.
         """
         if self.precompute_waypoints is None:
-            if self.load_toolpath_precompute_cache():
-                return
-
             filepath = os.path.join(GCODE_DIR, GCODE_FILE)
             if not os.path.exists(filepath):
                 self.precompute_status = "No G-code file found"
                 return
 
-            # filepath can be overwritten mid-read by a Cura re-export
-            # between the exists() check above and here -- fail closed with
-            # a status message rather than letting the exception escape the
-            # per-frame Polyscope callback (settled.md notes model.gcode
-            # "gets overwritten by each new Cura export").
+            # The G-code file can be overwritten mid-read by a Cura re-export
+            # (settled.md notes model.gcode "gets overwritten by each new Cura
+            # export") -- guard both the cheap hash and the full parse, failing
+            # closed with a status message rather than letting the exception
+            # escape the per-frame Polyscope callback.
+            try:
+                cache_meta = self._toolpath_cache_meta(self.T_user_frame)
+            except OSError:
+                self.precompute_status = "G-code file changed while loading -- try again"
+                return
+
+            if self.load_toolpath_precompute_cache(GCODE_PRECOMPUTE_CACHE, lambda: cache_meta):
+                return
+
             try:
                 gcode_points = self.parse_gcode(filepath)
                 waypoints, R_target = self.build_toolpath_waypoints_world(gcode_points)
-                cache_meta = self._toolpath_cache_meta(self.T_user_frame)
             except OSError:
                 self.precompute_status = "G-code file changed while loading -- try again"
                 return
@@ -1522,15 +1647,48 @@ class VisContent:
                 self.precompute_status = "No waypoints to solve"
                 return
 
-            self.precompute_waypoints = waypoints
-            self.precompute_R_target = R_target
-            self.precompute_joint_limits = joint_limits
-            self.precompute_index = 0
-            self.precompute_total = len(waypoints)
-            self.precompute_joint_path = []
-            self.precompute_ref = (
-                reference_joint_angles if reference_joint_angles is not None else self.current_joint_angles)
-            self.precompute_cache_meta = cache_meta
+            # The plate doesn't tilt mid-print (settled.md S1.6/S1.8), so the one
+            # R_target applies to every waypoint -- broadcast to the (N,3,3) shape
+            # step_ now indexes, a read-only view with no extra allocation.
+            R_target_array = np.broadcast_to(R_target, (len(waypoints), 3, 3))
+            self._begin_toolpath_precompute(
+                waypoints, R_target_array, joint_limits, reference_joint_angles,
+                cache_meta, cache_path=GCODE_PRECOMPUTE_CACHE, tip_tolerance_mm=None)
+
+        self.precompute_running = True
+        self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
+
+
+    def run_curved_toolpath_ik_precompute(self, layer, joint_limits, reference_joint_angles=None):
+        """Start or resume the chunked IK precompute for a curved print layer --
+        roadmap 6.5, the curved sibling of run_toolpath_ik_precompute. Gated on
+        curved_orient_loaded so it can't run ahead of the 6.1-6.4 pipeline
+        (load -> geodesics -> print order -> orientation frames). Feeds the
+        shared precompute machinery from build_curved_toolpath_waypoints_world
+        instead of a G-code parse, with a per-waypoint R_target and the
+        tangent-plane clearance tolerance.
+
+        Unlike the G-code path, the cache is checked *after* rebuilding
+        waypoints: there's no single source file to hash cheaply, and rebuilding
+        from the already-in-memory retained arrays is cheap (one
+        nearest_vertex_index over a few thousand points), so there's no parse to
+        avoid on a hit."""
+        if self.precompute_waypoints is None:
+            if not self.curved_orient_loaded:
+                self.precompute_status = "Build orientation frames first"
+                return
+            waypoints, R_target_array = self.build_curved_toolpath_waypoints_world(layer)
+            if not waypoints:
+                self.precompute_status = "No waypoints to solve"
+                return
+            cache_path = curved_precompute_cache_path(self.curved_layer_names[layer])
+            cache_meta = self._curved_toolpath_cache_meta(layer, waypoints, R_target_array, self.T_user_frame)
+            if self.load_toolpath_precompute_cache(cache_path, lambda: cache_meta):
+                return
+            self._begin_toolpath_precompute(
+                waypoints, R_target_array, joint_limits, reference_joint_angles,
+                cache_meta, cache_path=cache_path,
+                tip_tolerance_mm=CURVED_TIP_CLEARANCE_TOLERANCE_MM)
 
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
@@ -1565,6 +1723,11 @@ class VisContent:
         self.precompute_total = 0
         self.precompute_joint_path = []
         self.precompute_cache_meta = None
+        # Clear the curved-run markers too, so cancelling a curved precompute and
+        # starting the planar one can't carry over the wrong cache path or the
+        # tangent-plane tolerance (roadmap 6.5).
+        self.precompute_cache_path = None
+        self.precompute_tip_tolerance_mm = None
         self._reset_toolpath_playback_state()
 
 
@@ -1581,8 +1744,9 @@ class VisContent:
         end = min(self.precompute_index + PRECOMPUTE_CHUNK_SIZE, self.precompute_total)
         for i in range(self.precompute_index, end):
             pos_world_mm, _is_feed_move = self.precompute_waypoints[i]
+            R_i = self.precompute_R_target[i]
             solutions, status = self.solve_ik_tcp_matrix(
-                pos_world_mm, self.precompute_R_target, self.precompute_joint_limits,
+                pos_world_mm, R_i, self.precompute_joint_limits,
                 reference_joint_angles=self.precompute_ref)
             if not solutions:
                 status_msg = f"Waypoint {i}/{self.precompute_total}: {status}"
@@ -1590,11 +1754,20 @@ class VisContent:
                 self.precompute_status = status_msg
                 return
 
-            clear = next((angles for angles, *_ in solutions if self._branch_clears_ground(angles)), None)
+            # Planar run (tip_tolerance None): the original z=0 clearance check.
+            # Curved run: this waypoint's own outward tangent plane (point = the
+            # waypoint, normal = R_i's Z column), the supporting-hyperplane
+            # clearance of settled.md S1.37.
+            plane = (None if self.precompute_tip_tolerance_mm is None
+                     else (pos_world_mm, R_i[:, 2], self.precompute_tip_tolerance_mm))
+            clear = next((angles for angles, *_ in solutions
+                          if self._branch_clears_ground(angles, plane)), None)
             if clear is None:
+                obstacle = ("the ground plane or their surface tangent plane" if plane is not None
+                            else "the ground plane (z<0)")
                 status_msg = (
                     f"Waypoint {i}/{self.precompute_total}: all {len(solutions)} valid branch(es) "
-                    "dip below the ground plane (z<0)")
+                    f"hit {obstacle}")
                 self._abort_toolpath_ik_precompute()
                 self.precompute_status = status_msg
                 return
@@ -1606,7 +1779,7 @@ class VisContent:
         if self.precompute_index >= self.precompute_total:
             self.precompute_running = False
             self.precompute_status = f"Solved {self.precompute_total} waypoint(s)"
-            self.save_toolpath_precompute_cache()
+            self.save_toolpath_precompute_cache(self.precompute_cache_path)
         else:
             self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
 
@@ -1945,16 +2118,62 @@ class VisContent:
         return min_z
 
 
-    def _branch_clears_ground(self, joint_angles_deg):
-        """True if this branch's moving geometry never dips below world
-        z=0 (the robot's own base-mounting plane, roadmap Stage5_README.md
-        5.5). Checks the cheap bbox bound first -- proven clear if
-        non-negative -- and only escalates to the exact per-vertex check
-        when the bbox result is negative (inconclusive: a rotated AABB
-        corner can dip below ground even when the real mesh does not)."""
-        if self.moving_geometry_bbox_min_z(joint_angles_deg) >= 0:
-            return True
-        return self.moving_geometry_min_z(joint_angles_deg) >= 0
+    def _nozzle_clears_plane(self, joint_angles_deg, point, normal, tip_tolerance_mm):
+        """True if the nozzle mesh stays outward of the given plane, allowing
+        tip_tolerance_mm of inward slack -- the surface-penetration half of the
+        curved clearance check (roadmap 6.5, settled.md S1.37). The plane passes
+        through `point` with unit outward `normal`; a vertex's signed distance
+        is (world - point) @ normal, positive outward. The nozzle clears iff its
+        worst (min) signed distance is >= -tip_tolerance_mm.
+
+        Only the nozzle (moving-geometry index 6) is tested, NOT the arm links.
+        The plane is a supporting hyperplane for the convex mockup stack, so a
+        point on its outward side provably clears every surface behind it -- but
+        that bounds where the *surface* is, not where the *arm* is. The arm must
+        span from its base up to the contact point, so its lower links
+        legitimately sit far *inward* of a local tangent plane; testing them
+        would reject every real printing pose. The nozzle is the only part
+        required to stay on the surface it prints. (Arm-vs-table clearance is
+        handled separately by the retained world z=0 check.)
+
+        Cheap 8-corner bbox bound first, exact vertices only if inconclusive:
+        signed distance is linear, so its min over the rigid-transformed AABB
+        corners is a lower bound on its min over the true mesh -- a non-negative
+        corner result proves clearance."""
+        delta = self._moving_geometry_deltas(joint_angles_deg)[6]
+        for verts in (self.moving_geometry_rest_bbox_corners[6], self.rest_verts[6]):
+            homo = np.hstack([verts, np.ones((len(verts), 1))])
+            world = (delta @ homo.T).T[:, :3]
+            if ((world - point) @ normal).min() + tip_tolerance_mm >= 0:
+                return True
+        return False
+
+
+    def _branch_clears_ground(self, joint_angles_deg, plane=None):
+        """True if this branch's moving geometry stays clear of its obstacle.
+
+        plane=None (planar path) keeps the exact world z=0 arm-vs-table check
+        (settled.md S1.13): cheap bbox bound first -- proven clear if
+        non-negative -- escalating to the exact per-vertex check only when the
+        bbox result is negative (inconclusive: a rotated AABB corner can dip
+        below ground even when the real mesh does not).
+
+        plane=(point, normal, tip_tolerance_mm) (curved path) instead requires
+        the nozzle tip to stay outward of that waypoint's own surface tangent
+        plane, within tip_tolerance_mm of inward slack (roadmap 6.5, settled.md
+        S1.37). The world z=0 check is deliberately NOT applied here: the curved
+        mockup sits above the plate in a frame where z=0 is not the physical
+        floor (inbox note), so valid printing poses routinely put arm links
+        below z=0. Only the nozzle is checked (see _nozzle_clears_plane); full
+        arm-vs-mockup collision would need a real obstacle-mesh check, the
+        expensive path 6.5 deliberately avoided, and is out of scope here."""
+        if plane is None:
+            if self.moving_geometry_bbox_min_z(joint_angles_deg) >= 0:
+                return True
+            return self.moving_geometry_min_z(joint_angles_deg) >= 0
+
+        point, normal, tip_tolerance_mm = plane
+        return self._nozzle_clears_plane(joint_angles_deg, point, normal, tip_tolerance_mm)
 
 
     def record_trajectory_point(self):

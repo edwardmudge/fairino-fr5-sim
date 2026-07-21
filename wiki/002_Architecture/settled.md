@@ -2134,3 +2134,119 @@ waypoint; live-layer selection enables only the selected layer's triads; a
 re-order clears `curved_orient_loaded` and removes both triad networks. Remaining:
 the interactive eyeball (README 6.4 verify -- triad Z reads outward and
 perpendicular on a steep part of the shell), which needs the GUI window.
+
+
+## S1.37 Curved IK precompute (roadmap 6.5) -- Stage 5's machinery reused per layer, per-waypoint `R_target`, and nozzle-tip clearance against each waypoint's own tangent plane instead of an obstacle mesh
+
+**Reuses Stage 5's chunked precompute (S1.11/S1.12/S1.21) rather than rewriting
+it.** The chunked solver now loads from either source through one shared seam,
+`_begin_toolpath_precompute(waypoints, R_target_array, ...)`. The G-code entry
+point `run_toolpath_ik_precompute` is behaviourally unchanged (planar benchy); a
+new sibling `run_curved_toolpath_ik_precompute(layer, ...)` feeds the same
+machine from `build_curved_toolpath_waypoints_world(layer)` -- the S1.35 ordered
+feed pieces interleaved with their travel hops, each waypoint carrying an S1.36
+surface-normal orientation. `step_toolpath_ik_precompute` is the one solver for
+both.
+
+**Three decisions:**
+
+- **Per-waypoint `R_target`, superseding S1.12's single constant.**
+  `precompute_R_target` is now an `(N,3,3)` array indexed per waypoint. The
+  planar path keeps its one constant orientation via `np.broadcast_to(R, (N,3,3))`
+  -- a read-only view, no per-waypoint copy -- so nothing about the flat-plate
+  solve changes; the curved path passes the real per-waypoint array from S1.36.
+
+- **Nozzle-tip clearance against the waypoint's own tangent plane -- NOT the whole
+  arm, and NOT world `z=0`.** The inbox note's literal suggestion was a real
+  obstacle-mesh proximity check (`Surface_Bot` for RX, `Surface_RX_Offset` for
+  TX). Rejected: `nearest_vertex_index` is brute-force by design (no scipy,
+  S1.31), and querying a moving mesh's full vertex set against a
+  tens-of-thousands-vertex obstacle thousands of times per precompute is too slow.
+  Instead -- since S1.35 already treats each print surface as a convex-ish dome
+  cap -- **a tangent plane at a point on a convex surface is a supporting
+  hyperplane for the whole body**: everything on its outward side provably clears
+  the entire surface behind it, and since RX_Offset sits outward of `Surface_Bot`
+  and TX_Base outward of RX_Offset everywhere (the measured stack, S1.30/S1.32/
+  S1.34), a point outward of *this waypoint's own* tangent plane (point = the
+  waypoint, normal = its `R_target[:,2]`, already computed by S1.36) also clears
+  every surface further inward -- no obstacle mesh, for either pass.
+
+  **The check applies to the nozzle tip only (`_nozzle_clears_plane`), not the
+  arm links.** This corrects the original plan, which would have tested all 6 arm
+  links against the plane. The supporting-hyperplane proof bounds where the
+  *surface* is, not where the *arm* is: the arm must span from its base up to the
+  contact point, so its lower links legitimately sit far *inward* of a local
+  tangent plane (measured Robot1 ~-92mm, Robot2 ~-194mm at a real waypoint) while
+  the nozzle tip sits on the surface (~0). Testing the links would reject every
+  real printing pose. The nozzle is the only part required to stay outward, and it
+  gets `CURVED_TIP_CLEARANCE_TOLERANCE_MM` (assumed ~1.0mm) of **inward** slack --
+  it prints *on* the surface, so its worst signed distance is ~0 and must be
+  allowed to dip slightly in; the tolerance is *added* to the signed distance
+  (subtracting would demand the tip float outward and reject every feed waypoint).
+  The check keeps the cheap-corners-first / exact-vertices-fallback escalation
+  (signed distance is linear, so its min over a rigid-transformed AABB's 8 corners
+  is a lower bound on its min over the mesh).
+
+  **World `z=0` is dropped for the curved case** (kept unchanged for the planar
+  path via `_branch_clears_ground(angles, plane=None)`). The curved mockup sits
+  above the plate in a frame where z=0 is not the physical floor (inbox note), so
+  valid printing poses routinely put arm links below z=0 (measured z_min ~-60 to
+  -300mm on the only joint-limit-valid branches of a real waypoint) -- retaining
+  the z=0 gate rejected every such pose. Full arm-vs-mockup collision beyond the
+  nozzle is a **known limitation**, the same simplification class as the old
+  planar z=0 proxy; closing it would need the rejected obstacle-mesh (or
+  per-triangle) check and is left as a future improvement.
+
+- **Per-layer caches, versioned.** `curved_precompute_cache_path(layer_name)`
+  gives `curved_<layer>.precompute.npz` per pass, so the planar benchy, RX, and
+  TX keep independent caches. `save_/load_toolpath_precompute_cache` gained a
+  `cache_path` parameter (default `GCODE_PRECOMPUTE_CACHE`) and `load_` a
+  `meta_builder` callable, so the shared machinery no longer hardcodes the planar
+  file or meta function. `_curved_toolpath_cache_meta` keys on a SHA-256 of the
+  *derived* waypoint positions + feed flags + orientation array (there's no single
+  curved source file to hash the way there's one G-code file; the derived arrays
+  are what drift on a re-order/re-orient), plus the build-plate pose.
+  `PRECOMPUTE_CACHE_VERSION` bumped 1->2 -- a one-time silent rebuild of the
+  existing planar cache, not a bug.
+
+**Scope -- `geometry_backend.py` only; no GUI, no bead constants.** The curved
+bead-size constants (inbox note 6.5 item 3) are deferred to 6.6, where curved
+playback will actually call the bead builder -- shipping the constant now, unused,
+would be half-finished code (AGENTS.md). No `gui_panel.py`/`main.py`/`study_config.py`
+change; the per-pass obstacle distinction `study_config.py` would have needed is
+moot under the plane design.
+
+**Reachability is a placement property, not a code concern.** On the shipped
+assets at the default plate pose, 7 of 3175 RX waypoints and 6 of 2688 TX are
+geometrically reachable but have no joint-limit-valid IK branch (verified solving
+each in isolation), so a full curved precompute aborts at the first (no partial
+motion, S1.12). This is expected: the build plate pose is a free variable
+(`load_build_plate(rpy_deg=...)`) meant to be varied until a fully reachable
+placement is found -- finding that pose is a setup step, out of 6.5's
+`geometry_backend.py`-only scope. The precompute machinery itself is complete and
+correct (below).
+
+**Non-revertible unless:** the mockup stack turns out non-convex somewhere -- then
+a waypoint's tangent plane is no longer a global supporting hyperplane and the
+nozzle clearance argument fails, forcing a real obstacle-mesh (or per-triangle)
+check for the affected surface (also the path to close the arm-vs-mockup
+limitation above). `build_curved_toolpath_waypoints_world` asserts
+`len(travel_moves) == len(pieces) - 1` so a future multi-component surface (where
+`build_print_order` could skip an unreachable geodesic gap) fails loud rather than
+silently misaligning travel with pieces.
+
+**Verified on:** 2026-07-21 -- headless. **Planar regression:** the G-code
+precompute solves all 181,375 waypoints, writes the v2 cache, and reloads from it
+("Loaded ... from cache"); the `plane=None` clearance path is byte-for-byte the
+old z=0 check. **Curved machinery:** RX solves its full 1809-waypoint reachable
+prefix (with 6.4 per-waypoint orientation + nozzle clearance) before the expected
+abort at the first dead-spot; FK-reproducing the solved poses matches each target
+position to 6.7e-13mm and `R_target[i]` to 3e-15 -- i.e. the per-waypoint
+orientation threads through IK exactly. **Nozzle clearance:** a solved branch
+clears its own tangent plane, and shifting that plane outward past the tip by more
+than the tolerance rejects it. **Per-layer cache plumbing:** writing a completed
+path under each layer's key produces independent `curved_rx.precompute.npz` /
+`curved_tx.precompute.npz`, and a fresh `run_curved_toolpath_ik_precompute` reloads
+each. **Remaining:** an end-to-end full-curved solve + cache, which needs a plate
+pose with no unreachable waypoints (the placement step above), and the interactive
+GUI eyeball (6.6).
