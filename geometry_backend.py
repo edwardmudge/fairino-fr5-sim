@@ -66,34 +66,24 @@ CAP_CULL_WIDTH_TOL_MM = 0.01
 
 GCODE_MOVE_RE = re.compile(r"([A-Za-z])\s*(-?\d+\.?\d*)")
 
-CURVED_MODEL_DIR = "assets/models/curved"
-CURVED_RX_FILES = [f"RX_{i}.ply" for i in range(28)]  # RX_0..RX_27, all on Surface_RX_Offset
-CURVED_TX_FILES = [f"TX_{i}.ply" for i in range(27)]  # TX_0..TX_26, all on Surface_TX_Base
-CURVED_SURFACE_RX_OFFSET_FILE = "Surface_RX_Offset.obj"
-CURVED_SURFACE_TX_BASE_FILE = "Surface_TX_Base.obj"
-CURVED_SURFACE_BOT_FILE = "Surface_Bot.obj"  # underlying shoulder body, not a print surface -- collision body in 6.5
-
 # Float export noise keeps true duplicate vertices apart past ~3dp -- verified
 # on RX_0.ply (108 raw verts -> exactly 54 nodes, matching the asset survey).
 CURVE_DEDUPE_DECIMALS = 3
 
-CURVED_MODEL_ROTATE_X_DEG = 90.0  # CAD "+z up" assumption was wrong (Stage6_README.md
-# open question) -- +90 about the plate's local X puts the printable ridge surface
-# face-up; -90 was tested and puts it face-down into the plate, confirmed wrong.
-
-RX_CURVE_COLOR = (0.85, 0.15, 0.15)  # red
-TX_CURVE_COLOR = (0.15, 0.35, 0.85)  # blue
 CURVE_RADIUS_MM = 0.5  # thin vs. TRAJECTORY_RADIUS_MM (2.0) -- 70 pieces shouldn't dominate the view
-SURFACE_RX_OFFSET_COLOR = (0.93, 0.80, 0.80)  # pale rose, curves read clearly on top
-SURFACE_TX_BASE_COLOR = (0.80, 0.85, 0.93)    # pale blue
-SURFACE_BOT_COLOR = (0.55, 0.55, 0.55)        # neutral gray, not a print target
 
-# Geodesic routing over the print surfaces -- roadmap 6.2. RX and TX are
-# separate passes on separate surfaces (settled.md S1.30), so every geodesic
-# structure is a 2-element list indexed by these rather than an _rx/_tx pair.
-GEODESIC_LAYER_RX = 0
-GEODESIC_LAYER_TX = 1
-GEODESIC_LAYER_NAMES = ("RX", "TX")
+# Curved-surface printing (roadmap Stage 6) is a generic, project-agnostic
+# feature: load an arbitrary set of toolpath-curve layers + their host
+# surfaces, place them above the build plate, and route geodesics over each
+# layer's own surface (settled.md S1.30 -- geodesics never cross layers).
+# What's specific to one project -- which files, how many layers, their
+# names/colors -- is imported from a study config rather than hardcoded
+# here. See examples/curved_surface_printing/ to point this feature at a
+# different curved-print job.
+from examples.curved_surface_printing.study_config import (
+    CURVED_MODEL_DIR, CURVED_MODEL_ROTATE_X_DEG, CURVED_LAYERS,
+    CURVED_OBSTACLE_FILE, CURVED_OBSTACLE_STRUCTURE_NAME, CURVED_OBSTACLE_COLOR,
+)
 
 GEODESIC_CHUNK_SOURCES = 1  # whole Dijkstra sources solved per step() call.
 # Measured per source: ~50ms on Surface_RX_Offset (30,284 verts), ~85ms on
@@ -171,12 +161,14 @@ class VisContent:
 
         # Retained curved-model geometry, world coordinates (already through
         # T_curved) -- roadmap 6.2 needs the per-piece curves and the print
-        # surfaces that 6.1 previously computed and threw away. Both lists are
-        # indexed by GEODESIC_LAYER_RX/GEODESIC_LAYER_TX. Surface_Bot is
-        # deliberately absent: it's a 6.5 collision body, not a print surface.
-        self.curved_pieces_world = None        # list of 2 lists of (Ni,3) polylines
-        self.curved_surface_verts_world = None # list of 2 (V,3)
-        self.curved_surface_faces = None       # list of 2 (F,3), placement-invariant
+        # surfaces that 6.1 previously computed and threw away. All lists are
+        # indexed positionally by CURVED_LAYERS (examples/curved_surface_printing/
+        # study_config.py). The obstacle mesh is deliberately absent from
+        # these: it's a 6.5 collision body, not a print surface.
+        self.curved_pieces_world = None        # list of len(CURVED_LAYERS) lists of (Ni,3) polylines
+        self.curved_surface_verts_world = None # list of len(CURVED_LAYERS) (V,3)
+        self.curved_surface_faces = None       # list of len(CURVED_LAYERS) (F,3), placement-invariant
+        self.curved_layer_names = None         # list of len(CURVED_LAYERS) display names, e.g. ["RX", "TX"]
         self.T_curved = None                   # (4,4) placement actually used, for the staleness check
         self._T_user_frame_at_curved_load = None  # Plate pose the world state above was built against
 
@@ -566,12 +558,15 @@ class VisContent:
 
 
     def load_curved_model(self):
-        """Load the 55 toolpath-curve PLY files and 3 surface OBJ meshes from
-        CURVED_MODEL_DIR and place them above the build plate -- roadmap
-        Stage6_README.md 6.1. Static workpiece geometry, same as
-        load_build_plate()/load_gcode(): one-time T_user_frame multiply, no
-        Delta transform (settled.md S1.2/S1.3). Safe to call repeatedly;
-        Polyscope replaces the prior structures of the same names.
+        """Load the toolpath-curve PLY files and surface OBJ meshes described
+        by CURVED_LAYERS (plus the optional CURVED_OBSTACLE_FILE collision
+        body) and place them above the build plate -- roadmap
+        Stage6_README.md 6.1. Generic over however many layers the study
+        config describes -- see examples/curved_surface_printing/. Static
+        workpiece geometry, same as load_build_plate()/load_gcode():
+        one-time T_user_frame multiply, no Delta transform (settled.md
+        S1.2/S1.3). Safe to call repeatedly; Polyscope replaces the prior
+        structures of the same names.
 
         Placement is translation plus one fixed rotation (Stage6_README.md's
         Open Questions: the CAD "+z up" assumption was unverified and turned
@@ -588,8 +583,8 @@ class VisContent:
         Retains the placed geometry in world coordinates
         (curved_pieces_world/curved_surface_verts_world/curved_surface_faces/
         T_curved) for roadmap 6.2's geodesic routing, which needs the
-        per-piece curves and the two print surfaces in the frame the arm
-        works in. Surface_Bot is rendered but not retained -- it's a
+        per-piece curves and each layer's print surface in the frame the arm
+        works in. The obstacle mesh is rendered but not retained -- it's a
         collision body for 6.5, not a print surface."""
         # Every world vertex below is about to be re-derived, so any geodesic
         # solved against the previous load -- in flight or complete -- describes
@@ -597,28 +592,29 @@ class VisContent:
         self._abort_geodesic_precompute()
         self.geodesic_status = ""
 
-        rx_pieces_local = [p for f in CURVED_RX_FILES
-                            for p in reconstruct_polylines(*read_ply_polyline(os.path.join(CURVED_MODEL_DIR, f)))]
-        tx_pieces_local = [p for f in CURVED_TX_FILES
-                            for p in reconstruct_polylines(*read_ply_polyline(os.path.join(CURVED_MODEL_DIR, f)))]
-
-        surface_rx = self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_SURFACE_RX_OFFSET_FILE))
-        surface_tx = self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_SURFACE_TX_BASE_FILE))
-        surface_bot = self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_SURFACE_BOT_FILE))
+        layers_local = [
+            [p for f in layer["curve_files"]
+             for p in reconstruct_polylines(*read_ply_polyline(os.path.join(CURVED_MODEL_DIR, f)))]
+            for layer in CURVED_LAYERS
+        ]
+        surfaces = [self.load_mesh(os.path.join(CURVED_MODEL_DIR, layer["surface_file"]))
+                    for layer in CURVED_LAYERS]
+        obstacle = (self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_OBSTACLE_FILE))
+                    if CURVED_OBSTACLE_FILE else None)
 
         R = rot_x(np.deg2rad(CURVED_MODEL_ROTATE_X_DEG))[:3, :3]
 
         def rotate(pts):
             return pts @ R.T
 
-        rx_pieces_local = [rotate(p) for p in rx_pieces_local]
-        tx_pieces_local = [rotate(p) for p in tx_pieces_local]
-        surface_rx_verts = rotate(surface_rx.vertices)
-        surface_tx_verts = rotate(surface_tx.vertices)
-        surface_bot_verts = rotate(surface_bot.vertices)
+        layers_local = [[rotate(p) for p in pieces] for pieces in layers_local]
+        surface_verts_local = [rotate(s.vertices) for s in surfaces]
+        obstacle_verts_local = rotate(obstacle.vertices) if obstacle is not None else None
 
-        all_local = np.vstack(rx_pieces_local + tx_pieces_local
-                               + [surface_rx_verts, surface_tx_verts, surface_bot_verts])
+        all_local = np.vstack(
+            [p for pieces in layers_local for p in pieces] + surface_verts_local
+            + ([obstacle_verts_local] if obstacle_verts_local is not None else [])
+        )
         assembly_min, assembly_max = all_local.min(axis=0), all_local.max(axis=0)
 
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
@@ -632,26 +628,26 @@ class VisContent:
         # Transform once, then both retain and render the same arrays -- 6.2
         # routes over these surfaces and needs them in the frame the arm works
         # in, so world is computed here rather than at each registration site.
-        rx_pieces_world = [transform_points(T_curved, p) for p in rx_pieces_local]
-        tx_pieces_world = [transform_points(T_curved, p) for p in tx_pieces_local]
-        surface_rx_world = transform_points(T_curved, surface_rx_verts)
-        surface_tx_world = transform_points(T_curved, surface_tx_verts)
-        surface_bot_world = transform_points(T_curved, surface_bot_verts)
+        layers_world = [[transform_points(T_curved, p) for p in pieces] for pieces in layers_local]
+        surface_verts_world = [transform_points(T_curved, v) for v in surface_verts_local]
 
-        self._register_curve_layer("Curved Toolpath RX", rx_pieces_world, np.eye(4), RX_CURVE_COLOR)
-        self._register_curve_layer("Curved Toolpath TX", tx_pieces_world, np.eye(4), TX_CURVE_COLOR)
+        for layer, pieces_world in zip(CURVED_LAYERS, layers_world):
+            self._register_curve_layer(layer["curve_structure_name"], pieces_world,
+                                        np.eye(4), layer["curve_color"])
 
-        for name, verts_world, mesh, color in (
-            ("Surface RX Offset", surface_rx_world, surface_rx, SURFACE_RX_OFFSET_COLOR),
-            ("Surface TX Base", surface_tx_world, surface_tx, SURFACE_TX_BASE_COLOR),
-            ("Surface Bot", surface_bot_world, surface_bot, SURFACE_BOT_COLOR),
-        ):
-            handle = ps.register_surface_mesh(name, verts_world, mesh.faces)
-            handle.set_color(color)
+        for layer, verts_world, mesh in zip(CURVED_LAYERS, surface_verts_world, surfaces):
+            handle = ps.register_surface_mesh(layer["surface_structure_name"], verts_world, mesh.faces)
+            handle.set_color(layer["surface_color"])
 
-        self.curved_pieces_world = [rx_pieces_world, tx_pieces_world]
-        self.curved_surface_verts_world = [surface_rx_world, surface_tx_world]
-        self.curved_surface_faces = [np.asarray(surface_rx.faces), np.asarray(surface_tx.faces)]
+        if obstacle is not None:
+            obstacle_verts_world = transform_points(T_curved, obstacle_verts_local)
+            handle = ps.register_surface_mesh(CURVED_OBSTACLE_STRUCTURE_NAME, obstacle_verts_world, obstacle.faces)
+            handle.set_color(CURVED_OBSTACLE_COLOR)
+
+        self.curved_pieces_world = layers_world
+        self.curved_surface_verts_world = surface_verts_world
+        self.curved_surface_faces = [np.asarray(m.faces) for m in surfaces]
+        self.curved_layer_names = [layer["name"] for layer in CURVED_LAYERS]
         self.T_curved = T_curved
         self._T_user_frame_at_curved_load = self.T_user_frame.copy()
         self.curved_model_loaded = True
@@ -679,15 +675,16 @@ class VisContent:
         cancel_geodesic_precompute()); if a run is merely paused, resumes
         stepping from geodesic_index with no rebuild.
 
-        Builds one graph per print surface, not one merged graph: RX travels
-        on Surface_RX_Offset and TX on Surface_TX_Base, the passes never
-        interleave (settled.md S1.30), and a geodesic between an RX and a TX
-        endpoint is meaningless on either mesh.
+        Builds one graph per print surface, not one merged graph: each layer
+        travels on its own surface and the passes never interleave
+        (settled.md S1.30), so a geodesic between two different layers'
+        endpoints is meaningless on either mesh.
 
         One Dijkstra runs per *unique snapped vertex*, not per endpoint --
         measured 58 unique for RX and 55 for TX rather than 70 each, since
         distinct endpoints often land on the same vertex, so this is 113
-        runs and not the 140 the roadmap assumed."""
+        runs and not the 140 the roadmap assumed (on the shipped RX/TX
+        study config; the ratio depends on whichever layers are configured)."""
         if self.geodesic_graphs is None:
             if not self.curved_model_loaded:
                 # Fail with a status message, never an exception: this runs
@@ -695,8 +692,9 @@ class VisContent:
                 self.geodesic_status = "Load Curved Model first"
                 return
 
+            n_layers = len(CURVED_LAYERS)
             graphs, snap_nodes, snap_dist, sources, source_row, prev, cost = [], [], [], [], [], [], []
-            for layer in (GEODESIC_LAYER_RX, GEODESIC_LAYER_TX):
+            for layer in range(n_layers):
                 verts = self.curved_surface_verts_world[layer]
                 graphs.append(build_surface_graph(verts, self.curved_surface_faces[layer]))
 
@@ -718,9 +716,9 @@ class VisContent:
             self.geodesic_source_row = source_row
             self.geodesic_prev = prev
             self.geodesic_cost = cost
-            self.geodesic_unreachable = [0, 0]
+            self.geodesic_unreachable = [0] * n_layers
             self.geodesic_queue = [(layer, r)
-                                    for layer in (GEODESIC_LAYER_RX, GEODESIC_LAYER_TX)
+                                    for layer in range(n_layers)
                                     for r in range(len(sources[layer]))]
             self.geodesic_index = 0
             self.geodesic_total = len(self.geodesic_queue)
@@ -808,7 +806,7 @@ class VisContent:
                 if n_bad:
                     self.geodesic_index = i + 1
                     self.geodesic_running = False
-                    self.geodesic_status = (f"{GEODESIC_LAYER_NAMES[layer]}: {n_bad}/"
+                    self.geodesic_status = (f"{self.curved_layer_names[layer]}: {n_bad}/"
                                              f"{len(self.geodesic_snap_nodes[layer])} endpoints unreachable "
                                              f"-- surface is fragmented (Build Geodesics resumes)")
                     return
@@ -824,8 +822,8 @@ class VisContent:
                                          f"unreachable pair(s) -- surface is fragmented")
             else:
                 spans = [c[np.isfinite(c)].max() for c in self.geodesic_cost]
-                self.geodesic_status = (f"Geodesics ready -- RX max {spans[GEODESIC_LAYER_RX]:.0f}mm, "
-                                         f"TX max {spans[GEODESIC_LAYER_TX]:.0f}mm")
+                self.geodesic_status = "Geodesics ready -- " + ", ".join(
+                    f"{name} max {span:.0f}mm" for name, span in zip(self.curved_layer_names, spans))
         else:
             self.geodesic_status = f"Building geodesics {self.geodesic_index}/{self.geodesic_total} sources"
 
@@ -885,7 +883,7 @@ class VisContent:
         return best
 
 
-    def show_sample_geodesic(self, layer=GEODESIC_LAYER_RX, mode="representative",
+    def show_sample_geodesic(self, layer=0, mode="representative",
                               endpoint_a=None, endpoint_b=None):
         """Render one geodesic on its own surface -- roadmap 6.2's Verify
         step. See _pick_sample_pair() for how the default pair is chosen.
@@ -910,7 +908,7 @@ class VisContent:
         if endpoint_a is None or endpoint_b is None:
             pair = self._pick_sample_pair(layer, mode)
             if pair is None:
-                self.geodesic_status = f"{GEODESIC_LAYER_NAMES[layer]}: no valid sample pair"
+                self.geodesic_status = f"{self.curved_layer_names[layer]}: no valid sample pair"
                 return
             endpoint_a, endpoint_b = pair
         endpoint_a, endpoint_b = int(endpoint_a), int(endpoint_b)
@@ -919,13 +917,13 @@ class VisContent:
         nodes = geodesic_path_nodes(self.geodesic_prev[layer][row],
                                      int(self.geodesic_snap_nodes[layer][endpoint_b]))
         if nodes is None:
-            self.geodesic_status = f"{GEODESIC_LAYER_NAMES[layer]} {endpoint_a}->{endpoint_b}: unreachable"
+            self.geodesic_status = f"{self.curved_layer_names[layer]} {endpoint_a}->{endpoint_b}: unreachable"
             return
         if len(nodes) < 2:
             # Only reachable with manual endpoint args -- _pick_sample_pair()
             # excludes zero-cost pairs, but a caller-supplied pair snapping to
             # one vertex would hand register_curve_network a 1-node polyline.
-            self.geodesic_status = (f"{GEODESIC_LAYER_NAMES[layer]} {endpoint_a}->{endpoint_b}: "
+            self.geodesic_status = (f"{self.curved_layer_names[layer]} {endpoint_a}->{endpoint_b}: "
                                      f"endpoints snap to the same vertex -- no path to show")
             return
 
@@ -951,7 +949,7 @@ class VisContent:
         # Report the ratio, not just the length: it's what makes "this hugs
         # the surface" checkable when the picture alone is ambiguous.
         length = float(cost[endpoint_a, endpoint_b])
-        self.geodesic_status = (f"{GEODESIC_LAYER_NAMES[layer]} {endpoint_a}->{endpoint_b} ({mode}): "
+        self.geodesic_status = (f"{self.curved_layer_names[layer]} {endpoint_a}->{endpoint_b} ({mode}): "
                                  f"{length:.1f}mm over {len(nodes)} nodes vs {chord_len:.1f}mm chord "
                                  f"-- ratio {length / max(chord_len, 1e-9):.3f}")
 
@@ -962,25 +960,31 @@ class VisContent:
         _geodesic_isolation_prior so _restore_geodesic_isolation() can put it
         all back. Re-entrant: an existing snapshot is left alone, so showing
         two samples in a row doesn't record the already-isolated state as if
-        it were the user's."""
-        host = f"Surface {'RX Offset' if layer == GEODESIC_LAYER_RX else 'TX Base'}"
-        other = f"Surface {'TX Base' if layer == GEODESIC_LAYER_RX else 'RX Offset'}"
+        it were the user's. Generic over however many layers CURVED_LAYERS
+        describes -- every other configured layer's surface and curve network
+        are hidden, not just a hardcoded RX-or-TX other."""
+        host = CURVED_LAYERS[layer]["surface_structure_name"]
+        other_surfaces = [CURVED_LAYERS[i]["surface_structure_name"]
+                           for i in range(len(CURVED_LAYERS)) if i != layer]
+        other_curves = [CURVED_LAYERS[i]["curve_structure_name"]
+                         for i in range(len(CURVED_LAYERS)) if i != layer]
+        obstacle_names = [CURVED_OBSTACLE_STRUCTURE_NAME] if CURVED_OBSTACLE_FILE else []
 
         if self._geodesic_isolation_prior is None:
             # Snapshot transparency alongside enabled state: the host gets
             # ghosted below, and restoring a hardcoded 1.0 would silently
             # undo any transparency the user had set themselves.
             prior = {}
-            for name in (host, other, "Surface Bot"):
+            for name in [host] + other_surfaces + obstacle_names:
                 if ps.has_surface_mesh(name):
                     h = ps.get_surface_mesh(name)
                     prior[name] = (h.is_enabled(), h.get_transparency())
-            for name in ("Curved Toolpath RX", "Curved Toolpath TX"):
+            for name in (layer_cfg["curve_structure_name"] for layer_cfg in CURVED_LAYERS):
                 if ps.has_curve_network(name):
                     prior[name] = (ps.get_curve_network(name).is_enabled(), None)
             self._geodesic_isolation_prior = prior
 
-        for name in (other, "Surface Bot"):
+        for name in other_surfaces + obstacle_names:
             if ps.has_surface_mesh(name):
                 ps.get_surface_mesh(name).set_enabled(False)
         if ps.has_surface_mesh(host):
@@ -988,9 +992,9 @@ class VisContent:
             h.set_enabled(True)
             h.set_transparency(GEODESIC_HOST_TRANSPARENCY)
 
-        other_curves = f"Curved Toolpath {'TX' if layer == GEODESIC_LAYER_RX else 'RX'}"
-        if ps.has_curve_network(other_curves):
-            ps.get_curve_network(other_curves).set_enabled(False)
+        for name in other_curves:
+            if ps.has_curve_network(name):
+                ps.get_curve_network(name).set_enabled(False)
 
 
     def _restore_geodesic_isolation(self):

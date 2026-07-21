@@ -1,8 +1,7 @@
 import polyscope.imgui as psim
 import numpy as np
 
-from geometry_backend import (USER_FRAME_ORIGIN_MM, PRECOMPUTE_CHUNK_SIZE,
-                               GEODESIC_LAYER_RX, GEODESIC_LAYER_NAMES)
+from geometry_backend import USER_FRAME_ORIGIN_MM, PRECOMPUTE_CHUNK_SIZE
 
 # FR5 practical joint slider ranges (degrees), asymmetric per joint.
 # Source: docs/FR5_Joint_Limits.md "Practical Slider Ranges"
@@ -42,7 +41,7 @@ class UI_Menu:
         self.bp_status = ""
         self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100
         # -- snapped down automatically if it ever outruns precompute
-        self.geodesic_sample_layer = GEODESIC_LAYER_RX  # which layer "Show Sample Geodesic" draws on
+        self.geodesic_sample_layer = 0  # which layer "Show Sample Geodesic" draws on
         self.geodesic_sample_most_curved = False  # False = a realistic travel move, True = the highest-ratio pair
 
     def _section_gap(self):
@@ -128,7 +127,7 @@ class UI_Menu:
                     # Surface_TX_Base. A selector gating load/precompute/
                     # playback is still 6.6's job -- this one only picks the
                     # sample.
-                    for i, layer_name in enumerate(GEODESIC_LAYER_NAMES):
+                    for i, layer_name in enumerate(self.content.curved_layer_names):
                         if i:
                             psim.SameLine()
                         _, self.geodesic_sample_layer = psim.RadioButton(

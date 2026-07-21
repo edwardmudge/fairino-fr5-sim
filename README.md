@@ -17,8 +17,9 @@ A Python-based 3D visualisation tool for a 6-degree-of-freedom Fairino FR5 manip
 
 ## Project layout
 
-* `main.py`, `gui_panel.py`, `geometry_backend.py` — Polyscope app (Model-View architecture)
-* `assets/` — robot arm, tool head, and build plate meshes
+* `main.py`, `gui_panel.py`, `geometry_backend.py` — Polyscope app (Model-View architecture), including a project-agnostic curved-surface-printing feature
+* `examples/` — the concrete dataset/config the curved-surface-printing feature ships with by default (an elastomeric sensor printed conformally onto a shoulder mockup); swap it for a different curved-print job
+* `assets/` — robot arm, tool head, build plate, and curved-print-surface meshes
 * `docs/` — technical reference (DH parameters, joint limits, mesh coordinate convention)
 * `wiki/` — project knowledge base: architecture decisions, glossary, agent boot protocol
 * `wiki-template/` — the generic, project-agnostic methodology behind `wiki/`, reusable to bootstrap this documentation system on other projects

@@ -4,6 +4,13 @@ status: active
 
 # How the Curved-Surface Model Is Loaded and Placed
 
+`load_curved_model()` and the geodesic engine it feeds are generic,
+project-agnostic simulator features (settled.md S1.33) — they operate on
+whatever `CURVED_LAYERS` describes. The RX/TX specifics this guide's
+examples use come from `examples/curved_surface_printing/study_config.py`,
+the shoulder-sensor study's own configuration; a different curved-print job
+would supply a different config module.
+
 ## What it is
 
 The "Load Curved Model" button (I/O Operations panel) parses 55
@@ -135,25 +142,32 @@ more:
 
 ## How to tune it
 
-Module-level constants in `geometry_backend.py`:
+Study-specific config, `examples/curved_surface_printing/study_config.py`
+(settled.md S1.33 — swap this module to point the feature at a different
+curved-print job):
 
 | Constant | Effect |
 |---|---|
 | `CURVED_MODEL_DIR` | Path to the curved-model assets — `assets/models/curved/`. |
-| `CURVED_RX_FILES` / `CURVED_TX_FILES` | The explicit file lists (`RX_0.ply`…`RX_27.ply`, `TX_0.ply`…`TX_26.ply`) — hardcoded to match the actual asset drop rather than globbed. |
-| `CURVED_SURFACE_RX_OFFSET_FILE` / `CURVED_SURFACE_TX_BASE_FILE` / `CURVED_SURFACE_BOT_FILE` | The 3 surface OBJ filenames. |
-| `CURVE_DEDUPE_DECIMALS` | Rounding precision (decimal places) for vertex dedup during polyline reconstruction — 3 is the verified-correct value, see above. |
+| `CURVED_LAYERS` | List of per-layer config dicts (`name`, `curve_files`, `curve_structure_name`, `curve_color`, `surface_file`, `surface_structure_name`, `surface_color`) — one entry per print layer, RX and TX by default. |
 | `CURVED_MODEL_ROTATE_X_DEG` | The fixed placement rotation about local X, degrees — 90° puts the printable surface face-up. |
-| `RX_CURVE_COLOR` / `TX_CURVE_COLOR` | RGB colors for the two curve networks. |
+| `CURVED_OBSTACLE_FILE` / `CURVED_OBSTACLE_STRUCTURE_NAME` / `CURVED_OBSTACLE_COLOR` | The optional non-print collision body (`Surface_Bot.obj`) and its display name/color. |
+
+Generic engine tuning, still module-level constants in `geometry_backend.py`:
+
+| Constant | Effect |
+|---|---|
+| `CURVE_DEDUPE_DECIMALS` | Rounding precision (decimal places) for vertex dedup during polyline reconstruction — 3 is the verified-correct value, see above. |
 | `CURVE_RADIUS_MM` | Curve-network line thickness, world units (mm) — kept thin relative to `TRAJECTORY_RADIUS_MM` since 70 pieces would otherwise dominate the view. |
-| `SURFACE_RX_OFFSET_COLOR` / `SURFACE_TX_BASE_COLOR` / `SURFACE_BOT_COLOR` | RGB colors for the 3 surface meshes. |
 
 ## Code anchors
 
 - `geometry_backend.py`: `read_ply_polyline()`, `reconstruct_polylines()`,
-  `transform_points()`, `_register_curve_layer()`, `load_curved_model()`,
-  and the `CURVED_*`/`RX_CURVE_COLOR`/`TX_CURVE_COLOR`/`CURVE_RADIUS_MM`/
-  `SURFACE_*_COLOR` constants.
+  `transform_points()`, `_register_curve_layer()`, `load_curved_model()` —
+  all generic, project-agnostic (settled.md S1.33).
+- `examples/curved_surface_printing/study_config.py`: `CURVED_LAYERS`,
+  `CURVED_MODEL_DIR`, `CURVED_MODEL_ROTATE_X_DEG`, `CURVED_OBSTACLE_*` — the
+  RX/TX-specific config `geometry_backend.py` imports.
 - `gui_panel.py`: "Load Curved Model" button, "I/O Operations" section —
   the only caller of `load_curved_model()`.
 - `wiki/002_Architecture/settled.md` S1.29 — the placement decision and its
@@ -161,7 +175,8 @@ Module-level constants in `geometry_backend.py`:
   the rotation sign); S1.1 — why `read_ply_polyline`/`reconstruct_polylines`/
   `transform_points` are module-level functions, not `VisContent` methods
   (stateless, no instance data touched); S1.2/S1.3 — why static workpiece
-  geometry skips the Delta transform.
+  geometry skips the Delta transform; S1.33 — the generic-mechanism /
+  study-config split.
 - `tutorials/Stage6_README.md` — sub-stage 6.1 and the Open Questions
   section.
 - `wiki/001_Inbox/2026-07-18_curved_surface_assets.md` — the asset survey

@@ -138,6 +138,13 @@ dropped — it was based on the "ridge network" filenames in `_verify_*`, which
 more likely describe the curve-*generation* algorithm (ridge extraction on a
 scalar field) than the end application.
 
+**Corroborated again 2026-07-20** — the supervisor separately confirmed a
+silicone base layer sits between the shoulder mockup and the RX pass (open
+question 5 below, `settled.md` S1.34), a third silicone application besides
+the two between-pass fills S1.32 already recorded. Silicone dielectric now
+appears at the bottom of the stack as well as between the two electrode
+layers, consistent with the capacitive reading throughout this section.
+
 ## The shortest-path constraint
 
 Recorded requirement from the supervisor: **use a shortest-path algorithm
@@ -198,12 +205,13 @@ principle in `AGENTS.md` favours `heapq`.
    isn't one. Worth carrying forward: when a name and a measurement disagree
    here, the measurement won.
 4. ~~**Storage/tracking plan.**~~ **Resolved** by the gitignore change below.
-5. ⚠ **NEW (2026-07-20) — what fills the 2.00 mm between `Surface_Bot` and
-   `Surface_RX_Offset`?** RX printing first means it isn't touching the
-   mockup. **Working assumption:** a silicone base layer is applied to the
-   shoulder before the RX pass, making `Surface_RX_Offset` that base's outer
-   surface. Not yet confirmed. Blocks nothing in 6.3–6.6 — it changes how the
-   gap is interpreted, not any transform, route or clearance.
+5. ~~**What fills the 2.00 mm between `Surface_Bot` and
+   `Surface_RX_Offset`?**~~ **Answered (2026-07-20):** a silicone base layer
+   is applied to the shoulder mockup before the RX pass — confirmed directly
+   by the supervisor. `Surface_RX_Offset` is that base's outer surface, not
+   the bare shoulder body. See `settled.md` S1.34. As anticipated when this
+   was raised, the answer only changes how the gap is interpreted — no
+   transform, route or clearance in 6.1–6.6 depended on it.
 
 ## Storage
 
@@ -237,6 +245,20 @@ orientation) contradicts S1.12 and needs a real decision first.
 readable style. The forward-looking implementation detail for the still-
 **planned** stages (6.3–6.6) is kept here instead of being deleted, since it
 doesn't have a `settled.md` entry yet.
+
+**Update 2026-07-20 (settled.md S1.33):** curved-surface printing was
+generalized to a configurable layer list, with the RX/TX-specific wiring
+moved to `examples/curved_surface_printing/study_config.py`. The notes below
+were written before that split and cite `geometry_backend.py` line numbers
+that have since drifted (the functions named are still generic and still
+live there — only exact line numbers are stale, so they're omitted below
+rather than re-baked). Going forward: true fabrication-sequence semantics
+for 6.3-6.6 (the per-pass collision-obstacle swap, "manual silicone fill"
+messaging) belong in `study_config.py` as additional optional `CURVED_LAYERS`
+fields, not bare `geometry_backend.py` constants — print order is already
+expressed there as list order (RX first). Generic job-shaped tuning values
+(hover clearance, bead size) can stay as assumed constants in
+`geometry_backend.py`, the same way `FILAMENT_DIAMETER_MM` does for Stage 5.
 
 ### 6.3 — Order the 70 Pieces
 
@@ -329,9 +351,9 @@ replaces it.
   touching the surface is exactly what printing is. The check must apply
   strict clearance to the arm links/nozzle body while exempting (or giving
   tolerance to) the tip region near the TCP.
-- `Surface_Bot` is rendered but **not retained** — `load_curved_model()`
-  keeps only the two print surfaces in world space
-  (`geometry_backend.py:652-657`, per S1.31). This stage needs `Surface_Bot`
+- The obstacle mesh (`Surface_Bot` by default) is rendered but **not
+  retained** — `load_curved_model()` keeps only the configured print-layer
+  surfaces in world space (per S1.31). This stage needs the obstacle mesh
   retained too before it can collide against it.
 
 ### 6.6 — GUI Wiring
@@ -339,15 +361,17 @@ replaces it.
 - New numbered `psim.TreeNode` section in `gui_panel.py`'s `render()`,
   following the existing structure. New per-frame pump line at the top of
   `render()` alongside the existing three (`gui_panel.py:60-62`).
-- Layer selector: a radio pair (RX first, TX second) — 6.2 already added a
-  minimal RX/TX `psim.RadioButton` pair for the sample geodesic
-  (`gui_panel.py:131-135`); reuse that idiom. Check
+- Layer selector: a radio pair (RX first, TX second, matching `CURVED_LAYERS`
+  order) — 6.2 already added a data-driven `psim.RadioButton` loop over
+  `content.curved_layer_names` for the sample geodesic (`gui_panel.py`, "I/O
+  Operations" section, per S1.33); reuse that idiom. Check
   `docs/Polyscope_Quickstart.md` for the `(changed, value)` return signature
   before using it (`AGENTS.md` rule).
 - Selecting a layer re-applies the visibility set from the "One live layer at
   a time" table in `Stage6_README.md`. Build this by **generalising**
   `_isolate_geodesic_layer()` / `_restore_geodesic_isolation()`
-  (`geometry_backend.py:959` / `:996`), which already implement
+  (`geometry_backend.py`), already generic over `CURVED_LAYERS` as of
+  S1.33 for the sample-geodesic case, which already implement
   snapshot-and-restore of per-structure visibility for exactly this reason.
   Do not add a second visibility mechanism beside them — two would fight
   over the same Polyscope structures, and S1.31's amendment records a real

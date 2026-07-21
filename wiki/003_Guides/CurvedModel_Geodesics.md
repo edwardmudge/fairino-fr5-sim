@@ -19,6 +19,12 @@ reconstructed. Roadmap 6.3 consumes these to decide the print order of the
 Nothing here drives the arm. 6.2 produces routes and distances only;
 per-waypoint orientation is 6.4 and IK/playback is 6.5.
 
+The geodesic engine is generic and project-agnostic (settled.md S1.33): it
+builds one graph per *configured* layer, however many `CURVED_LAYERS`
+describes. RX/TX are the shoulder-sensor study's two layers, wired up in
+`examples/curved_surface_printing/study_config.py` — the numbers and
+examples below are specific to that config, not the mechanism.
+
 ## Why two graphs, not one
 
 RX and TX are two stacked electrode layers printed as **separate ordered
@@ -321,14 +327,19 @@ Clear-button territory.
 
 ## How to tune it
 
+Generic engine tuning, `geometry_backend.py`:
+
 | Constant | Effect |
 |---|---|
 | `GEODESIC_CHUNK_SOURCES` | Whole Dijkstra sources solved per frame. 1 gives ~6-12 fps while running and ~8.4 s total. |
-| `GEODESIC_LAYER_RX` / `GEODESIC_LAYER_TX` | Layer indices into every 2-element geodesic list. |
-| `GEODESIC_LAYER_NAMES` | Layer names used in status messages. |
 | `GEODESIC_CURVE_COLOR` / `GEODESIC_CHORD_COLOR` | Sample-geodesic green and comparison-chord magenta. |
 | `GEODESIC_CURVE_RADIUS_MM` | Sample-geodesic thickness — 3× `CURVE_RADIUS_MM` so it reads over the 70 toolpath curves. |
 | `GEODESIC_HOST_TRANSPARENCY` | How far the host surface is ghosted while a sample is shown. Lower = more see-through. |
+
+Which layers exist and their display names come from `CURVED_LAYERS` in
+`examples/curved_surface_printing/study_config.py` (settled.md S1.33) — the
+engine reads `VisContent.curved_layer_names` (populated by
+`load_curved_model()`) rather than a hardcoded RX/TX pair.
 
 ## Code anchors
 
@@ -340,10 +351,15 @@ Clear-button territory.
   `_isolate_geodesic_layer()`, `_restore_geodesic_isolation()`; the
   `GEODESIC_*` constants; the retention block at the end of
   `load_curved_model()` and the invalidation hook in `load_build_plate()`.
+  All generic — no RX/TX-specific code (settled.md S1.33).
+- `examples/curved_surface_printing/study_config.py`: `CURVED_LAYERS`,
+  `CURVED_OBSTACLE_*` — what the engine above iterates over.
 - `gui_panel.py`: the `step_geodesic_precompute()` pump line in `render()`,
-  and the geodesic controls in the "I/O Operations" section.
+  and the geodesic controls (data-driven off `content.curved_layer_names`)
+  in the "I/O Operations" section.
 - `wiki/002_Architecture/settled.md` S1.31 — the 6.2 decisions and why each
-  was a real fork; S1.29/S1.30 — placement and the RX/TX layer semantics.
+  was a real fork; S1.29/S1.30 — placement and the RX/TX layer semantics;
+  S1.33 — the generic-mechanism / study-config split.
 - `wiki/003_Guides/CurvedModel_Loading.md` — how the geometry this routes
   over gets loaded and placed.
 - `tutorials/Stage6_README.md` — sub-stage 6.2 and what 6.3-6.6 do with it.

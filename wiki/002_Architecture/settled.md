@@ -1816,6 +1816,8 @@ the supervisor**, recorded so the discrepancy isn't rediscovered later.
 Nothing in 6.3-6.6 depends on the answer -- it changes the interpretation of
 the gap, not any transform, route or clearance.
 
+✅ **Confirmed by the supervisor -- see S1.34.**
+
 **Reason:** Direct supervisor answer, and it resolves the contradiction
 S1.30's caveat left open in favour of the measured geometry. The stack
 measures BOT -> RX (2.00mm) -> TX (4.02mm) with `TX_Base` outside
@@ -1839,3 +1841,93 @@ surface, and 6.6's layer selector and visibility sets.
 measurement needed: the stack ordering, the 2.00mm/4.02mm gaps and the
 enclosure of `RX_Offset` by `TX_Base` were all measured in S1.29/S1.31, and
 this entry adopts those numbers rather than re-deriving them.
+
+
+## S1.33 Curved-surface printing generalized to a configurable layer list; RX/TX study config moved to examples/curved_surface_printing/
+
+**Decision:** Curved-surface printing (roadmap Stage 6) is a core,
+project-agnostic simulator feature -- same standing as flat-plate G-code
+printing -- and stays in `geometry_backend.py`/`gui_panel.py`. What was
+specific to one project (printing an elastomeric capacitive sensor onto a
+shoulder mockup) was the hardcoded RX/TX wiring: which PLY/OBJ files, how
+many layers, their names, colors, and the 90-degree CAD-rotation constant.
+That wiring moved to `examples/curved_surface_printing/study_config.py`
+(`CURVED_LAYERS`, `CURVED_MODEL_DIR`, `CURVED_MODEL_ROTATE_X_DEG`,
+`CURVED_OBSTACLE_*`), imported by `geometry_backend.py` with one
+clearly-commented import block.
+
+The mechanism itself was generalized to consume that config rather than
+assume exactly two layers named RX and TX:
+
+- `load_curved_model()` now loops over `CURVED_LAYERS` (collapsing what were
+  two near-identical `rx_*`/`tx_*` code paths into one), and populates a new
+  `curved_layer_names` list other code and the GUI read instead of a
+  hardcoded RX/TX pair.
+- `run_geodesic_precompute()`/`step_geodesic_precompute()` iterate
+  `range(len(CURVED_LAYERS))` instead of `(GEODESIC_LAYER_RX,
+  GEODESIC_LAYER_TX)`; status strings read `curved_layer_names[layer]`
+  instead of a `GEODESIC_LAYER_NAMES` constant.
+- `_isolate_geodesic_layer()`'s RX-or-TX ternary became a loop hiding every
+  *other* configured layer's surface and curve network (plus the optional
+  obstacle mesh), so it isolates correctly for however many layers are
+  configured.
+- `gui_panel.py`'s layer-selector radio buttons read
+  `content.curved_layer_names` instead of importing a `GEODESIC_LAYER_NAMES`
+  constant -- the GUI has no RX/TX-specific code left at all.
+
+Behaviour is unchanged: same structure names (`Curved Toolpath RX`/`TX`,
+`Surface RX Offset`/`TX Base`/`Bot`), same placement math, same geodesic
+results -- verified by re-running the load -> build geodesics -> show sample
+(RX and TX) -> move plate sequence headlessly and confirming identical
+output to before the refactor (26.1mm/ratio 1.110 for the RX representative
+sample, matching S1.31's recorded figure).
+
+**Reason:** The user wants a repo viewer to see curved-surface printing as a
+real capability, not a bolted-on example -- but also wants cloning this repo
+for a different curved-print job to mean writing a new `study_config.py`,
+not extracting RX/TX-specific code out of `geometry_backend.py`/`gui_panel.py`
+by hand. Genericizing the mechanism and isolating only the concrete config
+achieves both: `assets/models/curved/` and the RX/TX asset wiring stay the
+default configuration this simulator ships with, swappable via one import.
+
+**Non-revertible unless:** a future need re-hardcodes a fixed two-layer
+assumption somewhere the generic list-based code doesn't already cover --
+none identified. Roadmap 6.3-6.6's fabrication-specific behaviour (per-pass
+collision-obstacle swap, "manual silicone fill" messaging, RX-before-TX
+ordering) should continue this split: express it as additional optional
+`CURVED_LAYERS` fields the generic code reads with `.get(...)` defaults,
+living in `study_config.py`, not as new bare module constants in
+`geometry_backend.py`.
+
+**Verified on:** 2026-07-20 -- `python -c` headless smoke test: load curved
+model, build geodesics to completion, show sample geodesics on both layers,
+move the build plate and confirm geodesic invalidation still fires via the
+(unchanged, already-generic) `load_build_plate()` hook. All matched
+pre-refactor behaviour and S1.31's recorded sample figures.
+
+
+## S1.34 Silicone base layer under RX confirmed (roadmap 6.5) -- fills the measured 2.00mm gap between Surface_Bot and Surface_RX_Offset
+
+**Decision:** The supervisor has confirmed that a silicone base layer is
+applied to the shoulder mockup before the RX pass. `Surface_RX_Offset` is
+that base layer's outer surface, not the bare shoulder body -- closing the
+open question S1.32 recorded.
+
+This is the *third* silicone application in the fabrication sequence,
+distinct from the two S1.32 already recorded: base layer (before RX) -> RX
+pass -> gap fill (silicone, manual) -> TX pass -> gap fill (silicone,
+manual).
+
+**Reason:** Direct supervisor confirmation. It also further corroborates the
+capacitive-tactile-sensor reading the asset survey inferred from geometry
+alone (S1.30) -- silicone as a dielectric now appears at the base of the
+stack as well as between the two electrode layers.
+
+**Non-revertible unless:** N/A in practice -- per the original open question
+and S1.31's measurement, the answer changes only how the 2.00mm gap is
+*interpreted*, not any transform, route, clearance, or collision-obstacle
+assignment in the code (`Surface_Bot` was already, and remains, the fixed
+RX-pass collision body regardless of what physically sits above it). This
+entry exists purely so the question isn't reopened or rediscovered later.
+
+**Verified on:** 2026-07-20 -- direct supervisor confirmation.
