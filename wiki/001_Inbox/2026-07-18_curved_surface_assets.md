@@ -358,6 +358,15 @@ replaces it.
 
 ### 6.6 — GUI Wiring
 
+> ⚠ **Partly superseded (2026-07-21).** 6.3 already added the RX/TX layer
+> selector and its visibility mechanism, `apply_live_layer_visibility()`
+> (strict isolation; `settled.md` S1.35). The sample-geodesic aid and its
+> `_isolate_geodesic_layer()`/`_restore_geodesic_isolation()` helpers were
+> **removed** (S1.31's "Removed" note), so the bullets below that say to
+> generalise those helpers or add a "Clear-sample" button no longer apply —
+> 6.6 extends `apply_live_layer_visibility()` (to the S1.32 stack rule) and
+> adds Load/Clear + playback gating, not a second visibility mechanism.
+
 - New numbered `psim.TreeNode` section in `gui_panel.py`'s `render()`,
   following the existing structure. New per-frame pump line at the top of
   `render()` alongside the existing three (`gui_panel.py:60-62`).

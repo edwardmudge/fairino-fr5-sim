@@ -1662,9 +1662,20 @@ Interaction verified: build-without-model, pause-freezes, resume-without-
 restart, cancel-clears-and-removes-curves, sample-before-ready,
 reload-invalidates, plate-move-invalidates.
 
+**Removed 2026-07-21 -- the sample-geodesic aid is gone.** `show_sample_geodesic`,
+`_pick_sample_pair`, `_isolate_geodesic_layer`, `_restore_geodesic_isolation`,
+the `_geodesic_isolation_prior` state and the sample-only constants
+(`GEODESIC_CURVE_COLOR`/`GEODESIC_CHORD_COLOR`/`GEODESIC_CURVE_RADIUS_MM`/
+`GEODESIC_HOST_TRANSPARENCY`) were deleted, with their two GUI widgets. 6.3's
+print-order overlay and `apply_live_layer_visibility()` (S1.35) supersede both
+its purposes -- seeing a geodesic on the surface, and viewing one layer at a
+time. The geodesic *engine* (graphs, Dijkstra, cost matrices, `geodesic_path_nodes`)
+is untouched; only the visual demo is removed. The measurements and reasoning
+below stand as the 6.2 record.
+
 **Amended 2026-07-19 -- sample-geodesic presentation (`show_sample_geodesic`).**
 As first shipped, the verification aid was unusable and its own verification
-was invalid. Both are fixed:
+was invalid. Both were fixed (before the aid was later removed, see above):
 
 - **It rendered nothing visible.** The default layer is RX, and
   `Surface_RX_Offset` is sealed inside `Surface_TX_Base` (see S1.30's caveat
@@ -1931,3 +1942,122 @@ RX-pass collision body regardless of what physically sits above it). This
 entry exists purely so the question isn't reopened or rediscovered later.
 
 **Verified on:** 2026-07-20 -- direct supervisor confirmation.
+
+
+## S1.35 Print ordering (roadmap 6.3) -- per-layer greedy + 2-opt over oriented pieces, synchronous, hover-offset travel moves bookended with true endpoints, from-scratch outward normals
+
+**Decision:** Each layer's 35 curve pieces are ordered and the travel moves
+between them emitted by `build_print_order()` (`geometry_backend.py`), consuming
+6.2's per-layer geodesic cost matrices and predecessor rows. Generic over
+`CURVED_LAYERS` (S1.33) -- no RX/TX-specific code.
+
+- **A TSP variant, objective = total inter-piece travel.** Every piece is
+  printed once (a feed move along its curve, cost fixed regardless of order), so
+  order changes only the sum of the geodesic hops between pieces. Each piece has
+  two entry ends, so ordering also chooses which end to enter -- endpoint `2p`
+  and `2p+1` are the two ends of piece `p` (`_layer_endpoints_world`), a piece's
+  other end is `e ^ 1`, and a print order is a list of `(piece, entry_end)`.
+- **Greedy nearest-endpoint seed + 2-opt**, module-level pure functions
+  (`greedy_piece_order`, `two_opt`, `travel_cost`; S1.1). A good order, not
+  proven-optimal (`Stage6_README.md` 6.3). 2-opt reverses a contiguous block
+  *and flips each block piece's entry/exit end*; because geodesic cost is
+  symmetric a reversed internal hop keeps the same two physical endpoints and is
+  unchanged, so only the two cut edges move -- but with N=35 the tour is
+  re-summed in full (trivial, and immune to delta-sign slips). Block length 1 is
+  a single-piece end-swap, so a piece's entry end can be improved on its own.
+- **Zero-cost ties break to the lowest endpoint index** (stable `argmin`), so
+  the order is reproducible. A zero-cost hop to a *different* piece is real free
+  travel and is taken; a piece leaves the candidate set the moment it is entered,
+  so a closed loop's `cost[2p, 2p+1] == 0` is never a candidate (S1.31's trap).
+- **RX first, TX second, ordered independently** (S1.32). No travel move stitches
+  the last RX piece to the first TX piece -- the manual silicone fill sits there.
+- **Synchronous, not chunked.** Unlike 6.2's ~8.4s Dijkstra precompute, this only
+  walks stored predecessor rows (no re-solve), so it finishes inside one frame
+  and runs straight off the button -- no per-frame stepper.
+- **Travel moves hover.** Each travel polyline is the 6.2 geodesic offset outward
+  by `CURVED_TRAVEL_HOVER_MM` (= 4.0, assumed) along the local surface normal, so
+  the nozzle never scrapes the mockup or wet traces. Rendered as one combined
+  curve network `Curved Travel <name>` per layer in `CURVED_TRAVEL_COLOR` (amber)
+  -- feed curves keep their per-layer colour, giving the two-colour feed/travel
+  view. Both constants are generic job-tuning values and live in
+  `geometry_backend.py` (S1.33 licenses this, same as `FILAMENT_DIAMETER_MM`).
+- **Snap gap closed by appending true endpoints.** A geodesic starts/ends at the
+  snapped mesh vertex, ~0.36mm from the true curve endpoint (S1.31). Each travel
+  polyline is bookended with the true exit/entry endpoints (also lifted to hover
+  height along their snap-vertex normal), so the route connects end-to-end.
+
+**Also settled -- surface normals are computed from scratch, sign fixed against
+Surface_Bot at load time.** trimesh's `vertex_normals` needs `scipy.sparse` and
+silently degrades to poor normals without it (measured: only ~84% outward), so
+`compute_vertex_normals(verts, faces)` accumulates area-weighted face normals in
+numpy (no scipy, AGENTS.md). The outward sign is one global bit, decided in
+`_orient_normals_outward()` by a majority vote against the direction away from
+the nearest `Surface_Bot` vertex -- the obstacle mesh is in scope during
+`load_curved_model()`, so the sign is baked into the retained
+`curved_surface_vnormals_world` and Bot is *not* retained (that stays a 6.5
+concern). This is the normal lookup 6.4 was to introduce, pulled forward because
+6.3's hover needs it first (asset survey's 6.3 notes); 6.4 reuses it. A wrong
+sign would drive the nozzle into the mockup.
+
+**Also settled -- the rim-hugging diagnostic is reported, not gated.** 6.2 warned
+a geodesic can legitimately track the surface's open boundary (mean 18% of nodes
+over random pairs; `CurvedModel_Geodesics.md`). On the *ordered* travel moves the
+max per-layer figure is higher (measured ~46%), because the greedy chain favours
+short hops between near-rim endpoints. `build_print_order()` reports the max
+rim-node fraction in its status line; it is geometrically correct and left as a
+physical judgement for 6.4/6.5 (higher hover or a rim penalty), not a hard reject
+here.
+
+**Reason:** Feed cost being order-invariant makes travel-sum the whole objective,
+which is why the two matrices from 6.2 are exactly what ordering needs. The
+oriented-piece 2-opt with cost symmetry is what lets a standard segment-reversal
+also choose entry ends without special-casing. Synchronous is correct because the
+expensive part (Dijkstra) already ran in 6.2 -- 6.3 is pure walk-backs. Computing
+normals from scratch removes both a hidden scipy dependency and the measured
+84%-outward degradation; orienting against Bot at load avoids retaining it.
+
+**Non-revertible unless:** the piece count grows enough that full-tour re-summing
+in 2-opt stops fitting a frame (escape hatch: the two-cut-edge delta the symmetry
+argument already justifies), or a future asset drop's surface has genuinely
+inconsistent winding that a single global normal sign can't correct (then per-
+vertex sign against Bot, not a global vote). Rim-hugging becoming unacceptable
+would change 6.4/6.5's hover/penalty, not this ordering.
+
+**Verified on:** 2026-07-21 -- headless. Pure functions: across 20 random layers
+2-opt never increases travel cost and every order is a piece permutation with
+valid entry ends; a zero-cost different-piece hop is taken. Full pipeline on the
+shipped RX/TX assets: retained normals unit-length and 100% outward from Bot on
+both layers (was 84% via trimesh); optimized travel RX 690mm vs 5157mm file-order
+and TX 607mm vs 4848mm; every travel-node nearest-surface clearance >= hover
+(3.97/3.96mm vs 4.0); reload removes the `Curved Travel` networks and clears
+`curved_order_loaded`.
+
+**Amended 2026-07-21 -- print-order visualisation.** The first cut drew only the
+amber travel hops, which didn't let the user *verify the order* and left both
+layers rendered at once (RX invisible inside the TX shell). Three additions:
+
+- **Ordered-feed gradient overlay.** `build_print_order()` now also registers a
+  `Curved Order Feed <name>` curve network per layer -- the printed pieces in
+  print order, each oriented by its entry end (piece reversed when entered at
+  `2p+1`) -- coloured by a **sequence gradient** (`_sequence_colors` over the
+  `CURVED_ORDER_CMAP` purple->teal->yellow ramp, applied per-edge via
+  `add_color_quantity(defined_on='edges')`, the proven pattern from the coord
+  frame -- *not* Polyscope's scalar colourmap, undocumented in this version).
+  Edge index runs along the print order, so the gradient reads as the sequence.
+  Drawn at `CURVED_ORDER_FEED_RADIUS_MM` (0.8) over the base curve.
+- **Travel recoloured** to a solid warm red (`CURVED_TRAVEL_COLOR`), off the
+  gradient ramp, so printing (gradient) vs moving (flat red) read apart.
+- **Strict live-layer isolation.** `apply_live_layer_visibility(layer)` shows
+  only the selected layer's surface / overlay / travel (base curve hidden while
+  its overlay is present); every other layer is hidden. Driven by the GUI's
+  existing RX/TX radio -- applied on change and after each build. **Strict
+  isolation is deliberate for verification**; the eventual 6.6 rule is the S1.32
+  physical stack (TX shows the RX layer beneath), a localised change to the
+  `visible`/base-curve logic. It is now the **sole** visibility mechanism: the
+  sample-geodesic isolation helpers it once composed with were removed with the
+  rest of that aid (see S1.31's "Removed 2026-07-21" note).
+
+Verified headless: overlays registered with the right per-order edge counts
+(RX 2492 / TX 1965) and oriented at the entry end; selecting either layer
+enables only its structures and disables the others (base curves off while
+overlays exist); reload removes both overlay and travel networks.

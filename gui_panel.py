@@ -41,8 +41,7 @@ class UI_Menu:
         self.bp_status = ""
         self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100
         # -- snapped down automatically if it ever outruns precompute
-        self.geodesic_sample_layer = 0  # which layer "Show Sample Geodesic" draws on
-        self.geodesic_sample_most_curved = False  # False = a realistic travel move, True = the highest-ratio pair
+        self.live_layer = 0  # which layer the RX/TX selector isolates (roadmap 6.3)
 
     def _section_gap(self):
         """Uniform small gap between the numbered top-level sections below."""
@@ -116,26 +115,26 @@ class UI_Menu:
                     self.content.cancel_geodesic_precompute()
 
                 if self.content.geodesic_loaded:
-                    psim.SameLine()
-                    if psim.Button("Show Sample Geodesic"):
-                        self.content.show_sample_geodesic(
-                            layer=self.geodesic_sample_layer,
-                            mode="most_curved" if self.geodesic_sample_most_curved else "representative")
-
-                    # Which layer the sample draws on. The sample isolates its
-                    # host surface, so RX is viewable despite sitting inside
-                    # Surface_TX_Base. A selector gating load/precompute/
-                    # playback is still 6.6's job -- this one only picks the
-                    # sample.
+                    # Live-layer selector: drives strict one-at-a-time visibility
+                    # (RX is sealed inside Surface_TX_Base, so it's invisible with
+                    # TX shown). Applied on change so selecting RX immediately hides
+                    # TX. Full playback gating / the S1.32 stack rule are still 6.6.
                     for i, layer_name in enumerate(self.content.curved_layer_names):
                         if i:
                             psim.SameLine()
-                        _, self.geodesic_sample_layer = psim.RadioButton(
-                            layer_name, self.geodesic_sample_layer, i)
+                        changed, self.live_layer = psim.RadioButton(
+                            layer_name, self.live_layer, i)
+                        if changed:
+                            self.content.apply_live_layer_visibility(self.live_layer)
 
-                    psim.SameLine()
-                    _, self.geodesic_sample_most_curved = psim.Checkbox(
-                        "Most-curved pair", self.geodesic_sample_most_curved)
+                    # Roadmap 6.3: order each layer's pieces, drawing the printed
+                    # pieces as a print-order gradient and the hover travel moves
+                    # between them. Synchronous, so no per-frame pump. Re-apply
+                    # the live-layer view so the fresh overlays obey the selection.
+                    if psim.Button("Build Print Order"):
+                        self.content.build_print_order()
+                        self.content.apply_live_layer_visibility(self.live_layer)
+                    psim.TextWrapped(self.content.curved_order_status)
 
                 total = self.content.geodesic_total
                 fraction = (self.content.geodesic_index / total) if total else 0.0

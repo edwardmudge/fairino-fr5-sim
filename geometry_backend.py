@@ -93,11 +93,25 @@ GEODESIC_CHUNK_SOURCES = 1  # whole Dijkstra sources solved per step() call.
 # heap plus partial dist/prev across frames -- real complexity for a job that
 # finishes in seconds.
 
-GEODESIC_CURVE_COLOR = (0.10, 0.80, 0.20)  # green -- distinct from RX red, TX blue, and the pale surfaces
-GEODESIC_CHORD_COLOR = (0.90, 0.20, 0.85)  # magenta -- the straight-line comparison, verification only
-GEODESIC_CURVE_RADIUS_MM = 1.5  # 3x CURVE_RADIUS_MM so a geodesic reads over the 70 toolpath curves
-GEODESIC_HOST_TRANSPARENCY = 0.55  # host surface is ghosted while a sample geodesic is shown, so
-# the path reads against the shell instead of being buried in it -- see _isolate_geodesic_layer()
+# Assumed, not measured -- the toolpath curves carry no clearance data. A travel
+# move between two curve pieces follows the 6.2 geodesic offset this far outward
+# along the local surface normal, so the nozzle hovers over the mockup and any
+# wet traces instead of scraping them. ~3-5mm is a plausible non-contact hop for
+# a soft elastomer bead; tune empirically. Used by build_print_order().
+CURVED_TRAVEL_HOVER_MM = 4.0
+# Solid warm red -- the non-printing hops. Deliberately outside the ordered-feed
+# gradient's purple->teal->yellow ramp below, so "printing" (gradient) vs
+# "moving" (this flat colour) read apart at a glance. Used by build_print_order().
+CURVED_TRAVEL_COLOR = (0.90, 0.20, 0.15)
+# The ordered feed is drawn as a sequence gradient over the printed pieces (piece
+# 1 -> piece N), so the print order itself is legible. Anchor RGB stops of a
+# viridis-like ramp, interpolated by _sequence_colors(); dark start, bright end.
+CURVED_ORDER_CMAP = np.array([
+    [0.267, 0.005, 0.329],   # deep purple  -- first printed
+    [0.128, 0.567, 0.551],   # teal
+    [0.993, 0.906, 0.144],   # yellow       -- last printed
+])
+CURVED_ORDER_FEED_RADIUS_MM = 0.8  # slightly over CURVE_RADIUS_MM (0.5) so the overlay reads on the base curve
 
 PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # per-frame batch well under a 60fps budget. Measured ~0.5ms/waypoint for
@@ -167,6 +181,7 @@ class VisContent:
         # these: it's a 6.5 collision body, not a print surface.
         self.curved_pieces_world = None        # list of len(CURVED_LAYERS) lists of (Ni,3) polylines
         self.curved_surface_verts_world = None # list of len(CURVED_LAYERS) (V,3)
+        self.curved_surface_vnormals_world = None  # list of len(CURVED_LAYERS) (V,3) outward unit normals -- 6.3 hover, 6.4 orientation
         self.curved_surface_faces = None       # list of len(CURVED_LAYERS) (F,3), placement-invariant
         self.curved_layer_names = None         # list of len(CURVED_LAYERS) display names, e.g. ["RX", "TX"]
         self.T_curved = None                   # (4,4) placement actually used, for the staleness check
@@ -187,7 +202,16 @@ class VisContent:
         self.geodesic_prev = None          # list of 2 (S,V) int32 predecessor rows -- makes any path a walk-back
         self.geodesic_cost = None          # list of 2 (70,70) float64, inf = unreachable
         self.geodesic_unreachable = None   # list of 2 ints, count of inf entries per matrix
-        self._geodesic_isolation_prior = None  # {structure_name: was_enabled} while a sample is isolated
+
+        # Print-order + travel moves, see build_print_order() -- roadmap 6.3.
+        # All per-layer, derived from the geodesic cost/prev above, so they are
+        # cleared alongside them in _abort_geodesic_precompute().
+        self.curved_order_loaded = False       # True once build_print_order() has run -- what 6.5 gates on
+        self.curved_print_order = None         # list of len(CURVED_LAYERS) lists of (piece, entry_end)
+        self.curved_travel_moves = None        # list of len(CURVED_LAYERS) lists of (M,3) hover polylines
+        self.curved_travel_total = None        # list of len(CURVED_LAYERS) optimized inter-piece travel (mm)
+        self.curved_travel_naive = None        # list of len(CURVED_LAYERS) file-order travel (mm), the baseline
+        self.curved_order_status = ""
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -639,10 +663,25 @@ class VisContent:
             handle = ps.register_surface_mesh(layer["surface_structure_name"], verts_world, mesh.faces)
             handle.set_color(layer["surface_color"])
 
+        obstacle_verts_world_or_none = None
         if obstacle is not None:
-            obstacle_verts_world = transform_points(T_curved, obstacle_verts_local)
-            handle = ps.register_surface_mesh(CURVED_OBSTACLE_STRUCTURE_NAME, obstacle_verts_world, obstacle.faces)
+            obstacle_verts_world_or_none = transform_points(T_curved, obstacle_verts_local)
+            handle = ps.register_surface_mesh(CURVED_OBSTACLE_STRUCTURE_NAME, obstacle_verts_world_or_none, obstacle.faces)
             handle.set_color(CURVED_OBSTACLE_COLOR)
+
+        # Per-vertex outward normals, retained for 6.3's travel-move hover offset
+        # (and reused by 6.4's per-waypoint orientation). Computed from the world
+        # verts directly (rot_x + translation is rigid and orientation-preserving,
+        # so no separate direction transform is needed). Outward = away from
+        # Surface_Bot: the obstacle mesh is in scope here, so orient against it now
+        # and bake the sign into the retained array rather than retaining Bot (a
+        # 6.5 concern). Getting the sign wrong drives the nozzle into the mockup
+        # (asset survey, 6.4 notes).
+        surface_vnormals_world = []
+        for verts_world, mesh in zip(surface_verts_world, surfaces):
+            n = compute_vertex_normals(verts_world, np.asarray(mesh.faces))
+            surface_vnormals_world.append(self._orient_normals_outward(verts_world, n, obstacle_verts_world_or_none))
+        self.curved_surface_vnormals_world = surface_vnormals_world
 
         self.curved_pieces_world = layers_world
         self.curved_surface_verts_world = surface_verts_world
@@ -651,6 +690,26 @@ class VisContent:
         self.T_curved = T_curved
         self._T_user_frame_at_curved_load = self.T_user_frame.copy()
         self.curved_model_loaded = True
+
+
+    def _orient_normals_outward(self, verts, normals, obstacle_verts):
+        """Flip `normals` as a whole so they point outward -- away from the
+        Surface_Bot obstacle if one is configured, else away from the surface's
+        own centroid (each print surface is a convex-ish dome cap, so the two
+        agree on the shipped assets). Outward is one global sign, decided by a
+        majority vote over a vertex sample rather than per-vertex, since the
+        trimesh winding is already internally consistent -- only the whole-array
+        sense can be wrong. A wrong sign would drive 6.3's hover offset (and
+        6.4's nozzle) into the mockup instead of away from it."""
+        n = len(verts)
+        sample = np.arange(n) if n <= 2000 else np.linspace(0, n - 1, 2000).astype(int)
+        if obstacle_verts is not None:
+            idx, _ = nearest_vertex_index(obstacle_verts, verts[sample])
+            outward = verts[sample] - obstacle_verts[idx]  # away from the nearest Bot point
+        else:
+            outward = verts[sample] - verts.mean(axis=0)   # away from the surface centroid
+        vote = float(np.einsum('ij,ij->i', normals[sample], outward).sum())
+        return -normals if vote < 0 else normals
 
 
     def _layer_endpoints_world(self, layer):
@@ -746,10 +805,9 @@ class VisContent:
         """Shared discard used by cancel_geodesic_precompute() and
         load_curved_model(). Resets geodesic_index/total together, so a stale
         index can't outlive the arrays it counted (the same failure
-        _abort_toolpath_ik_precompute() guards against, settled.md S1.24),
-        and removes the sample curves, which render vertex arrays this just
-        dropped. Does not touch geodesic_status, so a caller can set an
-        explanatory message first."""
+        _abort_toolpath_ik_precompute() guards against, settled.md S1.24).
+        Does not touch geodesic_status, so a caller can set an explanatory
+        message first."""
         self.geodesic_running = False
         self.geodesic_loaded = False
         self.geodesic_index = 0
@@ -763,9 +821,20 @@ class VisContent:
         self.geodesic_prev = None
         self.geodesic_cost = None
         self.geodesic_unreachable = None
-        ps.remove_curve_network("Geodesic Sample", error_if_absent=False)
-        ps.remove_curve_network("Geodesic Chord", error_if_absent=False)
-        self._restore_geodesic_isolation()
+
+        # The 6.3 print order and its travel moves are derived from the cost
+        # matrices and predecessor rows just dropped, so they go stale with
+        # them -- clear the state and remove the rendered travel networks.
+        if self.curved_layer_names is not None:
+            for name in self.curved_layer_names:
+                ps.remove_curve_network(f"Curved Travel {name}", error_if_absent=False)
+                ps.remove_curve_network(f"Curved Order Feed {name}", error_if_absent=False)
+        self.curved_order_loaded = False
+        self.curved_print_order = None
+        self.curved_travel_moves = None
+        self.curved_travel_total = None
+        self.curved_travel_naive = None
+        self.curved_order_status = ""
 
 
     def step_geodesic_precompute(self):
@@ -828,190 +897,137 @@ class VisContent:
             self.geodesic_status = f"Building geodesics {self.geodesic_index}/{self.geodesic_total} sources"
 
 
-    def _pick_sample_pair(self, layer, mode):
-        """Choose two endpoints to demonstrate a geodesic with. Returns
-        (endpoint_a, endpoint_b), or None if no valid pair exists.
-
-        Both modes must exclude two classes of pair that a bare argmin/argmax
-        would happily return:
-          - the two ends of the *same* piece (that isn't a travel move), and
-          - zero-cost pairs, where both endpoints snapped to one vertex
-            (settled.md S1.31). Those reconstruct to a single-node "path".
-            Counted as matrix entries (both (i,j) and (j,i)) there are 16 on
-            RX and 18 on TX between *different* pieces -- i.e. 8 and 9
-            distinct pairs.
-
-        mode="representative" -- the most curved of the travel moves 6.3 will
-        actually emit, i.e. over each endpoint's nearest other-piece endpoint,
-        the one with the highest geodesic/chord ratio. Measured RX 14->43,
-        26.1mm, ratio 1.11. The naive alternatives are both misleading: the
-        *farthest* pair (317mm) is a traversal 6.3 will never emit, and the
-        *shortest* hop is 2.95mm over 3 nodes at ratio 1.000 -- a straight
-        line, because a curved surface is locally flat at that scale.
-
-        mode="most_curved" -- the highest ratio at any distance (RX 48->6,
-        250mm, ratio 1.72), for the "does it chord through the shell"
-        question.
-
-        Both defaults are deliberately chosen outliers, not typical: the
-        median ratio is 1.08 over all ~4,744 valid pairs and ~1.003 over
-        realistic hops, so most travel moves are very nearly straight."""
-        cost = self.geodesic_cost[layer]
-        n = cost.shape[0]
-        verts = self.curved_surface_verts_world[layer][self.geodesic_snap_nodes[layer]]
-        chord = np.linalg.norm(verts[:, None, :] - verts[None, :, :], axis=-1)
-
-        piece = np.arange(n) // 2
-        valid = (piece[:, None] != piece[None, :]) & (cost > 1e-9) & np.isfinite(cost)
-        if not valid.any():
-            return None
-        ratio = np.where(valid, cost / np.maximum(chord, 1e-9), 0.0)
-
-        if mode == "most_curved":
-            return tuple(int(v) for v in np.unravel_index(np.argmax(ratio), ratio.shape))
-
-        # Restrict to each endpoint's nearest other-piece endpoint -- the set
-        # of hops a greedy nearest-endpoint chain would actually consider.
-        best = None
-        for i in range(n):
-            cand = np.where(valid[i])[0]
-            if not len(cand):
-                continue
-            j = int(cand[np.argmin(cost[i, cand])])
-            if best is None or ratio[i, j] > ratio[best[0], best[1]]:
-                best = (i, j)
-        return best
+    def _surface_boundary_vertices(self, layer):
+        """Vertex ids on the open boundary of `layer`'s surface -- the ends of
+        edges used by a single face. Feeds only the rim-hugging travel
+        diagnostic (settled.md S1.31 / CurvedModel_Geodesics.md): a geodesic
+        can legitimately track the shell's open edge, worth surfacing
+        numerically since rim-hugging travel may not be physically desirable."""
+        f = self.curved_surface_faces[layer]
+        e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
+        uniq, counts = np.unique(e, axis=0, return_counts=True)
+        return np.unique(uniq[counts == 1])
 
 
-    def show_sample_geodesic(self, layer=0, mode="representative",
-                              endpoint_a=None, endpoint_b=None):
-        """Render one geodesic on its own surface -- roadmap 6.2's Verify
-        step. See _pick_sample_pair() for how the default pair is chosen.
+    def build_print_order(self):
+        """Order each layer's pieces and emit the travel moves between them --
+        roadmap 6.3. Synchronous: unlike the 6.2 Dijkstra precompute this only
+        walks stored predecessor rows (no re-solve), so it finishes well inside
+        one frame. Gated on geodesic_loaded.
 
-        Isolates the host surface first, because otherwise this shows
-        nothing: Surface_TX_Base sits a uniform ~2mm *outside*
-        Surface_RX_Offset (which is itself ~2mm outside Surface_Bot), so an
-        RX geodesic renders sealed inside the TX shell and is invisible. The
-        only thing that stayed visible was the straight comparison chord
-        leaving the surface into open space, which read as a broken
-        geodesic. Prior visibility is snapshotted and restored on clear, so
-        this isn't a one-way trip through the user's view settings.
-
-        The chord is drawn only in mode="most_curved", where the comparison
-        is the point -- at representative scale it overlaps the geodesic
-        almost exactly and adds only clutter."""
+        Each layer is ordered independently on its own surface (settled.md
+        S1.30/S1.32) -- RX first, TX second by CURVED_LAYERS order, with no
+        travel move stitching the last RX piece to the first TX piece (the
+        manual silicone fill sits in that gap). Travel polylines follow the 6.2
+        geodesic offset outward by CURVED_TRAVEL_HOVER_MM along the local
+        surface normal, bookended with the true curve endpoints (also lifted)
+        so the ~0.36mm snap gap is closed and the route meets the feed moves."""
         if not self.geodesic_loaded:
-            self.geodesic_status = "Build geodesics first"
+            self.curved_order_status = "Build geodesics first"
             return
 
-        cost = self.geodesic_cost[layer]
-        if endpoint_a is None or endpoint_b is None:
-            pair = self._pick_sample_pair(layer, mode)
-            if pair is None:
-                self.geodesic_status = f"{self.curved_layer_names[layer]}: no valid sample pair"
-                return
-            endpoint_a, endpoint_b = pair
-        endpoint_a, endpoint_b = int(endpoint_a), int(endpoint_b)
+        n_layers = len(self.curved_layer_names)
+        self.curved_print_order = [None] * n_layers
+        self.curved_travel_moves = [None] * n_layers
+        self.curved_travel_total = [0.0] * n_layers
+        self.curved_travel_naive = [0.0] * n_layers
+        rim_frac = []
 
-        row = int(self.geodesic_source_row[layer][endpoint_a])
-        nodes = geodesic_path_nodes(self.geodesic_prev[layer][row],
-                                     int(self.geodesic_snap_nodes[layer][endpoint_b]))
-        if nodes is None:
-            self.geodesic_status = f"{self.curved_layer_names[layer]} {endpoint_a}->{endpoint_b}: unreachable"
+        for layer in range(n_layers):
+            cost = self.geodesic_cost[layer]
+            n_pieces = cost.shape[0] // 2
+            order = two_opt(cost, greedy_piece_order(cost))
+            self.curved_print_order[layer] = order
+            self.curved_travel_total[layer] = travel_cost(order, cost)
+            self.curved_travel_naive[layer] = travel_cost(
+                [(p, 2 * p) for p in range(n_pieces)], cost)
+
+            endpoints = self._layer_endpoints_world(layer)
+            verts = self.curved_surface_verts_world[layer]
+            vnormals = self.curved_surface_vnormals_world[layer]
+            snap = self.geodesic_snap_nodes[layer]
+            boundary = self._surface_boundary_vertices(layer)
+
+            def lift_endpoint(ep):  # true curve endpoint, lifted along its snap-vertex normal
+                return endpoints[ep] + CURVED_TRAVEL_HOVER_MM * vnormals[snap[ep]]
+
+            polylines, n_nodes, n_rim = [], 0, 0
+            for (_, entry_a), (_, entry_b) in zip(order, order[1:]):
+                exit_ep = entry_a ^ 1
+                row = int(self.geodesic_source_row[layer][exit_ep])
+                nodes = geodesic_path_nodes(self.geodesic_prev[layer][row], int(snap[entry_b]))
+                if nodes is None:
+                    continue  # unreachable -- never on the shipped single-component surfaces
+                hover = verts[nodes] + CURVED_TRAVEL_HOVER_MM * vnormals[nodes]
+                polylines.append(np.vstack([lift_endpoint(exit_ep), hover, lift_endpoint(entry_b)]))
+                n_nodes += len(nodes)
+                n_rim += int(np.isin(nodes, boundary).sum())
+            self.curved_travel_moves[layer] = polylines
+            rim_frac.append(n_rim / n_nodes if n_nodes else 0.0)
+
+            name = f"Curved Travel {self.curved_layer_names[layer]}"
+            if polylines:
+                self._register_curve_layer(name, polylines, np.eye(4), CURVED_TRAVEL_COLOR)
+
+            # Ordered-feed overlay: the printed pieces in print order, each
+            # oriented by its entry end (reversed when entered at 2p+1), drawn as
+            # a sequence gradient so the order itself is legible. _register_curve_layer
+            # builds edges piece-by-piece in the order given, so edge index runs
+            # along the print order and _sequence_colors() maps straight onto it.
+            ordered_pieces = [self.curved_pieces_world[layer][p][::-1] if entry & 1
+                              else self.curved_pieces_world[layer][p]
+                              for p, entry in order]
+            feed_name = f"Curved Order Feed {self.curved_layer_names[layer]}"
+            handle = self._register_curve_layer(feed_name, ordered_pieces, np.eye(4),
+                                                 CURVED_ORDER_CMAP[0])
+            handle.set_radius(CURVED_ORDER_FEED_RADIUS_MM, relative=False)
+            n_edges = sum(len(p) - 1 for p in ordered_pieces)
+            handle.add_color_quantity("print order", _sequence_colors(n_edges),
+                                       defined_on='edges', enabled=True)
+
+        self.curved_order_loaded = True
+        summary = "; ".join(
+            f"{self.curved_layer_names[l]}: travel {self.curved_travel_total[l]:.0f}mm "
+            f"vs {self.curved_travel_naive[l]:.0f}mm file-order ({len(self.curved_print_order[l])} pieces)"
+            for l in range(n_layers))
+        self.curved_order_status = (f"Print order ready -- {summary}; "
+                                     f"max {max(rim_frac) * 100:.0f}% travel nodes on rim")
+
+
+    def apply_live_layer_visibility(self, layer):
+        """Show only `layer`'s geometry and hide every other layer's -- the
+        strict one-layer-at-a-time view for verifying a print pass on its own,
+        driven by the GUI layer selector. Necessary because Surface_RX_Offset is
+        sealed inside the Surface_TX_Base shell (settled.md S1.32), so RX is
+        invisible with TX shown.
+
+        Per configured layer, the surface / ordered-feed overlay / travel network
+        are enabled only for `layer`; the base toolpath curve shows only when its
+        overlay is absent (the gradient overlay supersedes it, so they don't
+        z-fight). The obstacle mesh is left as-is -- it's shared mockup context.
+        Every structure is guarded, since overlays/travel don't exist until a
+        Build Print Order.
+
+        Strict isolation is deliberate for verification now; the eventual 6.6
+        rule is the physical stack (S1.32: TX shows the RX layer beneath it),
+        which is a localised change to the `visible`/base-curve logic below."""
+        if not self.curved_model_loaded:
             return
-        if len(nodes) < 2:
-            # Only reachable with manual endpoint args -- _pick_sample_pair()
-            # excludes zero-cost pairs, but a caller-supplied pair snapping to
-            # one vertex would hand register_curve_network a 1-node polyline.
-            self.geodesic_status = (f"{self.curved_layer_names[layer]} {endpoint_a}->{endpoint_b}: "
-                                     f"endpoints snap to the same vertex -- no path to show")
-            return
+        for i, cfg in enumerate(CURVED_LAYERS):
+            visible = (i == layer)
+            surface = cfg["surface_structure_name"]
+            base_curve = cfg["curve_structure_name"]
+            overlay = f"Curved Order Feed {self.curved_layer_names[i]}"
+            travel = f"Curved Travel {self.curved_layer_names[i]}"
 
-        self._isolate_geodesic_layer(layer)
-
-        pts = self.curved_surface_verts_world[layer][nodes]  # already world, no transform needed
-        handle = self._register_curve_layer("Geodesic Sample", [pts], np.eye(4), GEODESIC_CURVE_COLOR)
-        handle.set_radius(GEODESIC_CURVE_RADIUS_MM, relative=False)
-
-        # Drop any previous chord before deciding whether to draw one: without
-        # this, switching most_curved -> representative leaves the old pair's
-        # chord on screen next to an unrelated path -- exactly the "looks like
-        # a broken geodesic" state this whole aid was rewritten to avoid.
-        ps.remove_curve_network("Geodesic Chord", error_if_absent=False)
-
-        chord_len = float(np.linalg.norm(pts[-1] - pts[0]))
-        if mode == "most_curved":
-            chord = np.array([pts[0], pts[-1]])
-            chord_handle = ps.register_curve_network("Geodesic Chord", chord, np.array([[0, 1]]))
-            chord_handle.set_color(GEODESIC_CHORD_COLOR)
-            chord_handle.set_radius(GEODESIC_CURVE_RADIUS_MM, relative=False)
-
-        # Report the ratio, not just the length: it's what makes "this hugs
-        # the surface" checkable when the picture alone is ambiguous.
-        length = float(cost[endpoint_a, endpoint_b])
-        self.geodesic_status = (f"{self.curved_layer_names[layer]} {endpoint_a}->{endpoint_b} ({mode}): "
-                                 f"{length:.1f}mm over {len(nodes)} nodes vs {chord_len:.1f}mm chord "
-                                 f"-- ratio {length / max(chord_len, 1e-9):.3f}")
-
-
-    def _isolate_geodesic_layer(self, layer):
-        """Hide everything that would occlude a geodesic on `layer`'s surface
-        and ghost the host surface, snapshotting prior visibility into
-        _geodesic_isolation_prior so _restore_geodesic_isolation() can put it
-        all back. Re-entrant: an existing snapshot is left alone, so showing
-        two samples in a row doesn't record the already-isolated state as if
-        it were the user's. Generic over however many layers CURVED_LAYERS
-        describes -- every other configured layer's surface and curve network
-        are hidden, not just a hardcoded RX-or-TX other."""
-        host = CURVED_LAYERS[layer]["surface_structure_name"]
-        other_surfaces = [CURVED_LAYERS[i]["surface_structure_name"]
-                           for i in range(len(CURVED_LAYERS)) if i != layer]
-        other_curves = [CURVED_LAYERS[i]["curve_structure_name"]
-                         for i in range(len(CURVED_LAYERS)) if i != layer]
-        obstacle_names = [CURVED_OBSTACLE_STRUCTURE_NAME] if CURVED_OBSTACLE_FILE else []
-
-        if self._geodesic_isolation_prior is None:
-            # Snapshot transparency alongside enabled state: the host gets
-            # ghosted below, and restoring a hardcoded 1.0 would silently
-            # undo any transparency the user had set themselves.
-            prior = {}
-            for name in [host] + other_surfaces + obstacle_names:
-                if ps.has_surface_mesh(name):
-                    h = ps.get_surface_mesh(name)
-                    prior[name] = (h.is_enabled(), h.get_transparency())
-            for name in (layer_cfg["curve_structure_name"] for layer_cfg in CURVED_LAYERS):
+            if ps.has_surface_mesh(surface):
+                ps.get_surface_mesh(surface).set_enabled(visible)
+            for name in (overlay, travel):
                 if ps.has_curve_network(name):
-                    prior[name] = (ps.get_curve_network(name).is_enabled(), None)
-            self._geodesic_isolation_prior = prior
-
-        for name in other_surfaces + obstacle_names:
-            if ps.has_surface_mesh(name):
-                ps.get_surface_mesh(name).set_enabled(False)
-        if ps.has_surface_mesh(host):
-            h = ps.get_surface_mesh(host)
-            h.set_enabled(True)
-            h.set_transparency(GEODESIC_HOST_TRANSPARENCY)
-
-        for name in other_curves:
-            if ps.has_curve_network(name):
-                ps.get_curve_network(name).set_enabled(False)
-
-
-    def _restore_geodesic_isolation(self):
-        """Put back the visibility _isolate_geodesic_layer() changed, from its
-        snapshot -- never to hardcoded defaults, which would clobber
-        transparency the user set themselves on a structure isolation only
-        ever enabled/disabled. Safe to call with nothing isolated."""
-        if self._geodesic_isolation_prior is None:
-            return
-        for name, (was_enabled, was_transparency) in self._geodesic_isolation_prior.items():
-            if ps.has_surface_mesh(name):
-                h = ps.get_surface_mesh(name)
-                h.set_enabled(was_enabled)
-                h.set_transparency(was_transparency)
-            elif ps.has_curve_network(name):
-                ps.get_curve_network(name).set_enabled(was_enabled)
-        self._geodesic_isolation_prior = None
+                    ps.get_curve_network(name).set_enabled(visible)
+            if ps.has_curve_network(base_curve):
+                # Overlay wins when present; the base curve is the fallback view.
+                ps.get_curve_network(base_curve).set_enabled(visible and not ps.has_curve_network(overlay))
 
 
     def build_toolpath_waypoints_world(self, gcode_points):
@@ -2092,6 +2108,110 @@ def geodesic_path_nodes(prev_row, target):
     while prev_row[path[-1]] != path[-1]:
         path.append(int(prev_row[path[-1]]))
     return path[::-1]
+
+
+def compute_vertex_normals(verts, faces):
+    """Area-weighted per-vertex normals, from scratch -- roadmap 6.3/6.4.
+    trimesh's own vertex_normals needs scipy.sparse and silently degrades to
+    poor normals without it (no scipy in this env, AGENTS.md), so accumulate
+    unnormalised face normals (larger faces weigh more) onto their vertices and
+    unitise. The sign is whatever the mesh winding gives; _orient_normals_outward
+    fixes it globally against Surface_Bot."""
+    vn = np.zeros(verts.shape, dtype=np.float64)
+    tri = verts[faces]
+    fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    for k in range(3):
+        np.add.at(vn, faces[:, k], fn)
+    return vn / np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-12)
+
+
+# --- Print ordering (roadmap 6.3) -----------------------------------------
+# The 35 disjoint pieces of a layer must each be printed once (a feed move
+# along the curve, cost fixed regardless of order), so ordering only changes
+# the sum of the travel hops between them -- a TSP variant where each "city" is
+# a piece with two possible entry ends. `cost` throughout is one layer's
+# (2N,2N) geodesic cost matrix; endpoints 2p and 2p+1 are the two ends of piece
+# p (_layer_endpoints_world convention), and a piece's other end is `e ^ 1`.
+
+def travel_cost(order, cost):
+    """Total inter-piece travel of a print `order` (the 6.3 objective). Only
+    the hops between consecutive pieces count -- from each piece's exit end
+    (entry ^ 1) to the next piece's entry end -- since the feed moves along the
+    curves are order-invariant."""
+    return sum(cost[entry_a ^ 1, entry_b]
+               for (_, entry_a), (_, entry_b) in zip(order, order[1:]))
+
+
+def greedy_piece_order(cost):
+    """Seed a print order by nearest-endpoint chaining. Returns a list of
+    (piece, entry_end) of length N; entry_end is the endpoint the nozzle
+    arrives at, so the piece is printed from entry_end to entry_end ^ 1.
+
+    From the current exit endpoint, hop to the nearest endpoint of any
+    unvisited piece. Ties -- plentiful, since abutting pieces snap to one
+    vertex at cost 0.0 (settled.md S1.31) -- break to the lowest endpoint
+    index via a stable argmin, so the order is reproducible. A zero-cost hop
+    to a *different* piece is real free travel and is taken; a piece leaves the
+    candidate set the moment it is entered, so a closed loop's
+    cost[2p, 2p+1] == 0 is never a candidate and never misread as travel."""
+    n_pieces = cost.shape[0] // 2
+    visited = np.zeros(n_pieces, dtype=bool)
+    visited[0] = True
+    order = [(0, 0)]      # start at piece 0, entered at end 0, exiting end 1
+    exit_ep = 1
+    for _ in range(n_pieces - 1):
+        cand = np.array([e for p in range(n_pieces) if not visited[p]
+                         for e in (2 * p, 2 * p + 1)])
+        entry = int(cand[np.argmin(cost[exit_ep, cand])])
+        visited[entry // 2] = True
+        order.append((entry // 2, entry))
+        exit_ep = entry ^ 1
+    return order
+
+
+def _sequence_colors(n):
+    """`n` RGB colours evenly spaced along the CURVED_ORDER_CMAP ramp -- roadmap
+    6.3's ordered-feed gradient. Piecewise-linear interpolation of the anchor
+    stops in numpy (no matplotlib), so colour `k` encodes position `k/(n-1)`
+    along the print order. `n == 1` returns the ramp's start."""
+    if n <= 1:
+        return CURVED_ORDER_CMAP[:1].copy()
+    stops = CURVED_ORDER_CMAP
+    t = np.linspace(0.0, 1.0, n) * (len(stops) - 1)
+    lo = np.clip(np.floor(t).astype(int), 0, len(stops) - 2)
+    frac = (t - lo)[:, None]
+    return stops[lo] * (1 - frac) + stops[lo + 1] * frac
+
+
+def _reverse_block(order, i, j):
+    """order with block [i..j] reversed and each of its pieces' entry/exit ends
+    flipped -- the oriented-piece form of a 2-opt segment reversal."""
+    return order[:i] + [(p, e ^ 1) for p, e in reversed(order[i:j + 1])] + order[j + 1:]
+
+
+def two_opt(cost, order):
+    """Improve a greedy order by 2-opt: repeatedly reverse the contiguous block
+    that reduces total travel, until a full sweep finds none. Reversing
+    order[i:j] flips each block piece's entry/exit end as well as the block
+    order. Because geodesic cost is symmetric a reversed internal hop keeps the
+    same two physical endpoints and is unchanged in cost, so only the two cut
+    edges actually move -- but with N=35 the tour is re-summed in full, trivial
+    and immune to delta-sign slips. Block length 1 is a single-piece end-swap,
+    included so a piece's entry end can be improved on its own. A good order,
+    not proven-optimal (Stage6_README 6.3)."""
+    order = list(order)
+    best = travel_cost(order, cost)
+    improved = True
+    while improved:
+        improved = False
+        n = len(order)
+        for i in range(n):
+            for j in range(i, n):
+                cand = _reverse_block(order, i, j)
+                c = travel_cost(cand, cost)
+                if c < best - 1e-9:
+                    order, best, improved = cand, c, True
+    return order
 
 
 def dh_transform(a, alpha, d, theta):

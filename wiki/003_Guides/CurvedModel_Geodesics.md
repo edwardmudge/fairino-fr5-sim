@@ -216,64 +216,23 @@ finds unreachable endpoints, the status line reports it within ~100 ms of
 the click rather than at the end of the run, and the run continues so the
 reachable majority still solves. On the shipped assets this never fires.
 
-## The sample geodesic, and why it isolates the view
+## The sample geodesic aid — removed
 
-The layer stack is **`Surface_Bot` → `Surface_RX_Offset` → `Surface_TX_Base`**,
-measured as median nearest-surface gaps **from `Surface_Bot`**: RX at
-**2.00 mm**, TX at **4.02 mm** (so ~2 mm between each consecutive pair), with
-TX outside RX at 100% of sampled points. `RX_Offset` is therefore **sealed
-inside** `TX_Base`, and an RX geodesic drawn on it is invisible from outside.
+6.2 shipped a `show_sample_geodesic()` verification aid that drew one geodesic
+(green) plus a comparison chord (magenta) on an isolated host surface. **It was
+removed 2026-07-21** (`settled.md` S1.31's "Removed" note): 6.3's print-order
+overlay and `apply_live_layer_visibility()` supersede both its purposes — seeing
+a geodesic on the surface, and viewing one layer at a time. Its backend methods
+(`show_sample_geodesic`, `_pick_sample_pair`, `_isolate_geodesic_layer`,
+`_restore_geodesic_isolation`) and sample-only `GEODESIC_*` colour/radius/
+transparency constants are gone.
 
-`show_sample_geodesic(layer, mode)` therefore isolates before drawing: it
-hides the other layer's surface and curve network plus `Surface_Bot`, and
-ghosts the host surface to `GEODESIC_HOST_TRANSPARENCY`.
-
-Prior state — **both `is_enabled()` and transparency** — is snapshotted into
-`_geodesic_isolation_prior`, and `_restore_geodesic_isolation()` puts it back
-from that snapshot rather than from hardcoded defaults, so a transparency you
-set yourself survives. Restore runs from `_abort_geodesic_precompute()`, i.e.
-on **Cancel Geodesics** or on reloading the curved model — there is no Clear
-button (6.6). Isolation is re-entrant: a second sample won't record the
-already-isolated state as if it were yours, though it also won't notice
-visibility you changed *between* two samples.
-
-**Verified invariant:** selecting RX puts every path node exactly on
-`Surface_RX_Offset` — max distance **0.0000 mm**, versus 2.08 mm to the TX
-surface — and vice versa. Guaranteed by construction (each layer has its own
-graph, snapped endpoints, cost matrix and predecessor rows), but worth
-checking after any change to the layer indexing.
-
-**Pair selection** (`_pick_sample_pair()`) has to thread a needle:
-
-| Candidate default | Result | Verdict |
-|---|---|---|
-| Farthest pair | 317 mm, wraps the dome | 6.3 will never emit this |
-| Shortest inter-piece hop | 2.95 mm, 3 nodes, ratio **1.000** | A straight line — proves nothing |
-| **Most-curved realistic hop** | **26.1 mm, ratio 1.110** | Representative *and* demonstrative — the default |
-
-A short hop cannot demonstrate surface-hugging, because a curved surface is
-locally flat at that scale — so "representative" and "demonstrative" pull
-against each other. `mode="representative"` (default) resolves it by taking
-the most curved of the hops a greedy nearest-endpoint chain would actually
-consider. `mode="most_curved"` takes the highest-ratio pair at any distance
-(RX 48→6, 250 mm, ratio 1.724) and is the only mode that draws the
-comparison chord — at representative scale the chord overlaps the geodesic
-and adds nothing. The chord is removed on every call before the mode is
-consulted, so switching modes can't strand a previous pair's chord beside an
-unrelated path.
-
-**Both defaults are deliberately chosen outliers.** The median
-geodesic/chord ratio is **1.08** across all ~4,744 valid pairs and **~1.003**
-across realistic hops — so a typical travel move is very nearly straight, and
-neither sample should be read as representative of curvature. They're picked
-to be legible, not typical.
-
-Both modes must exclude same-piece pairs **and** zero-cost pairs (there are
-16 RX / 18 TX between different pieces); an unguarded `argmin` returns one of
-those and reconstructs a degenerate single-node path.
-
-The status line reports the **geodesic/chord ratio**, not just the length —
-it is what makes the claim checkable when the picture is ambiguous.
+The measurement that motivated its isolation still matters and drives 6.3's
+`apply_live_layer_visibility()`: the layer stack is
+**`Surface_Bot` → `Surface_RX_Offset` → `Surface_TX_Base`** (median gaps from
+`Surface_Bot`: RX **2.00 mm**, TX **4.02 mm**, TX outside RX at 100% of sampled
+points), so `RX_Offset` is **sealed inside** `TX_Base` and RX geometry is
+invisible with TX shown — which is why one layer must be isolated at a time.
 
 ## Two implementation choices that look wrong without the measurement
 
@@ -308,22 +267,20 @@ Clear-button territory.
 
 ## Current scope and limitations
 
-- **No print ordering yet** (6.3) — the cost matrices exist, nothing
-  consumes them.
-- **No travel-move hover offset yet** (6.3) — the geodesic is the *route*;
-  the nozzle must eventually follow it offset outward along the surface
-  normal by `CURVED_TRAVEL_HOVER_MM`, or it scrapes the mockup.
+- **Print ordering is done** (6.3, `settled.md` S1.35) — `build_print_order()`
+  consumes these cost matrices and predecessor rows: greedy + 2-opt per layer,
+  emitting hover travel moves.
+- **Travel-move hover offset is done** (6.3) — the nozzle follows each geodesic
+  offset outward by `CURVED_TRAVEL_HOVER_MM` along the from-scratch surface
+  normals (`compute_vertex_normals`), so it clears the mockup.
 - **No disk cache** — the run takes ~8.4–9.1 s and is recomputed per session.
   Roadmap 6.5 already schedules per-layer cache files; that is the natural
   place to add one, keyed on a surface hash rather than the plate pose,
   since costs are pose-invariant.
-- **Minimal GUI only** — Build/Pause, Cancel, Show Sample Geodesic, plus an
-  RX/TX radio pair and a "Most-curved pair" checkbox that select *which
-  sample is drawn*. There is **no Clear** and no selector gating which layer
-  is loaded/precomputed/played — that is 6.6.
-- **`show_sample_geodesic()` is a verification aid**, not a feature. It
-  **isolates its host surface** — see below; without that it renders nothing
-  visible.
+- **Minimal GUI only** — Build/Pause, Cancel, plus an RX/TX radio that isolates
+  the live layer (6.3, `apply_live_layer_visibility()`) and a Build Print Order
+  button (6.3). There is **no Clear** and no selector gating which layer is
+  loaded/precomputed/played — that is 6.6.
 
 ## How to tune it
 
@@ -332,9 +289,6 @@ Generic engine tuning, `geometry_backend.py`:
 | Constant | Effect |
 |---|---|
 | `GEODESIC_CHUNK_SOURCES` | Whole Dijkstra sources solved per frame. 1 gives ~6-12 fps while running and ~8.4 s total. |
-| `GEODESIC_CURVE_COLOR` / `GEODESIC_CHORD_COLOR` | Sample-geodesic green and comparison-chord magenta. |
-| `GEODESIC_CURVE_RADIUS_MM` | Sample-geodesic thickness — 3× `CURVE_RADIUS_MM` so it reads over the 70 toolpath curves. |
-| `GEODESIC_HOST_TRANSPARENCY` | How far the host surface is ghosted while a sample is shown. Lower = more see-through. |
 
 Which layers exist and their display names come from `CURVED_LAYERS` in
 `examples/curved_surface_printing/study_config.py` (settled.md S1.33) — the
@@ -346,12 +300,13 @@ engine reads `VisContent.curved_layer_names` (populated by
 - `geometry_backend.py`: `build_surface_graph()`, `nearest_vertex_index()`,
   `dijkstra_surface()`, `geodesic_path_nodes()` (module-level, per
   `settled.md` S1.1); `VisContent._layer_endpoints_world()`,
-  `run_/pause_/cancel_/_abort_/step_geodesic_precompute()`,
-  `show_sample_geodesic()`, `_pick_sample_pair()`,
-  `_isolate_geodesic_layer()`, `_restore_geodesic_isolation()`; the
-  `GEODESIC_*` constants; the retention block at the end of
+  `run_/pause_/cancel_/_abort_/step_geodesic_precompute()`; the
+  `GEODESIC_CHUNK_SOURCES` constant; the retention block at the end of
   `load_curved_model()` and the invalidation hook in `load_build_plate()`.
-  All generic — no RX/TX-specific code (settled.md S1.33).
+  All generic — no RX/TX-specific code (settled.md S1.33). (The
+  `show_sample_geodesic` sample aid and its isolation helpers were removed —
+  S1.31's "Removed 2026-07-21" note; 6.3's overlay + `apply_live_layer_visibility`
+  replace them.)
 - `examples/curved_surface_printing/study_config.py`: `CURVED_LAYERS`,
   `CURVED_OBSTACLE_*` — what the engine above iterates over.
 - `gui_panel.py`: the `step_geodesic_precompute()` pump line in `render()`,
