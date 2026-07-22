@@ -202,14 +202,16 @@ class UI_Menu:
             if psim.TreeNode("Toolpath Settings"):
                 _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 1.0, 100.0)
 
-                # Ground-clearance toggle (roadmap 6.6): reject IK branches
-                # dipping below world z=0. Applies to both the planar and
-                # curved precompute. Disabled mid-solve so a single run can't
-                # be solved half under each rule. Uncheck for a low-plate /
-                # curved-mockup setup where sub-z=0 poses are physically fine.
+                # Posed-plate clearance toggle (roadmap 6.8): the arm links are
+                # ALWAYS blocked from passing through the build plate; this only
+                # lets the nozzle TIP dip below it. Applies to both the planar
+                # and curved precompute. Disabled mid-solve so a single run can't
+                # be solved half under each rule. If the arm can't clear the
+                # plate, move the plate lower (Build Plate controls), don't
+                # disable the check.
                 psim.BeginDisabled(self.content.precompute_running)
-                _, self.content.reject_below_ground = psim.Checkbox(
-                    "Reject poses below ground (z<0)", self.content.reject_below_ground)
+                _, self.content.allow_tcp_through_plate = psim.Checkbox(
+                    "Allow TCP through build plate", self.content.allow_tcp_through_plate)
                 psim.EndDisabled()
 
                 psim.Spacing()

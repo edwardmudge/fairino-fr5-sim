@@ -95,74 +95,75 @@ every real printing pose. The nozzle gets `CURVED_TIP_CLEARANCE_TOLERANCE_MM`
 worst signed distance is ~0 and sometimes slightly negative after mesh
 discretisation; the tolerance is *added* to the signed distance (subtracting
 would demand the tip float outward and reject every feed waypoint). Like the
-ground-clearance check it extends, it tries the cheap 8-corner bounding-box
+posed-plate check it layers with, it tries the cheap 8-corner bounding-box
 bound first and only escalates to the exact per-vertex check when that's
 inconclusive.
 
-**World `z=0` is a toggle now — off is the sensible default for curved.** The
-curved mockup sits above the plate in a frame where z=0 is not the physical
-floor, so valid printing poses routinely put arm links below z=0 (measured
-z_min ~-60 to -300mm on the only joint-limit-valid branches of a real
-waypoint) — applying the z=0 gate rejects every such pose (curved RX aborts at
-waypoint 0). 6.5 shipped with z=0 unconditionally off for curved; **6.6
-(`settled.md` S1.38) made it a user checkbox, `reject_below_ground`**, that
-gates the world-z=0 arm-clearance check on *both* paths (default ON). With it
-**ON**, the curved path applies z=0 **and** the tangent-plane nozzle check —
-so you uncheck it for curved work at the default plate pose, or when the plate
-is placed low enough that sub-z=0 arm poses are physically fine. With it
-**OFF**, curved does tangent-plane only, exactly the behaviour described in
-this section's clearance design. The planar path's historical always-reject is
-the toggle's ON default. Because the toggle changes which IK branch is
-accepted, it is folded into the precompute cache key (both meta builders,
-`PRECOMPUTE_CACHE_VERSION` 2→3). `_branch_clears_ground(angles, plane)` now
-layers the two checks; `plane=None` is still the planar case.
+**The posed build-plate plane is now the physical clearance gate.** The plane
+is derived live from `T_user_frame`: its point is the top face, lifted by
+`PLATE_THICKNESS_MM`, and its normal is the plate's local +Z. It is modelled as
+an infinite plane, so the plate must sit below the whole arm, including the
+base and lower links. This replaces the old world-z=0 proxy and the removed
+`reject_below_ground` toggle.
+
+The six arm-link meshes are always rejected below the posed plate. The nozzle
+is also rejected by default; the GUI's **Allow TCP through build plate** toggle
+(`allow_tcp_through_plate`, default OFF) is the only exception, and it never
+permits an arm link through the plate. On curved runs, this plate check is
+layered with the existing nozzle-only tangent-plane check. The toggle changes
+which IK branch is accepted, so it is included in both precompute cache keys;
+`PRECOMPUTE_CACHE_VERSION` is 4. `_branch_clears_ground(angles, plane)` still
+uses `plane=None` for planar paths and a waypoint tangent plane for curved paths.
+
+**RX setup requires a decoupled load order.** `load_curved_model()` places the
+mockup on the current plate. Move the plate to `[-570, -300, 0]` at working
+height, load the curved model, then load the saved pose `[-570, -300, -200]`
+without reloading the model. Rebuild geodesics, print order, and orientation
+frames, enable `allow_tcp_through_plate`, and run RX precompute. Loading the
+low plate before the model lowers the mockup with it and is invalid. This
+adopted X+30 pose solves all 3,175 RX waypoints.
 
 ## Known limitation
 
 **Full arm-vs-mockup collision beyond the nozzle is not checked.** The
 supporting-hyperplane argument only bounds the nozzle tip; nothing here stops
-an arm link from intersecting the mockup elsewhere. This is the same
+an arm link from intersecting the mockup elsewhere. The posed-plate check
+handles the plate as an infinite plane, not the finite curved obstacle. This is the same
 simplification class as the old planar z=0 proxy (which also never checked
-the full arm against the plate). Closing it would need the rejected
+the full arm against the plate). Closing the mockup gap would need the rejected
 obstacle-mesh (or per-triangle) check for the affected surface — left as a
 future improvement, not attempted here because of the same performance
 concern that ruled it out above.
 
 ## Reachability is a placement property, not a code concern
 
-On the shipped assets at the default plate pose, 7 of 3175 RX waypoints and 6
-of 2688 TX are geometrically reachable but have no joint-limit-valid IK
-branch (verified solving each in isolation), so a full curved precompute
-aborts at the first one (no partial motion, `settled.md` S1.12's contract).
-This is expected: the build plate pose is a free variable
-(`load_build_plate(rpy_deg=...)`), meant to be varied until a fully reachable
-placement is found. Finding that pose is a setup step, out of this stage's
-`geometry_backend.py`-only scope.
+At the adopted X+30 pose, the curved run solves all 3,175 RX waypoints with
+TCP-through enabled. The unshifted placement stopped at the 1,809-waypoint
+joint-limit boundary; the X shift moves the path clear of that reachability
+failure while retaining the same low plate height.
 
 ## Measured properties
 
-Verified headless, 2026-07-21.
+Verified headless, 2026-07-22.
 
 | Check | Result |
 |---|---|
-| Planar regression | All 181,375 G-code waypoints solve; v2 cache written and reloaded ("Loaded ... from cache"); `plane=None` clearance path byte-for-byte identical to the old z=0 check |
-| RX reachable prefix | Full 1809-waypoint reachable prefix solves (6.4 orientation + nozzle clearance), before the expected abort at the first dead spot |
+| Planar regression | The planar path uses the same posed-plate clearance gate; stale v3 caches miss under version 4 and are rebuilt |
+| RX precompute | All 3,175 RX waypoints solve with the adopted X+30 placement and TCP-through enabled |
 | FK round-trip on solved poses | Target position matches to 6.7e-13mm; `R_target[i]` matches to 3e-15 — the per-waypoint orientation threads through IK exactly |
 | Nozzle clearance | A solved branch clears its own tangent plane; shifting that plane outward past the tip by more than the tolerance correctly rejects it |
-| Per-layer cache plumbing | `curved_rx.precompute.npz` / `curved_tx.precompute.npz` written independently and each reload via a fresh `run_curved_toolpath_ik_precompute` call |
+| Per-layer cache plumbing | `curved_rx.precompute.npz` / `curved_tx.precompute.npz` remain independent; both cache metas include `allow_tcp_through_plate` at version 4 |
 
-**Remaining:** an end-to-end full-curved solve + cache, which needs a plate
-pose with no unreachable waypoints (the placement step above), and the
-interactive GUI eyeball (roadmap 6.6).
+**Remaining:** the RX path still stops at its genuine joint-limit boundary;
+the interactive GUI checkbox/disable-state eyeball remains a physical-window
+check.
 
 ## Current scope and limitations
 
-- **`geometry_backend.py` only** — no `gui_panel.py`/`main.py` change; no
-  curved playback yet (roadmap 6.6).
-- **Curved-specific bead-size constants are deferred to 6.6**, where curved
-  playback will actually call the bead builder — nothing renders a curved
-  bead until then, and shipping the constant unused would be half-finished
-  code (`AGENTS.md`).
+- **Shared GUI wiring is now landed in 6.6**, including the posed-plate toggle
+  added in 6.8; `main.py` remains wiring only.
+- **Curved playback is implemented** through the shared source-aware playback
+  controls; the curved bead-size constants are active in that path.
 - **The per-pass obstacle distinction is moot** under the tangent-plane
   design — `study_config.py` needed no new per-pass obstacle field.
 
@@ -180,8 +181,9 @@ above).
   `run_curved_toolpath_ik_precompute(layer, ...)`,
   `build_curved_toolpath_waypoints_world()`,
   `_orientation_frames_for_points()` (shared with 6.4),
-  `_nozzle_clears_plane()`, `_branch_clears_ground()` (now takes an optional
-  `plane` arg), `curved_precompute_cache_path()`, `_curved_toolpath_cache_meta()`;
+  `_nozzle_clears_plane()`, `_plate_plane()`, `_meshes_clear_plane()`,
+  `_branch_clears_ground()` (now takes an optional `plane` arg),
+  `curved_precompute_cache_path()`, `_curved_toolpath_cache_meta()`;
   `CURVED_TIP_CLEARANCE_TOLERANCE_MM` constant; `precompute_cache_path`/
   `precompute_tip_tolerance_mm` state.
 - `wiki/002_Architecture/settled.md` **S1.37** — the full decision record;

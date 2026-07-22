@@ -144,7 +144,7 @@ PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # settled.md S1.13's verification), so this is roughly a 12ms slice per frame.
 
 GCODE_PRECOMPUTE_CACHE = os.path.join(GCODE_DIR, "model.precompute.npz")  # roadmap 5.10, settled.md S1.21
-PRECOMPUTE_CACHE_VERSION = 3  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6)
+PRECOMPUTE_CACHE_VERSION = 4  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6; 4: allow_tcp_through_plate in key + posed-plate clearance, roadmap 6.8)
 
 
 def curved_precompute_cache_path(layer_name):
@@ -190,12 +190,12 @@ class VisContent:
         self.toolpath_source = -1  # -1 = planar G-code; 0..len(CURVED_LAYERS)-1 = that curved layer.
                                     # Single source of truth for what the shared Run/Pause/Cancel/Reset
                                     # precompute+playback controls currently target -- roadmap 6.6.
-        self.reject_below_ground = True  # Toggle: reject IK branches whose moving geometry dips
-                                         # below world z=0. Default ON (planar's historical behaviour);
-                                         # applies to BOTH paths -- roadmap 6.6. Unchecked for a
-                                         # low-plate/mockup setup where sub-z=0 poses are physically
-                                         # fine. Folded into the precompute cache key (it changes which
-                                         # branch is accepted, so the solved path depends on it).
+        self.allow_tcp_through_plate = False  # Toggle: let the nozzle tip (mesh 6) dip below the
+                                         # posed build-plate plane. Default OFF (nozzle also blocked,
+                                         # the safe default). The arm links (meshes 0-5) are ALWAYS
+                                         # blocked below the plate regardless -- roadmap 6.8. Folded
+                                         # into the precompute cache key (it changes which branch is
+                                         # accepted, so the solved path depends on it).
 
         # Progressive-reveal playback state -- playback_index persists across
         # pause, only reset_toolpath_playback() zeroes it.
@@ -1707,12 +1707,12 @@ class VisContent:
         For each waypoint, calls solve_ik_tcp_matrix() ranked against the
         previous waypoint's chosen solution (or reference_joint_angles /
         self.current_joint_angles for the first waypoint), then walks the
-        ranked branches and takes the first one that clears the ground
+        ranked branches and takes the first one that clears the posed build plate
         (_branch_clears_ground -- roadmap 5.5, settled.md S1.13), not
         blindly the top-ranked branch.
 
         Aborts the entire solve at the first waypoint with no valid branch,
-        or where every valid branch dips below the ground plane -- no
+        or where every valid branch hits the posed build plate -- no
         partial motion, matching the abort contract roadmap 5.6's chunked
         precompute will also need (settled.md S1.12).
 
@@ -1722,8 +1722,8 @@ class VisContent:
           status_message: "Solved N waypoint(s)" on success; on failure, the
             failing waypoint's index plus either solve_ik_tcp_matrix's own
             status string verbatim ("Unreachable: ..." / "Reachable but
-            outside joint limits ...") or the ground-clearance failure
-            message when every valid branch dips below z=0.
+            outside joint limits ...") or the plate-clearance failure
+            message when every valid branch hits the posed plate.
         """
         if reference_joint_angles is None:
             reference_joint_angles = self.current_joint_angles
@@ -1738,7 +1738,7 @@ class VisContent:
 
             clear = next((angles for angles, *_ in solutions if self._branch_clears_ground(angles)), None)
             if clear is None:
-                return [], f"Waypoint {i}/{len(waypoints)}: all {len(solutions)} valid branch(es) dip below the ground plane (z<0)"
+                return [], f"Waypoint {i}/{len(waypoints)}: all {len(solutions)} valid branch(es) hit the posed build plate"
 
             ref = clear
             joint_path.append(ref)
@@ -1763,9 +1763,9 @@ class VisContent:
             "version": PRECOMPUTE_CACHE_VERSION,
             "gcode_sha256": gcode_sha256,
             "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
-            # The ground toggle changes which IK branch is accepted, so the
-            # solved joint path depends on it -- roadmap 6.6.
-            "reject_below_ground": self.reject_below_ground,
+            # The TCP-through-plate toggle changes which IK branch is accepted,
+            # so the solved joint path depends on it -- roadmap 6.8.
+            "allow_tcp_through_plate": self.allow_tcp_through_plate,
         }
 
 
@@ -1789,9 +1789,9 @@ class VisContent:
             "layer_name": self.curved_layer_names[layer],
             "curve_sha256": h.hexdigest(),
             "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
-            # The ground toggle changes which IK branch is accepted, so the
-            # solved joint path depends on it -- roadmap 6.6.
-            "reject_below_ground": self.reject_below_ground,
+            # The TCP-through-plate toggle changes which IK branch is accepted,
+            # so the solved joint path depends on it -- roadmap 6.8.
+            "allow_tcp_through_plate": self.allow_tcp_through_plate,
         }
 
 
@@ -1862,9 +1862,10 @@ class VisContent:
         shared seam behind run_toolpath_ik_precompute (planar) and
         run_curved_toolpath_ik_precompute (curved), roadmap 6.5. R_target_array
         is (N,3,3), one target orientation per waypoint (settled.md S1.12's
-        constant becomes a per-waypoint array). tip_tolerance_mm None keeps the
-        z=0 clearance check; a value switches step_ to the per-waypoint tangent-
-        plane check. cache_path is where a completed solve is written."""
+        constant becomes a per-waypoint array). Every run checks the posed
+        build plate; a non-None tip_tolerance_mm additionally enables the
+        curved per-waypoint tangent-plane check. cache_path is where a completed
+        solve is written."""
         self.precompute_waypoints = waypoints
         self.precompute_R_target = R_target_array
         self.precompute_joint_limits = joint_limits
@@ -2067,7 +2068,7 @@ class VisContent:
     def step_toolpath_ik_precompute(self):
         """Advance the in-progress precompute by up to PRECOMPUTE_CHUNK_SIZE
         waypoints -- call every frame from render(). No-ops unless
-        precompute_running. Uses the same per-waypoint solve + ground-
+        precompute_running. Uses the same per-waypoint solve + posed-plate
         clearance logic as solve_toolpath_ik, and aborts the whole
         precompute (no partial motion) at the first waypoint with no
         valid/clearing branch."""
@@ -2087,8 +2088,8 @@ class VisContent:
                 self.precompute_status = status_msg
                 return
 
-            # Planar run (tip_tolerance None): the original z=0 clearance check.
-            # Curved run: this waypoint's own outward tangent plane (point = the
+            # Every run checks the posed build plate. Curved runs additionally
+            # check this waypoint's own outward tangent plane (point = the
             # waypoint, normal = R_i's Z column), the supporting-hyperplane
             # clearance of settled.md S1.37.
             plane = (None if self.precompute_tip_tolerance_mm is None
@@ -2096,11 +2097,9 @@ class VisContent:
             clear = next((angles for angles, *_ in solutions
                           if self._branch_clears_ground(angles, plane)), None)
             if clear is None:
-                # Name the checks actually active (roadmap 6.6): the z=0 ground
-                # check is toggle-gated, the tangent plane is curved-only.
-                checks = []
-                if self.reject_below_ground:
-                    checks.append("the ground plane (z<0)")
+                # Name the checks actually active (roadmap 6.8): the posed-plate
+                # check always applies, the tangent plane is curved-only.
+                checks = ["the build plate" + ("" if self.allow_tcp_through_plate else " (arm + nozzle)")]
                 if plane is not None:
                     checks.append("their surface tangent plane")
                 status_msg = (
@@ -2420,7 +2419,7 @@ class VisContent:
         # Zero-pose bbox corners for the moving-geometry set (Robot1..6 + nozzle,
         # rest_verts[0:7] -- excludes the TCP point/frame appended below, which
         # are visualization markers, not solid robot geometry). See
-        # moving_geometry_bbox_min_z (roadmap Stage5_README.md 5.5).
+        # _meshes_clear_plane (roadmap 6.8).
         self.moving_geometry_rest_bbox_corners = [_bbox_corners(v) for v in self.rest_verts]
 
         self.tcp_local = np.loadtxt(os.path.join(PRINTER_HEAD_DIR, TCP_FILE))  # Zero-pose world frame [x, y, z]
@@ -2495,37 +2494,31 @@ class VisContent:
         return [T_current[min(i, 5)] @ self.T_zero_inv[min(i, 5)] for i in range(7)]
 
 
-    def moving_geometry_bbox_min_z(self, joint_angles_deg):
-        """Cheap ground-clearance pre-check (roadmap Stage5_README.md 5.5):
-        transform each moving mesh's cached zero-pose bounding-box corners (8
-        per mesh, not the full vertex set) by its Delta transform and return
-        the minimum world z reached, mm. This is a guaranteed lower bound on
-        moving_geometry_min_z's result -- a rigid transform of an AABB's 8
-        corners always produces a convex hull enclosing the mesh's true
-        transformed extent, and z is linear so its minimum is attained at a
-        corner -- so a non-negative result here proves the branch clears
-        without needing the exact check."""
-        deltas = self._moving_geometry_deltas(joint_angles_deg)
-        min_z = np.inf
-        for delta, corners in zip(deltas, self.moving_geometry_rest_bbox_corners):
-            homo = np.hstack([corners, np.ones((len(corners), 1))])
-            world = (delta @ homo.T).T[:, :3]
-            min_z = min(min_z, world[:, 2].min())
-        return min_z
+    def _meshes_clear_plane(self, joint_angles_deg, indices, point, normal, tol):
+        """True if every moving mesh in `indices` stays outward of the plane
+        through `point` with unit `normal`, allowing `tol` mm of inward slack
+        (roadmap 6.8). A vertex's signed distance is (world - point) @ normal,
+        positive on the outward (+normal) side; a mesh clears iff its worst
+        (min) signed distance is >= -tol. `indices` are moving-geometry indices
+        (0..5 = Robot1..6 arm links, 6 = nozzle), matching _moving_geometry_deltas.
 
-
-    def moving_geometry_min_z(self, joint_angles_deg):
-        """Exact ground-clearance check (roadmap Stage5_README.md 5.5):
-        transform every vertex of every moving mesh and return the true
-        minimum world z reached, mm. Slower than moving_geometry_bbox_min_z --
-        only called when the bbox check doesn't already prove clearance."""
+        Same corners-first / exact-vertices-fallback structure as
+        _nozzle_clears_plane: signed distance is linear, so its min over the
+        rigid-transformed 8 AABB corners is a lower bound on its min over the
+        true mesh -- a non-negative corner result proves clearance without
+        touching the full vertex set. Each mesh is tested independently and a
+        single penetrating mesh fails the whole set."""
         deltas = self._moving_geometry_deltas(joint_angles_deg)
-        min_z = np.inf
-        for delta, verts in zip(deltas, self.rest_verts[:7]):
-            homo = np.hstack([verts, np.ones((len(verts), 1))])
-            world = (delta @ homo.T).T[:, :3]
-            min_z = min(min_z, world[:, 2].min())
-        return min_z
+        for i in indices:
+            delta = deltas[i]
+            for verts in (self.moving_geometry_rest_bbox_corners[i], self.rest_verts[i]):
+                homo = np.hstack([verts, np.ones((len(verts), 1))])
+                world = (delta @ homo.T).T[:, :3]
+                if ((world - point) @ normal).min() + tol >= 0:
+                    break  # this mesh clears (proven by corners, or by exact verts)
+            else:
+                return False  # neither bound cleared -> this mesh penetrates
+        return True
 
 
     def _nozzle_clears_plane(self, joint_angles_deg, point, normal, tip_tolerance_mm):
@@ -2543,8 +2536,9 @@ class VisContent:
         span from its base up to the contact point, so its lower links
         legitimately sit far *inward* of a local tangent plane; testing them
         would reject every real printing pose. The nozzle is the only part
-        required to stay on the surface it prints. (Arm-vs-table clearance is
-        handled separately by the retained world z=0 check.)
+        required to stay on the surface it prints. (Arm-vs-plate clearance is
+        handled separately by the posed-plate check in
+        _branch_clears_ground().)
 
         Cheap 8-corner bbox bound first, exact vertices only if inconclusive:
         signed distance is linear, so its min over the rigid-transformed AABB
@@ -2559,34 +2553,49 @@ class VisContent:
         return False
 
 
+    def _plate_plane(self):
+        """The posed build-plate plane (roadmap 6.8), derived live from
+        self.T_user_frame so it tracks wherever the Build Plate controls put
+        the plate. Returns (point, normal): point on the plate's top/print face
+        (T_user_frame origin lifted PLATE_THICKNESS_MM along local +Z, the same
+        offset load_build_plate applies to the plate mesh), normal = plate local
+        +Z (up). A vertex clears iff (world - point) @ normal >= -tol."""
+        point = self.T_user_frame[:3, 3] + PLATE_THICKNESS_MM * self.T_user_frame[:3, 2]
+        normal = self.T_user_frame[:3, 2]
+        return point, normal
+
+
     def _branch_clears_ground(self, joint_angles_deg, plane=None):
         """True if this branch's moving geometry stays clear of its obstacle(s).
 
         Two independent checks, layered:
 
-        1. **World z=0 ground check**, gated by the reject_below_ground toggle
-           (roadmap 6.6). When enabled it applies to BOTH the planar and the
-           curved path: cheap transformed-bbox bound first -- proven clear if
-           non-negative -- escalating to the exact per-vertex min only when the
-           bbox result is negative (inconclusive: a rotated AABB corner can dip
-           below ground even when the real mesh does not, settled.md S1.13).
-           Default ON = planar's historical always-reject behaviour; the user
-           unchecks it for a low-plate/mockup setup where sub-z=0 arm poses are
-           physically fine (the curved mockup sits above the plate in a frame
-           where z=0 is not the physical floor, S1.37).
+        1. **Posed build-plate check** (always, both paths -- roadmap 6.8): the
+           plate is modelled as the infinite plane through its top/print face
+           (_plate_plane, from self.T_user_frame). The 6 arm-link meshes (0-5)
+           may NEVER dip below it (zero tolerance). The nozzle (mesh 6) may,
+           only when self.allow_tcp_through_plate is set. Because the plane is
+           infinite the plate must sit below the whole arm -- if the arm reaches
+           below the plate the fix is to move the plate lower (Build Plate
+           controls), not to disable the check. Replaces the old world-z=0 proxy
+           (settled.md S1.13/S1.38); each mesh set uses the same cheap-corners /
+           exact-verts bound as before (_meshes_clear_plane).
 
         2. **Tangent-plane nozzle check** (curved path only, plane not None):
            the nozzle tip must stay outward of that waypoint's own surface
            tangent plane, within tip_tolerance_mm of inward slack (roadmap 6.5,
            settled.md S1.37). Only the nozzle is checked (see
-           _nozzle_clears_plane); full arm-vs-mockup collision would need a real
-           obstacle-mesh check, the expensive path 6.5 deliberately avoided.
+           _nozzle_clears_plane); a separate obstacle (the mockup shell), layered
+           on top of the plate check.
 
-        With the toggle OFF and no plane (planar), nothing is rejected."""
-        if self.reject_below_ground:
-            if self.moving_geometry_bbox_min_z(joint_angles_deg) < 0:
-                if self.moving_geometry_min_z(joint_angles_deg) < 0:
-                    return False
+        The plate check applies unconditionally; the tangent-plane check only
+        when a plane is supplied (curved)."""
+        point, normal = self._plate_plane()
+        if not self._meshes_clear_plane(joint_angles_deg, range(6), point, normal, 0.0):
+            return False
+        if not self.allow_tcp_through_plate:
+            if not self._meshes_clear_plane(joint_angles_deg, (6,), point, normal, 0.0):
+                return False
 
         if plane is not None:
             point, normal, tip_tolerance_mm = plane
@@ -2654,7 +2663,7 @@ class VisContent:
 def _bbox_corners(verts):
     """The 8 corners of verts' axis-aligned bounding box, in whatever frame
     verts is already in. Used to cheaply bound a mesh's rotated extent
-    without transforming every vertex -- see moving_geometry_bbox_min_z."""
+    without transforming every vertex -- see _meshes_clear_plane."""
     lo, hi = verts.min(axis=0), verts.max(axis=0)
     xs, ys, zs = np.meshgrid([lo[0], hi[0]], [lo[1], hi[1]], [lo[2], hi[2]], indexing='ij')
     return np.stack([xs.ravel(), ys.ravel(), zs.ravel()], axis=1)

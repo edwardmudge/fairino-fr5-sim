@@ -2386,3 +2386,45 @@ existing Run/Reset backend calls (`gui_panel.py` untouched).
 **Verified on:** 2026-07-22 -- headless import/flow check only. The observable
 result (guides vanish on Run, stay hidden through Pause, return on Reset; beads
 still grow; planar unaffected) needs the Polyscope window on a physical GPU.
+
+## S1.40 Posed-plate collision replacing the world-z=0 proxy (roadmap 6.8) -- arm always blocked, TCP optional; cache 3->4
+
+**Roadmap 6.8. `geometry_backend.py` + `gui_panel.py`.** Replaces the crude
+world-`z=0` clearance proxy (`reject_below_ground`, S1.13/S1.38) with a check
+against the **actual posed build plate**. The plate is modelled as the infinite
+plane through its top/print face, derived live from `self.T_user_frame`
+(`_plate_plane()`: point = origin lifted `PLATE_THICKNESS_MM` along local +Z,
+normal = plate local +Z), so it tracks wherever the Build Plate controls put the
+plate.
+
+**The rule:** the 6 arm-link meshes (0-5) may **never** dip below the plate (zero
+tolerance); the nozzle (mesh 6) may, **only** when the new `allow_tcp_through_plate`
+toggle is set (default **False** = nozzle also blocked, the safe default). A new
+`_meshes_clear_plane(joint_angles, indices, point, normal, tol)` generalizes the
+old `_nozzle_clears_plane` corners-first/exact-verts signed-distance test to an
+arbitrary moving-geometry index set; `_branch_clears_ground` calls it for `range(6)`
+(always) and `(6,)` (unless the toggle). The curved tangent-plane nozzle check
+(S1.37) is unchanged and still layers on top when a `plane` is supplied. The two
+world-`z=0` min-z helpers (`moving_geometry_bbox_min_z`/`moving_geometry_min_z`) are
+deleted -- the generalized plane path supersedes them. Cache: `reject_below_ground`
+-> `allow_tcp_through_plate` in both `_toolpath_cache_meta`/`_curved_toolpath_cache_meta`;
+`PRECOMPUTE_CACHE_VERSION` 3 -> 4 (the toggle changes which IK branch is accepted).
+GUI: the "Reject poses below ground (z<0)" checkbox becomes "Allow TCP through build
+plate", bound to `allow_tcp_through_plate`, same disabled-mid-solve node.
+
+**Consequence (from the spec).** Because the plane is infinite and the arm links
+are always blocked, a precompute at the **default** plate pose (plate top ~z=0.75)
+rejects early -- the arm reaches below the plate. The fix is to reposition the plate
+lower via the Build Plate controls / saved position, not to disable the check. The
+working plate poses and the operating procedure for the curved print live in the
+supervisor's print-setup docs and the RX-setup steps in
+`tutorials/Stage6_README.md` (6.8), not here; `assets/buildPlate/saved_position.json`
+holds the adopted plate pose.
+
+**Verified on:** 2026-07-22 -- headless code logic (all pose-independent): an arm
+pose below the plate is rejected regardless of the toggle; a nozzle-only dip is
+rejected with the toggle OFF and accepted with it ON; the tangent-plane check still
+rejects a nozzle inward of its own plane while the plate check passes; both cache
+metas carry `allow_tcp_through_plate` (not `reject_below_ground`) at version 4.
+**Remaining:** the interactive GUI eyeball (the "Allow TCP through build plate"
+checkbox driving the toggle and greying out mid-solve) needs the Polyscope window.
