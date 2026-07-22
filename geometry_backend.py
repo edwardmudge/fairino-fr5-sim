@@ -200,6 +200,9 @@ class VisContent:
         # Progressive-reveal playback state -- playback_index persists across
         # pause, only reset_toolpath_playback() zeroes it.
         self.playback_running = False
+        self.playback_active = False  # True from when a run actually starts until Reset. Distinct
+        # from playback_running (which flips off on Pause) so the guide overlays stay hidden through a
+        # pause and only reset_toolpath_playback() restores them -- roadmap 6.7.
         self.playback_index = 0
         self._last_rendered_playback_index = 0  # Throttles the Polyscope push in advance_toolpath_playback, see PLAYBACK_RENDER_STRIDE
         self.playback_status = ""
@@ -1448,11 +1451,18 @@ class VisContent:
         its overlay is absent (the gradient overlay supersedes it, so they
         don't z-fight). The obstacle mesh is left as-is -- it's shared mockup
         context. Every structure is guarded, since overlays/travel/bead
-        meshes don't exist until their building stage has run."""
+        meshes don't exist until their building stage has run.
+
+        During playback (self.playback_active, roadmap 6.7) the guide overlays
+        -- the order-feed/travel/orientation curve networks and the base
+        toolpath curve -- are force-hidden regardless of the stack rule, so the
+        growing bead mesh is actually visible; surfaces and beads keep following
+        the i <= layer stack rule."""
         if not self.curved_model_loaded:
             return
         for i, cfg in enumerate(CURVED_LAYERS):
             visible = (i <= layer)  # layer k's view shows layers 0..k, the physical stack.
+            overlay_visible = visible and not self.playback_active  # guides hide during playback -- 6.7
             surface = cfg["surface_structure_name"]
             base_curve = cfg["curve_structure_name"]
             overlay = f"Curved Order Feed {self.curved_layer_names[i]}"
@@ -1464,12 +1474,12 @@ class VisContent:
                 ps.get_surface_mesh(surface).set_enabled(visible)
             for name in (overlay, travel, orient):
                 if ps.has_curve_network(name):
-                    ps.get_curve_network(name).set_enabled(visible)
+                    ps.get_curve_network(name).set_enabled(overlay_visible)
             if ps.has_surface_mesh(bead):
                 ps.get_surface_mesh(bead).set_enabled(visible)
             if ps.has_curve_network(base_curve):
                 # Overlay wins when present; the base curve is the fallback view.
-                ps.get_curve_network(base_curve).set_enabled(visible and not ps.has_curve_network(overlay))
+                ps.get_curve_network(base_curve).set_enabled(overlay_visible and not ps.has_curve_network(overlay))
 
 
     def build_toolpath_waypoints_world(self, gcode_points):
@@ -2214,10 +2224,12 @@ class VisContent:
         active curved layer, whichever is currently selected; a different,
         already-completed curved layer's printed mesh is untouched."""
         self.playback_running = False
+        self.playback_active = False  # roadmap 6.7 -- Reset restores the full guide view.
         ok = (self._init_toolpath_playback() if self.toolpath_source == -1
               else self._init_curved_toolpath_playback(self.toolpath_source))
         if ok:
             self.playback_status = "Ready to play"
+        self.apply_live_layer_visibility(self.toolpath_source)  # restore overlays (curved; planar no-op)
 
 
     def run_toolpath_playback(self):
@@ -2237,6 +2249,10 @@ class VisContent:
                 if not self._init_curved_toolpath_playback(layer):
                     return
         self.playback_running = True
+        self.playback_active = True  # roadmap 6.7 -- survives Pause, cleared only by Reset.
+        # Hide the guide overlays on the click so the growing beads are visible. Planar (-1) is a
+        # safe no-op: apply_live_layer_visibility early-returns unless curved_model_loaded.
+        self.apply_live_layer_visibility(self.toolpath_source)
 
 
     def pause_toolpath_playback(self):

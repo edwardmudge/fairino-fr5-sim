@@ -2353,3 +2353,36 @@ waypoint G-code precompute still solves and round-trips its (v3) cache; playback
 grows the bead mesh and Reset re-inits. **Remaining:** the interactive GUI eyeball
 -- the stack-rule view (TX showing the printed RX beneath it) and the bead reveal
 during curved playback need the Polyscope window.
+
+## S1.39 Hide guide overlays during playback (roadmap 6.7) -- `playback_active`, distinct from `playback_running`
+
+**Roadmap 6.7. `geometry_backend.py` only.** 6.6 shipped the progressive curved
+bead reveal, but the geodesic order-feed/travel curves, the base toolpath curve,
+and the orientation-frame triads stayed drawn on top of the growing beads --
+`apply_live_layer_visibility` toggled overlays only on layer *selection*, never on
+playback *state*, so pressing Run left every guide up and you couldn't see the
+object form. 6.7 gates the overlays on playback.
+
+**New `playback_active` flag, distinct from `playback_running`.** `playback_running`
+flips off on Pause; the overlays must stay hidden through a pause and restore only
+on Reset, so a second flag was needed. `run_toolpath_playback()` sets
+`playback_active = True` after the run actually starts and calls
+`apply_live_layer_visibility(self.toolpath_source)` so the guides hide on the click;
+`reset_toolpath_playback()` sets it False and re-applies visibility to restore the
+full guide view. Pause touches neither flag's overlay state.
+
+**`apply_live_layer_visibility` now reads playback state.** While `playback_active`,
+the three overlay curve networks (order-feed/travel/orient) and the base toolpath
+curve are force-hidden regardless of the `i <= layer` stack rule
+(`overlay_visible = visible and not self.playback_active`); the print **surfaces**
+and the growing **bead** meshes keep following the plain stack rule. Net effect
+during playback: stacked surfaces + growing beads only.
+
+**Planar (source -1) is a no-op:** `apply_live_layer_visibility` early-returns
+unless `curved_model_loaded`, and the planar `G-code Print` mesh *is* the playback
+mesh -- no separate overlays to hide. No GUI change: the coupling rides inside the
+existing Run/Reset backend calls (`gui_panel.py` untouched).
+
+**Verified on:** 2026-07-22 -- headless import/flow check only. The observable
+result (guides vanish on Run, stay hidden through Pause, return on Reset; beads
+still grow; planar unaffected) needs the Polyscope window on a physical GPU.
