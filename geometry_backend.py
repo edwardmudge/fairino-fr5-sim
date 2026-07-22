@@ -106,6 +106,16 @@ CURVED_TRAVEL_HOVER_MM = 4.0
 # meshes get zero tolerance. ~1mm is a plausible nozzle-contact depth; tune
 # empirically like the other assumed job constants. Used by _branch_clears_ground().
 CURVED_TIP_CLEARANCE_TOLERANCE_MM = 1.0
+# Assumed, not measured -- the curved-print PLY toolpath curves carry no
+# extrusion (E) data, and "layer height from Z" is meaningless on a
+# conformal path -- a fixed cross-section stands in for both, same spirit as
+# FILAMENT_DIAMETER_MM. ~1.5mm is a plausible elastomer trace width for this
+# nozzle; tune empirically. Used by _build_curved_beads().
+CURVED_BEAD_WIDTH_MM = 1.5
+# Assumed, not measured -- same reasoning as CURVED_BEAD_WIDTH_MM. ~0.5mm is
+# a plausible single-pass bead height for a conformal elastomer trace. Used
+# by _build_curved_beads().
+CURVED_BEAD_HEIGHT_MM = 0.5
 # Solid warm red -- the non-printing hops. Deliberately outside the ordered-feed
 # gradient's purple->teal->yellow ramp below, so "printing" (gradient) vs
 # "moving" (this flat colour) read apart at a glance. Used by build_print_order().
@@ -134,7 +144,7 @@ PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # settled.md S1.13's verification), so this is roughly a 12ms slice per frame.
 
 GCODE_PRECOMPUTE_CACHE = os.path.join(GCODE_DIR, "model.precompute.npz")  # roadmap 5.10, settled.md S1.21
-PRECOMPUTE_CACHE_VERSION = 2  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5)
+PRECOMPUTE_CACHE_VERSION = 3  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6)
 
 
 def curved_precompute_cache_path(layer_name):
@@ -177,6 +187,15 @@ class VisContent:
         self.precompute_cache_meta = None  # Cache key captured at precompute-start, see run_toolpath_ik_precompute()
         self.precompute_cache_path = None  # Which cache file this precompute writes to (per-layer for curved, roadmap 6.5)
         self.precompute_tip_tolerance_mm = None  # Non-None -> curved run; enables per-waypoint tangent-plane clearance
+        self.toolpath_source = -1  # -1 = planar G-code; 0..len(CURVED_LAYERS)-1 = that curved layer.
+                                    # Single source of truth for what the shared Run/Pause/Cancel/Reset
+                                    # precompute+playback controls currently target -- roadmap 6.6.
+        self.reject_below_ground = True  # Toggle: reject IK branches whose moving geometry dips
+                                         # below world z=0. Default ON (planar's historical behaviour);
+                                         # applies to BOTH paths -- roadmap 6.6. Unchecked for a
+                                         # low-plate/mockup setup where sub-z=0 poses are physically
+                                         # fine. Folded into the precompute cache key (it changes which
+                                         # branch is accepted, so the solved path depends on it).
 
         # Progressive-reveal playback state -- playback_index persists across
         # pause, only reset_toolpath_playback() zeroes it.
@@ -243,6 +262,24 @@ class VisContent:
         self.curved_orient_loaded = False      # True once build_orientation_frames() has run -- what 6.5 gates on
         self.curved_orient_frames = None       # list of len(CURVED_LAYERS) lists of (pos_world (3,), R_target (3,3)), print order
         self.curved_orient_status = ""
+
+        # Per-layer printed-bead playback state, see _build_curved_beads() /
+        # _init_curved_toolpath_playback() -- roadmap 6.6. Mirrors the flat
+        # gcode_bead_* fields above, but indexed per layer (lazily sized to
+        # len(CURVED_LAYERS) on first use) so RX's and TX's printed meshes can
+        # coexist -- the S1.32 stack rule requires TX's view to keep showing
+        # RX's already-printed layer beneath it, not just whichever was last
+        # built. Cleared only by clear_curved_model() or a re-order/re-orient
+        # cascade (_abort_geodesic_precompute()) -- never by a generic
+        # precompute abort/cancel, so switching the active toolpath source
+        # can't make a completed layer's printed mesh disappear.
+        self.curved_bead_verts_full = None
+        self.curved_bead_faces = None
+        self.curved_bead_reveal_index = None
+        self.curved_bead_face_prefix = None
+        self.curved_bead_verts_current = None
+        self.curved_print_handle = None
+        self.curved_bead_registered_capacity = None
 
         # Initialise the scene
         self.create_coordinate_frame()
@@ -723,6 +760,67 @@ class VisContent:
         self.curved_model_loaded = True
 
 
+    def clear_curved_model(self):
+        """Load/Clear pair for the curved model -- same idiom as
+        clear_gcode_preview() (roadmap 6.6). Force-cancels an in-flight
+        curved precompute first (its waypoints reference geometry about to
+        be deleted), then removes every structure load_curved_model() and
+        everything derived from it registered, and resets all curved_*
+        state back to pre-load values. Safe to call with nothing loaded."""
+        if self.precompute_waypoints is not None and self.precompute_cache_path not in (None, GCODE_PRECOMPUTE_CACHE):
+            self._abort_toolpath_ik_precompute()
+            self.precompute_status = "Curved model cleared -- precompute cancelled"
+
+        # Cascades order/orient/bead state and their registered structures --
+        # see _abort_geodesic_precompute()'s roadmap-6.6 extension.
+        self._abort_geodesic_precompute()
+        self.geodesic_status = ""
+
+        if self.curved_layer_names is not None:
+            for cfg in CURVED_LAYERS:
+                ps.remove_curve_network(cfg["curve_structure_name"], error_if_absent=False)
+                ps.remove_surface_mesh(cfg["surface_structure_name"], error_if_absent=False)
+            if CURVED_OBSTACLE_FILE:
+                ps.remove_surface_mesh(CURVED_OBSTACLE_STRUCTURE_NAME, error_if_absent=False)
+
+        self.curved_pieces_world = None
+        self.curved_surface_verts_world = None
+        self.curved_surface_vnormals_world = None
+        self.curved_surface_faces = None
+        self.curved_layer_names = None
+        self.T_curved = None
+        self._T_user_frame_at_curved_load = None
+        self.curved_model_loaded = False
+        self.toolpath_source = -1
+
+
+    def curved_model_summary(self):
+        """Human-readable property lines for the loaded curved model -- the
+        GUI's 'Curved Model Properties' dropdown (roadmap 6.6). Backend-owned
+        so the panel just renders the strings. Returns [] if nothing is
+        loaded; per-layer travel figures only appear once a print order
+        exists (curved_travel_total is populated by build_print_order)."""
+        if not self.curved_model_loaded:
+            return []
+        lines = [
+            f"Source: {CURVED_MODEL_DIR}",
+            f"Layers: {len(self.curved_layer_names)}",
+        ]
+        for i, name in enumerate(self.curved_layer_names):
+            pieces = len(self.curved_pieces_world[i])
+            verts = len(self.curved_surface_verts_world[i])
+            faces = len(self.curved_surface_faces[i])
+            lines.append(f"  {name}: {pieces} pieces, {verts} verts, {faces} faces")
+            if self.curved_travel_total is not None:
+                lines.append(f"     travel {self.curved_travel_total[i]:.0f} mm "
+                             f"(file-order {self.curved_travel_naive[i]:.0f} mm)")
+        built = lambda flag: "built" if flag else "not built"
+        lines.append(f"Geodesics: {built(self.geodesic_loaded)}")
+        lines.append(f"Print order: {built(self.curved_order_loaded)}")
+        lines.append(f"Orientation frames: {built(self.curved_orient_loaded)}")
+        return lines
+
+
     def _orient_normals_outward(self, verts, normals, obstacle_verts):
         """Flip `normals` as a whole so they point outward -- away from the
         Surface_Bot obstacle if one is configured, else away from the surface's
@@ -861,6 +959,7 @@ class VisContent:
                 ps.remove_curve_network(f"Curved Travel {name}", error_if_absent=False)
                 ps.remove_curve_network(f"Curved Order Feed {name}", error_if_absent=False)
                 ps.remove_curve_network(f"Curved Orient Frames {name}", error_if_absent=False)
+                ps.remove_surface_mesh(f"Curved Print {name}", error_if_absent=False)
         self.curved_order_loaded = False
         self.curved_print_order = None
         self.curved_travel_moves = None
@@ -872,6 +971,17 @@ class VisContent:
         self.curved_orient_loaded = False
         self.curved_orient_frames = None
         self.curved_orient_status = ""
+
+        # The 6.6 printed-bead meshes are built from the waypoints derived
+        # above (print order + orientation), across every layer -- not just
+        # whichever is currently active -- so they go stale with them too.
+        self.curved_bead_verts_full = None
+        self.curved_bead_faces = None
+        self.curved_bead_reveal_index = None
+        self.curved_bead_face_prefix = None
+        self.curved_bead_verts_current = None
+        self.curved_print_handle = None
+        self.curved_bead_registered_capacity = None
 
 
     def step_geodesic_precompute(self):
@@ -1158,6 +1268,150 @@ class VisContent:
         return waypoints, R_target_array
 
 
+    def _build_curved_beads(self, layer):
+        """Curved analogue of _build_gcode_beads() -- roadmap 6.6. The PLY
+        toolpath curves carry no extrusion data, and there's no single
+        "layer Z" on a conformal path, so width/height are fixed constants
+        (CURVED_BEAD_WIDTH_MM/HEIGHT_MM) instead of derived from E/Z, and the
+        box's stacking axis is each waypoint's own local surface normal
+        (R_target[:,2], averaged per segment) instead of world Z -- a curved
+        surface has no single "up". Waypoints from
+        build_curved_toolpath_waypoints_world() are already world-space
+        (unlike gcode_points, which are plate-local), so no
+        transform_points()/PLATE_THICKNESS_MM step is needed here. Reuses
+        _BEAD_BOX_FACE_TEMPLATE and the colinear cap-cull test verbatim;
+        drops the width_matched test (trivially true since width is
+        constant here).
+
+        Returns the same (verts_world, faces, reveal_waypoint_index,
+        bead_face_prefix) tuple shape as _build_gcode_beads()."""
+        waypoints, R_target_array = self.build_curved_toolpath_waypoints_world(layer)
+        pts = np.array([p for p, _ in waypoints])
+        is_feed = np.array([f for _, f in waypoints])
+
+        p0, p1 = pts[:-1], pts[1:]
+        seg_vec = p1 - p0
+        seg_len = np.linalg.norm(seg_vec, axis=1)
+        # Both endpoints feed -- excludes lift-off/touch-down transition
+        # segments into/out of a travel hop (no extrusion signal to key off
+        # instead, unlike _build_gcode_beads' delta_e check).
+        seg_is_print = is_feed[:-1] & is_feed[1:]
+
+        safe_len = np.where(seg_len > 1e-9, seg_len, 1.0)
+        u = seg_vec / safe_len[:, None]
+
+        # Per-segment "up" = the two waypoints' own R_target Z columns
+        # (local surface normal), averaged and re-normalized -- not world Z.
+        n0, n1 = R_target_array[:-1, :, 2], R_target_array[1:, :, 2]
+        normal_seg = n0 + n1
+        safe_normal_len = np.where(np.linalg.norm(normal_seg, axis=1, keepdims=True) > 1e-9,
+                                    np.linalg.norm(normal_seg, axis=1, keepdims=True), 1.0)
+        normal_seg = normal_seg / safe_normal_len
+
+        w_axis = np.cross(u, normal_seg)  # width direction: perpendicular to both travel and normal
+        w_norm = np.linalg.norm(w_axis, axis=1)
+        safe_w_norm = np.where(w_norm > 1e-9, w_norm, 1.0)
+        w_axis = w_axis / safe_w_norm[:, None]
+
+        valid = seg_is_print & (seg_len > 1e-6) & (w_norm > 1e-6)
+        if not np.any(valid):
+            return (np.empty((0, 3)), np.empty((0, 3), dtype=int), np.empty(0, dtype=int),
+                    np.zeros(1, dtype=int))
+
+        reveal_waypoint_index = np.nonzero(valid)[0] + 1
+        p0v, p1v = p0[valid], p1[valid]
+        w_axis_v, normal_v = w_axis[valid], normal_seg[valid]
+        half_w, half_h = CURVED_BEAD_WIDTH_MM / 2.0, CURVED_BEAD_HEIGHT_MM / 2.0
+
+        c0 = p0v + w_axis_v * half_w
+        c1 = p0v - w_axis_v * half_w
+        c2 = p1v - w_axis_v * half_w
+        c3 = p1v + w_axis_v * half_w
+
+        K = len(p0v)
+        verts_world = np.zeros((K, 8, 3))
+        for idx, corner in enumerate((c0, c1, c2, c3)):
+            verts_world[:, idx, :] = corner - normal_v * half_h
+            verts_world[:, idx + 4, :] = corner + normal_v * half_h
+        verts_world = verts_world.reshape(-1, 3)
+
+        u_valid = u[valid]
+        chained = np.diff(reveal_waypoint_index) == 1
+        colinear = np.sum(u_valid[:-1] * u_valid[1:], axis=1) >= CAP_CULL_COLINEAR_DOT_MIN
+        cullable = chained & colinear
+
+        drop_end_cap = np.zeros(K, dtype=bool)
+        drop_start_cap = np.zeros(K, dtype=bool)
+        drop_end_cap[:-1] = cullable
+        drop_start_cap[1:] = cullable
+
+        keep_row = np.ones((K, 12), dtype=bool)
+        keep_row[drop_end_cap, 8] = False
+        keep_row[drop_end_cap, 9] = False
+        keep_row[drop_start_cap, 4] = False
+        keep_row[drop_start_cap, 5] = False
+
+        faces_full = (self._BEAD_BOX_FACE_TEMPLATE[None, :, :] + (np.arange(K) * 8)[:, None, None])
+        faces = faces_full[keep_row]
+        bead_face_prefix = np.concatenate([[0], np.cumsum(keep_row.sum(axis=1))])
+
+        return verts_world, faces, reveal_waypoint_index, bead_face_prefix
+
+
+    def _init_curved_toolpath_playback(self, layer):
+        """Curved analogue of _init_toolpath_playback() -- roadmap 6.6.
+        Requires a completed precompute for this exact layer (checked via
+        cache_path, since precompute_joint_path alone doesn't say which
+        source solved it). Builds via _build_curved_beads() and registers
+        under this layer's own name/slot so a different layer's already-
+        printed mesh is untouched. Lazily sizes the per-layer bead-state
+        lists to len(curved_layer_names) on first use. Returns True on
+        success, False (with playback_status explaining why) otherwise."""
+        if self.curved_bead_verts_full is None:
+            n = len(self.curved_layer_names)
+            self.curved_bead_verts_full = [None] * n
+            self.curved_bead_faces = [None] * n
+            self.curved_bead_reveal_index = [None] * n
+            self.curved_bead_face_prefix = [None] * n
+            self.curved_bead_verts_current = [None] * n
+            self.curved_print_handle = [None] * n
+            self.curved_bead_registered_capacity = [None] * n
+
+        if (not self.precompute_joint_path
+                or self.precompute_cache_path != curved_precompute_cache_path(self.curved_layer_names[layer])):
+            self.playback_status = "Run Precompute for this layer first"
+            return False
+
+        verts_world, faces, reveal_index, face_prefix = self._build_curved_beads(layer)
+        if len(verts_world) == 0:
+            self.playback_status = "No printed beads to reveal"
+            return False
+
+        self.curved_bead_verts_full[layer] = verts_world
+        self.curved_bead_faces[layer] = faces
+        self.curved_bead_reveal_index[layer] = reveal_index
+        self.curved_bead_face_prefix[layer] = face_prefix
+        # Collapse every bead to its own first corner -- a zero-area box
+        # renders nothing, revealed later by restoring real positions
+        # (advance_toolpath_playback), never via transparency (settled.md S1.16).
+        self.curved_bead_verts_current[layer] = np.repeat(verts_world[0::8], 8, axis=0)
+
+        K = len(reveal_index)
+        capacity = min(PLAYBACK_LOOKAHEAD_BEADS, K)
+        self.curved_bead_registered_capacity[layer] = capacity
+        name = f"Curved Print {self.curved_layer_names[layer]}"
+        handle = ps.register_surface_mesh(
+            name, self.curved_bead_verts_current[layer][:capacity * 8],
+            self.curved_bead_faces[layer][:self.curved_bead_face_prefix[layer][capacity]])
+        handle.set_color(CURVED_LAYERS[layer]["curve_color"])  # reuse the layer's curve color, no new constant
+        self.curved_print_handle[layer] = handle
+
+        self.playback_index = 0
+        self._last_rendered_playback_index = 0
+        self.update_arm(self.precompute_joint_path[0])
+        return True
+
+
     def _register_orientation_frames(self, name, frames):
         """Draw a downsampled batch of TCP orientation triads as one curve
         network (every ORIENT_FRAME_STRIDE-th frame), X red / Y green / Z blue
@@ -1179,37 +1433,40 @@ class VisContent:
 
 
     def apply_live_layer_visibility(self, layer):
-        """Show only `layer`'s geometry and hide every other layer's -- the
-        strict one-layer-at-a-time view for verifying a print pass on its own,
-        driven by the GUI layer selector. Necessary because Surface_RX_Offset is
+        """Show `layer`'s geometry and every layer beneath it in the physical
+        print stack -- the S1.32 stack rule (roadmap 6.6), driven by the GUI's
+        toolpath-source selector. Necessary because Surface_RX_Offset is
         sealed inside the Surface_TX_Base shell (settled.md S1.32), so RX is
-        invisible with TX shown.
+        invisible with TX shown; conversely TX's view should show the already-
+        printed RX layer beneath it, since RX -> silicone fill -> TX is a
+        real, physically stacked sequence, not three independent views.
 
-        Per configured layer, the surface / ordered-feed overlay / travel network
-        / orientation-frame triads are enabled only for `layer`; the base toolpath curve shows only when its
-        overlay is absent (the gradient overlay supersedes it, so they don't
-        z-fight). The obstacle mesh is left as-is -- it's shared mockup context.
-        Every structure is guarded, since overlays/travel don't exist until a
-        Build Print Order.
-
-        Strict isolation is deliberate for verification now; the eventual 6.6
-        rule is the physical stack (S1.32: TX shows the RX layer beneath it),
-        which is a localised change to the `visible`/base-curve logic below."""
+        Per configured layer, the surface / ordered-feed overlay / travel
+        network / orientation-frame triads / printed bead mesh are enabled
+        for every layer at or before `layer` in CURVED_LAYERS order (index 0
+        = first pass = innermost); the base toolpath curve shows only when
+        its overlay is absent (the gradient overlay supersedes it, so they
+        don't z-fight). The obstacle mesh is left as-is -- it's shared mockup
+        context. Every structure is guarded, since overlays/travel/bead
+        meshes don't exist until their building stage has run."""
         if not self.curved_model_loaded:
             return
         for i, cfg in enumerate(CURVED_LAYERS):
-            visible = (i == layer)
+            visible = (i <= layer)  # layer k's view shows layers 0..k, the physical stack.
             surface = cfg["surface_structure_name"]
             base_curve = cfg["curve_structure_name"]
             overlay = f"Curved Order Feed {self.curved_layer_names[i]}"
             travel = f"Curved Travel {self.curved_layer_names[i]}"
             orient = f"Curved Orient Frames {self.curved_layer_names[i]}"
+            bead = f"Curved Print {self.curved_layer_names[i]}"
 
             if ps.has_surface_mesh(surface):
                 ps.get_surface_mesh(surface).set_enabled(visible)
             for name in (overlay, travel, orient):
                 if ps.has_curve_network(name):
                     ps.get_curve_network(name).set_enabled(visible)
+            if ps.has_surface_mesh(bead):
+                ps.get_surface_mesh(bead).set_enabled(visible)
             if ps.has_curve_network(base_curve):
                 # Overlay wins when present; the base curve is the fallback view.
                 ps.get_curve_network(base_curve).set_enabled(visible and not ps.has_curve_network(overlay))
@@ -1496,6 +1753,9 @@ class VisContent:
             "version": PRECOMPUTE_CACHE_VERSION,
             "gcode_sha256": gcode_sha256,
             "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
+            # The ground toggle changes which IK branch is accepted, so the
+            # solved joint path depends on it -- roadmap 6.6.
+            "reject_below_ground": self.reject_below_ground,
         }
 
 
@@ -1519,6 +1779,9 @@ class VisContent:
             "layer_name": self.curved_layer_names[layer],
             "curve_sha256": h.hexdigest(),
             "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
+            # The ground toggle changes which IK branch is accepted, so the
+            # solved joint path depends on it -- roadmap 6.6.
+            "reject_below_ground": self.reject_below_ground,
         }
 
 
@@ -1572,6 +1835,13 @@ class VisContent:
         # detected as staleness (roadmap 5.11, settled.md S1.22) even though
         # this path skipped run_toolpath_ik_precompute()'s own snapshot.
         self.precompute_cache_meta = cached_meta
+        # Also record which cache this came from -- roadmap 6.6's toolpath-
+        # source tracking (the layer-mixup guard, and _init_toolpath_playback()'s
+        # / _init_curved_toolpath_playback()'s source gates) all identify "who
+        # owns precompute_joint_path" via precompute_cache_path, and a cache
+        # hit is a legitimate way for that path to get populated, not just a
+        # fresh chunked solve.
+        self.precompute_cache_path = cache_path
         return True
 
 
@@ -1616,7 +1886,18 @@ class VisContent:
         full parse, so it's computed up front and the cache is checked *before*
         parsing -- a hit skips the 187k-line parse and IK entirely (roadmap
         Stage5_README.md 5.10). parse_gcode runs on the miss path only.
+
+        Layer-mixup guard (roadmap 6.6): if a curved-layer precompute is
+        currently loaded (paused or mid-run), force-cancel it first rather
+        than silently resuming it -- run_curved_toolpath_ik_precompute()'s
+        fresh-start branch only fires when precompute_waypoints is None, so
+        without this guard switching the active toolpath source wouldn't be
+        noticed here.
         """
+        if self.precompute_waypoints is not None and self.precompute_cache_path != GCODE_PRECOMPUTE_CACHE:
+            self._abort_toolpath_ik_precompute()
+            self.precompute_status = "Switched to planar toolpath -- previous precompute cancelled"
+
         if self.precompute_waypoints is None:
             filepath = os.path.join(GCODE_DIR, GCODE_FILE)
             if not os.path.exists(filepath):
@@ -1672,7 +1953,19 @@ class VisContent:
         waypoints: there's no single source file to hash cheaply, and rebuilding
         from the already-in-memory retained arrays is cheap (one
         nearest_vertex_index over a few thousand points), so there's no parse to
-        avoid on a hit."""
+        avoid on a hit.
+
+        Layer-mixup guard (roadmap 6.6): if a *different* source (the planar
+        path, or a different curved layer) is currently loaded, force-cancel
+        it first -- otherwise this would silently resume that stale run
+        instead of starting layer's, since the fresh-start branch below only
+        fires when precompute_waypoints is None."""
+        if self.precompute_waypoints is not None:
+            intended_cache_path = curved_precompute_cache_path(self.curved_layer_names[layer])
+            if self.precompute_cache_path != intended_cache_path:
+                self._abort_toolpath_ik_precompute()
+                self.precompute_status = f"Switched to {self.curved_layer_names[layer]} -- previous precompute cancelled"
+
         if self.precompute_waypoints is None:
             if not self.curved_orient_loaded:
                 self.precompute_status = "Build orientation frames first"
@@ -1694,6 +1987,17 @@ class VisContent:
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
 
 
+    def run_active_toolpath_ik_precompute(self, joint_limits, reference_joint_angles=None):
+        """Single dispatch entry point for the GUI's one shared Run Precompute
+        button (roadmap 6.6) -- routes on toolpath_source so gui_panel.py
+        doesn't need to know the planar/curved entry points take different
+        arguments."""
+        if self.toolpath_source == -1:
+            self.run_toolpath_ik_precompute(joint_limits, reference_joint_angles)
+        else:
+            self.run_curved_toolpath_ik_precompute(self.toolpath_source, joint_limits, reference_joint_angles)
+
+
     def pause_toolpath_ik_precompute(self):
         """Mirrors the GUI's playback Pause button: stop advancing the
         precompute without discarding progress. A following
@@ -1709,14 +2013,34 @@ class VisContent:
 
 
     def _abort_toolpath_ik_precompute(self):
-        """Shared discard used by cancel_toolpath_ik_precompute() and
-        step_toolpath_ik_precompute()'s failure branches -- resets all
+        """Shared discard used by cancel_toolpath_ik_precompute(),
+        step_toolpath_ik_precompute()'s failure branches, and the
+        layer-mixup guards in run_toolpath_ik_precompute()/
+        run_curved_toolpath_ik_precompute() (roadmap 6.6) -- resets all
         precompute progress (precompute_index/total included, so a stale
         index can't outlive the joint path it counted) and playback state,
         since playback indexes precompute_joint_path directly and can't be
         left pointing at a joint path this just emptied. Does not touch
         precompute_status, so a caller can set an explanatory message
-        first."""
+        first.
+
+        Reads precompute_cache_path BEFORE clearing it to decide whether the
+        run being discarded was the planar one -- only then is the G-code
+        print mesh torn down (_clear_gcode_print_mesh()). Curved per-layer
+        bead meshes are deliberately NOT cleared here: they must persist
+        across switching the active toolpath source (roadmap 6.6's S1.32
+        stack rule -- a completed layer's printed mesh stays visible while a
+        different layer's precompute is discarded/restarted); only
+        clear_curved_model() or a re-order/re-orient cascade
+        (_abort_geodesic_precompute()) removes those."""
+        was_gcode = self.precompute_cache_path in (None, GCODE_PRECOMPUTE_CACHE)
+        self.playback_running = False
+        self.playback_index = 0
+        self.playback_waiting = False
+        self.playback_status = ""
+        if was_gcode:
+            self._clear_gcode_print_mesh()
+
         self.precompute_running = False
         self.precompute_waypoints = None
         self.precompute_index = 0
@@ -1728,7 +2052,6 @@ class VisContent:
         # tangent-plane tolerance (roadmap 6.5).
         self.precompute_cache_path = None
         self.precompute_tip_tolerance_mm = None
-        self._reset_toolpath_playback_state()
 
 
     def step_toolpath_ik_precompute(self):
@@ -1763,11 +2086,16 @@ class VisContent:
             clear = next((angles for angles, *_ in solutions
                           if self._branch_clears_ground(angles, plane)), None)
             if clear is None:
-                obstacle = ("the ground plane or their surface tangent plane" if plane is not None
-                            else "the ground plane (z<0)")
+                # Name the checks actually active (roadmap 6.6): the z=0 ground
+                # check is toggle-gated, the tangent plane is curved-only.
+                checks = []
+                if self.reject_below_ground:
+                    checks.append("the ground plane (z<0)")
+                if plane is not None:
+                    checks.append("their surface tangent plane")
                 status_msg = (
                     f"Waypoint {i}/{self.precompute_total}: all {len(solutions)} valid branch(es) "
-                    f"hit {obstacle}")
+                    f"hit {' or '.join(checks)}")
                 self._abort_toolpath_ik_precompute()
                 self.precompute_status = status_msg
                 return
@@ -1784,20 +2112,31 @@ class VisContent:
             self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
 
 
-    def _reset_toolpath_playback_state(self):
-        """Shared playback reset used by cancel_toolpath_ik_precompute() and
-        load_build_plate()'s invalidation branch, both of which discard
-        precompute_joint_path that playback indexes into directly. Also
-        removes the "G-code Print" mesh so a stale preview doesn't linger
-        at the old pose."""
-        self.playback_running = False
-        self.playback_index = 0
-        self.playback_waiting = False
+    def _clear_gcode_print_mesh(self):
+        """The G-code-specific slice of playback teardown -- bead arrays,
+        registered mesh, and the preview/playback ownership flag. Shared by
+        _reset_toolpath_playback_state() (clear_gcode_preview()'s
+        unconditional reset -- Clear always means "wipe G-code", regardless
+        of what else is active) and _abort_toolpath_ik_precompute() (only
+        when G-code was actually the source being discarded, roadmap 6.6) --
+        split out so those two call sites can apply it under different
+        conditions without duplicating the four lines."""
         self.gcode_bead_verts_full = None
-        self.playback_status = ""
         self.gcode_print_handle = None
         self.gcode_preview_loaded = False
         ps.remove_surface_mesh("G-code Print", error_if_absent=False)
+
+
+    def _reset_toolpath_playback_state(self):
+        """Playback reset used only by clear_gcode_preview() -- unconditionally
+        discards G-code's own playback/bead state and the shared playback
+        pointer, regardless of which toolpath source is currently active,
+        since the Clear button's whole point is "wipe G-code now"."""
+        self.playback_running = False
+        self.playback_index = 0
+        self.playback_waiting = False
+        self.playback_status = ""
+        self._clear_gcode_print_mesh()
 
 
     def _init_toolpath_playback(self):
@@ -1809,9 +2148,17 @@ class VisContent:
         corner (zero-area, nothing renders) and registers only the first
         PLAYBACK_LOOKAHEAD_BEADS beads' worth, not the full mesh. Snaps
         the arm to the first waypoint's pose. Returns True on success,
-        False (with playback_status explaining why) otherwise."""
+        False (with playback_status explaining why) otherwise.
+
+        Guards precompute_cache_path too (roadmap 6.6), not just emptiness:
+        without it, switching toolpath_source to Planar while a curved
+        precompute_joint_path is still loaded would build G-code beads
+        against the wrong (curved) joint angles."""
         if not self.precompute_joint_path:
             self.playback_status = "Run Precompute first"
+            return False
+        if self.precompute_cache_path not in (None, GCODE_PRECOMPUTE_CACHE):
+            self.playback_status = "Run Precompute for the planar toolpath first"
             return False
 
         filepath = os.path.join(GCODE_DIR, GCODE_FILE)
@@ -1862,9 +2209,13 @@ class VisContent:
     def reset_toolpath_playback(self):
         """Mirrors the GUI's playback Reset button: snaps to the first pose
         and empties the shape (roadmap Stage5_README.md 5.7) -- always a
-        full re-init, discarding any in-progress reveal."""
+        full re-init, discarding any in-progress reveal. Dispatches on
+        toolpath_source (roadmap 6.6) -- re-inits the planar path or the
+        active curved layer, whichever is currently selected; a different,
+        already-completed curved layer's printed mesh is untouched."""
         self.playback_running = False
-        ok = self._init_toolpath_playback()
+        ok = (self._init_toolpath_playback() if self.toolpath_source == -1
+              else self._init_curved_toolpath_playback(self.toolpath_source))
         if ok:
             self.playback_status = "Ready to play"
 
@@ -1873,10 +2224,18 @@ class VisContent:
         """Mirrors the GUI's playback Run button: start or resume. If
         playback was never initialized this session (or was reset),
         initializes fresh; otherwise resumes from wherever playback_index
-        already is (a paused run continues, not restarts)."""
-        if self.gcode_bead_verts_full is None:
-            if not self._init_toolpath_playback():
-                return
+        already is (a paused run continues, not restarts). Dispatches on
+        toolpath_source (roadmap 6.6) -- the planar path or a specific
+        curved layer, without duplicating this Run/Pause/Reset control set."""
+        if self.toolpath_source == -1:
+            if self.gcode_bead_verts_full is None:
+                if not self._init_toolpath_playback():
+                    return
+        else:
+            layer = self.toolpath_source
+            if self.curved_bead_verts_full is None or self.curved_bead_verts_full[layer] is None:
+                if not self._init_curved_toolpath_playback(layer):
+                    return
         self.playback_running = True
 
 
@@ -1906,7 +2265,16 @@ class VisContent:
         and playback_running stays True so the next frame rechecks the
         frontier automatically. self.playback_waiting mirrors this state
         -- gui_panel.py reads it to snap the Speed slider down the
-        moment playback actually hits the compute limit."""
+        moment playback actually hits the compute limit.
+
+        Dispatches on toolpath_source (roadmap 6.6): resolves which bead
+        arrays/structure name/color/capacity to reveal into once at the top,
+        then runs the same reveal math either way. verts_current is the same
+        array object as gcode_bead_verts_current/curved_bead_verts_current[layer],
+        so the in-place slice assignment below still mutates the real
+        backing array through the alias -- only the two scalar/handle fields
+        (registered capacity, Polyscope handle) need an explicit write-back,
+        done at the bottom since they aren't mutated in place."""
         if not self.playback_running:
             return
 
@@ -1932,24 +2300,50 @@ class VisContent:
         if finished or (waiting and moved) or self.playback_index - self._last_rendered_playback_index >= PLAYBACK_RENDER_STRIDE:
             self.update_arm(self.precompute_joint_path[self.playback_index])
 
-            old_revealed = np.searchsorted(self.gcode_bead_reveal_index, self._last_rendered_playback_index, side='right')
-            new_revealed = np.searchsorted(self.gcode_bead_reveal_index, self.playback_index, side='right')
-            if new_revealed > old_revealed:
-                self.gcode_bead_verts_current[old_revealed * 8:new_revealed * 8] = \
-                    self.gcode_bead_verts_full[old_revealed * 8:new_revealed * 8]
+            curved = self.toolpath_source != -1
+            layer = self.toolpath_source
+            if curved:
+                bead_faces = self.curved_bead_faces[layer]
+                reveal_index = self.curved_bead_reveal_index[layer]
+                face_prefix = self.curved_bead_face_prefix[layer]
+                bead_verts_full = self.curved_bead_verts_full[layer]
+                verts_current = self.curved_bead_verts_current[layer]
+                structure_name = f"Curved Print {self.curved_layer_names[layer]}"
+                color = CURVED_LAYERS[layer]["curve_color"]
+                capacity = self.curved_bead_registered_capacity[layer]
+            else:
+                bead_faces = self.gcode_bead_faces
+                reveal_index = self.gcode_bead_reveal_index
+                face_prefix = self.gcode_bead_face_prefix
+                bead_verts_full = self.gcode_bead_verts_full
+                verts_current = self.gcode_bead_verts_current
+                structure_name = "G-code Print"
+                color = GCODE_COLOR
+                capacity = self._registered_bead_capacity
 
-                K = len(self.gcode_bead_reveal_index)
-                if finished or new_revealed >= self._registered_bead_capacity:
+            old_revealed = np.searchsorted(reveal_index, self._last_rendered_playback_index, side='right')
+            new_revealed = np.searchsorted(reveal_index, self.playback_index, side='right')
+            if new_revealed > old_revealed:
+                verts_current[old_revealed * 8:new_revealed * 8] = \
+                    bead_verts_full[old_revealed * 8:new_revealed * 8]
+
+                K = len(reveal_index)
+                if finished or new_revealed >= capacity:
                     target_capacity = K if finished else min(new_revealed + PLAYBACK_LOOKAHEAD_BEADS, K)
-                    self._registered_bead_capacity = target_capacity
-                    self.gcode_print_handle = ps.register_surface_mesh(
-                        "G-code Print",
-                        self.gcode_bead_verts_current[:target_capacity * 8],
-                        self.gcode_bead_faces[:self.gcode_bead_face_prefix[target_capacity]])
-                    self.gcode_print_handle.set_color(GCODE_COLOR)
+                    handle = ps.register_surface_mesh(
+                        structure_name,
+                        verts_current[:target_capacity * 8],
+                        bead_faces[:face_prefix[target_capacity]])
+                    handle.set_color(color)
+                    if curved:
+                        self.curved_bead_registered_capacity[layer] = target_capacity
+                        self.curved_print_handle[layer] = handle
+                    else:
+                        self._registered_bead_capacity = target_capacity
+                        self.gcode_print_handle = handle
                 else:
-                    self.gcode_print_handle.update_vertex_positions(
-                        self.gcode_bead_verts_current[:self._registered_bead_capacity * 8])
+                    handle = self.curved_print_handle[layer] if curved else self.gcode_print_handle
+                    handle.update_vertex_positions(verts_current[:capacity * 8])
 
             self._last_rendered_playback_index = self.playback_index
 
@@ -2150,30 +2544,39 @@ class VisContent:
 
 
     def _branch_clears_ground(self, joint_angles_deg, plane=None):
-        """True if this branch's moving geometry stays clear of its obstacle.
+        """True if this branch's moving geometry stays clear of its obstacle(s).
 
-        plane=None (planar path) keeps the exact world z=0 arm-vs-table check
-        (settled.md S1.13): cheap bbox bound first -- proven clear if
-        non-negative -- escalating to the exact per-vertex check only when the
-        bbox result is negative (inconclusive: a rotated AABB corner can dip
-        below ground even when the real mesh does not).
+        Two independent checks, layered:
 
-        plane=(point, normal, tip_tolerance_mm) (curved path) instead requires
-        the nozzle tip to stay outward of that waypoint's own surface tangent
-        plane, within tip_tolerance_mm of inward slack (roadmap 6.5, settled.md
-        S1.37). The world z=0 check is deliberately NOT applied here: the curved
-        mockup sits above the plate in a frame where z=0 is not the physical
-        floor (inbox note), so valid printing poses routinely put arm links
-        below z=0. Only the nozzle is checked (see _nozzle_clears_plane); full
-        arm-vs-mockup collision would need a real obstacle-mesh check, the
-        expensive path 6.5 deliberately avoided, and is out of scope here."""
-        if plane is None:
-            if self.moving_geometry_bbox_min_z(joint_angles_deg) >= 0:
-                return True
-            return self.moving_geometry_min_z(joint_angles_deg) >= 0
+        1. **World z=0 ground check**, gated by the reject_below_ground toggle
+           (roadmap 6.6). When enabled it applies to BOTH the planar and the
+           curved path: cheap transformed-bbox bound first -- proven clear if
+           non-negative -- escalating to the exact per-vertex min only when the
+           bbox result is negative (inconclusive: a rotated AABB corner can dip
+           below ground even when the real mesh does not, settled.md S1.13).
+           Default ON = planar's historical always-reject behaviour; the user
+           unchecks it for a low-plate/mockup setup where sub-z=0 arm poses are
+           physically fine (the curved mockup sits above the plate in a frame
+           where z=0 is not the physical floor, S1.37).
 
-        point, normal, tip_tolerance_mm = plane
-        return self._nozzle_clears_plane(joint_angles_deg, point, normal, tip_tolerance_mm)
+        2. **Tangent-plane nozzle check** (curved path only, plane not None):
+           the nozzle tip must stay outward of that waypoint's own surface
+           tangent plane, within tip_tolerance_mm of inward slack (roadmap 6.5,
+           settled.md S1.37). Only the nozzle is checked (see
+           _nozzle_clears_plane); full arm-vs-mockup collision would need a real
+           obstacle-mesh check, the expensive path 6.5 deliberately avoided.
+
+        With the toggle OFF and no plane (planar), nothing is rejected."""
+        if self.reject_below_ground:
+            if self.moving_geometry_bbox_min_z(joint_angles_deg) < 0:
+                if self.moving_geometry_min_z(joint_angles_deg) < 0:
+                    return False
+
+        if plane is not None:
+            point, normal, tip_tolerance_mm = plane
+            return self._nozzle_clears_plane(joint_angles_deg, point, normal, tip_tolerance_mm)
+
+        return True
 
 
     def record_trajectory_point(self):

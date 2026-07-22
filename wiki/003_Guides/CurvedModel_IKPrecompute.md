@@ -99,13 +99,23 @@ ground-clearance check it extends, it tries the cheap 8-corner bounding-box
 bound first and only escalates to the exact per-vertex check when that's
 inconclusive.
 
-**World `z=0` is dropped for the curved case.** The curved mockup sits above
-the plate in a frame where z=0 is not the physical floor, so valid printing
-poses routinely put arm links below z=0 (measured z_min ~-60 to -300mm on the
-only joint-limit-valid branches of a real waypoint) — retaining the z=0 gate
-rejected every such pose. The planar path is unaffected —
-`_branch_clears_ground(angles, plane=None)` is still exactly the old z=0
-check.
+**World `z=0` is a toggle now — off is the sensible default for curved.** The
+curved mockup sits above the plate in a frame where z=0 is not the physical
+floor, so valid printing poses routinely put arm links below z=0 (measured
+z_min ~-60 to -300mm on the only joint-limit-valid branches of a real
+waypoint) — applying the z=0 gate rejects every such pose (curved RX aborts at
+waypoint 0). 6.5 shipped with z=0 unconditionally off for curved; **6.6
+(`settled.md` S1.38) made it a user checkbox, `reject_below_ground`**, that
+gates the world-z=0 arm-clearance check on *both* paths (default ON). With it
+**ON**, the curved path applies z=0 **and** the tangent-plane nozzle check —
+so you uncheck it for curved work at the default plate pose, or when the plate
+is placed low enough that sub-z=0 arm poses are physically fine. With it
+**OFF**, curved does tangent-plane only, exactly the behaviour described in
+this section's clearance design. The planar path's historical always-reject is
+the toggle's ON default. Because the toggle changes which IK branch is
+accepted, it is folded into the precompute cache key (both meta builders,
+`PRECOMPUTE_CACHE_VERSION` 2→3). `_branch_clears_ground(angles, plane)` now
+layers the two checks; `plane=None` is still the planar case.
 
 ## Known limitation
 

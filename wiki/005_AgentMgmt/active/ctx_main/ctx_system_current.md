@@ -1,7 +1,7 @@
 ---
 status: active
 scope: current-truth
-last_verified_against_code: 2026-07-19
+last_verified_against_code: 2026-07-22
 ---
 
 # Agent Boot File — FR5 Simulator (Current State)
@@ -41,6 +41,7 @@ corresponding FR5 arm configuration in an interactive 3D window.
 | Curved-surface print ordering (Stage 6.3) | done | Per-layer TSP-variant ordering (greedy nearest-endpoint seed + 2-opt over oriented pieces) off the 6.2 cost matrices, RX first then TX, via a synchronous "Build Print Order" button. Travel moves are the 6.2 geodesics hovered `CURVED_TRAVEL_HOVER_MM` outward along from-scratch surface normals (`compute_vertex_normals`, no scipy; oriented away from `Surface_Bot`), bookended with true endpoints. Printed pieces render as a **print-order gradient** (`Curved Order Feed`), travel in a distinct flat colour, and the RX/TX selector isolates one layer at a time (`apply_live_layer_visibility`, strict for now — S1.32 stack rule later). Measured RX 690mm vs 5157mm / TX 607mm vs 4848mm file-order travel — see `wiki/003_Guides/CurvedModel_PrintOrder.md`, `settled.md` S1.35 |
 | Per-waypoint tool orientation (Stage 6.4) | done | `build_orientation_frames()` attaches a per-feed-point TCP orientation (nozzle perpendicular to the shell): **Z = outward surface normal**, in-plane axes pinned to a fixed world reference (not the path tangent) so the symmetric nozzle doesn't spin as the path meanders — "stable and straight". Supersedes S1.12's single-constant `R_target`. Stored per layer as `curved_orient_frames` (the array 6.5 feeds to IK) and drawn as a downsampled triad overlay (`Curved Orient Frames`, X/Y/Z = red/green/blue) via a "Build Orientation Frames" button. Compute + visualise only; IK wiring is 6.5 — see `wiki/003_Guides/CurvedModel_Orientation.md`, `settled.md` S1.36 |
 | Curved IK precompute (Stage 6.5) | done | Reuses Stage 5's chunked precompute through one shared seam, `_begin_toolpath_precompute()`; `run_curved_toolpath_ik_precompute(layer, ...)` feeds it from `build_curved_toolpath_waypoints_world(layer)` (6.3's ordered feed pieces + travel hops, each carrying 6.4's per-waypoint orientation). `precompute_R_target` is now an `(N,3,3)` array (planar path broadcasts its one constant, unchanged behaviour). Nozzle clearance uses no obstacle mesh: each waypoint's own outward tangent plane is a supporting hyperplane for the convex mockup stack, checked against the **nozzle tip only** (`_nozzle_clears_plane`, `CURVED_TIP_CLEARANCE_TOLERANCE_MM` inward slack); world `z=0` is dropped for the curved case. Per-layer disk caches (`curved_rx/tx.precompute.npz`, `PRECOMPUTE_CACHE_VERSION` bumped 1→2). `geometry_backend.py`-only; no GUI hookup yet (6.6) — see `wiki/003_Guides/CurvedModel_IKPrecompute.md`, `settled.md` S1.37 |
+| Curved GUI wiring (Stage 6.6) | done | Wires 6.1-6.5 into the panel + adds curved playback. **One source-aware control set**, not a duplicate: a "Toolpath Source" selector sets `toolpath_source` (-1 planar / 0..N-1 layer) and the existing Run/Pause/Cancel/Reset controls dispatch via it (`run_active_toolpath_ik_precompute`, source-aware `*_toolpath_playback`); a layer-mixup guard force-cancels a paused run of a different source instead of silently resuming it. Per-layer curved bead playback (`_build_curved_beads`, fixed cross-section swept along each waypoint's surface normal) coexists across layers, so `apply_live_layer_visibility` now does the real S1.32 stack (`i <= layer`: TX shows the printed RX beneath). `clear_curved_model()` Load/Clear pair. **Toggleable z=0 ground check** (`reject_below_ground`, default ON, applies to both paths, layered on the tangent-plane check for curved; folded into the cache key, `PRECOMPUTE_CACHE_VERSION` 2→3). Top-down build panel + "Curved Model Properties" dropdown (`curved_model_summary()`) — see `settled.md` **S1.38** |
 
 ## Directory Structure
 
@@ -71,4 +72,4 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-See `wiki/002_Architecture/settled.md` (S1.1–S1.37).
+See `wiki/002_Architecture/settled.md` (S1.1–S1.38).

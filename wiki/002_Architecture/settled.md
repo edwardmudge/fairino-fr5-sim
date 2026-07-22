@@ -2250,3 +2250,106 @@ path under each layer's key produces independent `curved_rx.precompute.npz` /
 each. **Remaining:** an end-to-end full-curved solve + cache, which needs a plate
 pose with no unreachable waypoints (the placement step above), and the interactive
 GUI eyeball (6.6).
+
+
+## S1.38 Curved GUI wiring (roadmap 6.6) -- one source-aware set of precompute/playback controls, per-layer coexisting bead playback, a stack-rule live view, a toggleable z=0 ground check, and a top-down build panel
+
+**Roadmap 6.6, the last curved-printing stage. `geometry_backend.py` +
+`gui_panel.py` only.** Wires the 6.1-6.5 backend into the panel and adds curved
+playback. Built in two passes (the wiring, then two follow-up fixes); recorded
+together here.
+
+**One shared, source-aware control set -- not a duplicated curved panel.** A new
+`toolpath_source` field (-1 = planar G-code; 0..N-1 = curved layer index) is the
+single source of truth for what the existing Run/Pause/Cancel Precompute and
+Run/Pause/Reset Toolpath controls target. `run_active_toolpath_ik_precompute()`
+dispatches to `run_toolpath_ik_precompute` or `run_curved_toolpath_ik_precompute(layer)`;
+`run_/reset_/advance_toolpath_playback()` read `toolpath_source` internally and
+act on the planar bead slot or the correct layer's curved bead slot. The GUI's
+old RX/TX-only radio is replaced by a "Toolpath Source" selector (`Planar (G-code)`
++ one entry per layer). No second copy of the controls (user directive: reuse, do
+not duplicate).
+
+**Layer-mixup guard.** The two `run_*_ik_precompute` entry points only consult
+their `layer`/source inside `if precompute_waypoints is None:`, so switching the
+active source while a run is paused would otherwise *silently resume the wrong
+one*. Both now force-cancel (`_abort_toolpath_ik_precompute`) a loaded run whose
+`precompute_cache_path` doesn't match the requested source before starting -- the
+guard sits at the one seam both callers pass through, so it holds regardless of
+GUI state. **Also fixed:** `load_toolpath_precompute_cache()` never recorded which
+cache a *hit* came from, so `precompute_cache_path` was `None` after a cache load;
+every 6.6 source-identity check depends on it, so it's now set on the hit path
+too.
+
+**Per-layer bead playback that coexists (the S1.32 stack rule made functional).**
+Stage 5's playback was hardcoded to the single G-code print mesh. 6.6 adds
+`_build_curved_beads(layer)` (the curved analogue of `_build_gcode_beads`: fixed
+`CURVED_BEAD_WIDTH_MM`/`CURVED_BEAD_HEIGHT_MM` cross-section swept along each
+waypoint's own surface normal `R_target[:,2]`, since a conformal path has no
+extrusion `E` and no single "layer Z") and `_init_curved_toolpath_playback(layer)`,
+storing bead state in per-layer lists (`curved_bead_*`) registered as
+`Curved Print {name}`. Because the meshes are per-layer, a *completed* layer's
+printed mesh survives switching to another layer -- so `apply_live_layer_visibility`
+now implements the real S1.32 stack (`i <= layer`: layer k's view shows layers
+0..k, incl. their bead meshes), replacing S1.35's provisional strict isolation.
+Teardown was reworked so this coexistence holds: `_clear_gcode_print_mesh()` is
+the G-code-only slice, called unconditionally by `clear_gcode_preview()` but only
+by `_abort_toolpath_ik_precompute()` when the discarded run was the planar one
+(keyed on `precompute_cache_path`, read before it's nulled); a generic precompute
+abort never touches curved bead meshes -- only `clear_curved_model()` or a
+re-order/re-orient cascade (`_abort_geodesic_precompute`) does. New
+`clear_curved_model()` is the Load/Clear pair's backend (removes every registered
+curved structure incl. the `Curved Print` meshes, resets all `curved_*` state).
+
+**Toggleable z=0 ground check (`reject_below_ground`, default ON, applies to BOTH
+paths).** S1.13's planar z=0 arm-vs-table check was always-on; S1.37 dropped z=0
+for curved entirely (valid curved poses routinely go below z=0 at the default
+plate pose). A user asked for a toggle -- "sometimes we may be able to put the
+plate lower than the arm". `_branch_clears_ground` now gates the z=0 check on
+`reject_below_ground` and *layers* it: with the toggle ON (default), planar does
+the exact old z=0 check and curved does z=0 **and** its tangent-plane nozzle check
+(S1.37); with it OFF, planar rejects nothing and curved does tangent-plane only
+(the pre-toggle S1.37 behaviour). **Consequence:** with the default ON, a fresh
+curved precompute now aborts early on z=0 at the default plate pose -- the user
+unchecks the toggle for curved/low-plate work, which is exactly the case the
+toggle exists for. **The toggle is folded into the precompute cache key** (both
+`_toolpath_cache_meta` and `_curved_toolpath_cache_meta`) because it changes which
+IK branch is accepted per waypoint, so the solved joint path depends on it;
+`PRECOMPUTE_CACHE_VERSION` bumped 2->3 (one-time rebuild of existing caches, same
+class as S1.37's 1->2). Exposed as a "Reject poses below ground (z<0)" checkbox in
+Toolpath Settings, disabled mid-solve so one run can't be solved half under each
+rule.
+
+**Top-down build panel + properties dropdown.** The curved panel was reordered so
+it reads down the page as the user progresses: Load Curved Model / Clear -> a
+collapsible "Curved Model Properties" dropdown (`curved_model_summary()` --
+backend-owned property lines: source dir, per-layer piece/vertex/face counts, and
+travel figures once ordered) -> Toolpath Source selector -> Build Geodesics + its
+progress bar + status -> Build Print Order + status -> Build Orientation Frames +
+status. The only structural move was lifting the geodesic progress bar/status from
+*below* the print-order/orientation buttons to *above* them, so each stage sits
+under the previous stage's bar.
+
+**Non-revertible unless:** the shared-precompute-state design (one flat
+`precompute_*` set, one active run at a time) stops holding -- e.g. if curved
+layers ever need to precompute concurrently, the source-identity-via-cache-path
+scheme would need per-layer precompute state instead. The z=0 toggle being global
+(one default for both paths) is the user's explicit choice (2026-07-22); a future
+need for per-path defaults would split it.
+
+**Verified on:** 2026-07-22 -- headless, plus the shipped-asset regressions.
+**Source dispatch + mixup guard:** pausing an RX precompute and starting TX
+force-cancels RX (cache path flips to TX's, index resets to 0) rather than
+resuming it. **Coexistence:** after switching RX->TX and playing TX, `Curved Print
+RX` stays registered alongside `Curved Print TX`. **G-code isolation:** a curved
+layer switch leaves an unrelated loaded G-code preview untouched. **Clear/reload:**
+`clear_curved_model()` removes every curved structure incl. both bead meshes and
+`Surface Bot`, and an immediate reload re-registers cleanly. **z=0 toggle:** a
+scanned below-ground pose is rejected with the toggle ON and accepted with it OFF;
+curved RX aborts at waypoint 0 on the ground plane with the toggle ON but reaches
+the S1.37 1809-waypoint tangent-only prefix with it OFF; the toggle changes both
+cache metas (fields present, version 3). **Planar regression:** the full 181,375-
+waypoint G-code precompute still solves and round-trips its (v3) cache; playback
+grows the bead mesh and Reset re-inits. **Remaining:** the interactive GUI eyeball
+-- the stack-rule view (TX showing the printed RX beneath it) and the bead reveal
+during curved playback need the Polyscope window.

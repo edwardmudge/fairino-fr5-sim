@@ -41,7 +41,6 @@ class UI_Menu:
         self.bp_status = ""
         self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100
         # -- snapped down automatically if it ever outruns precompute
-        self.live_layer = 0  # which layer the RX/TX selector isolates (roadmap 6.3)
 
     def _section_gap(self):
         """Uniform small gap between the numbered top-level sections below."""
@@ -95,61 +94,84 @@ class UI_Menu:
                 if psim.Button("Clear G-code preview"):
                     self.content.clear_gcode_preview()
 
+            psim.BeginDisabled(self.content.playback_running)
             if psim.Button("Load Curved Model"):
                 self.content.load_curved_model()
-
-            # Minimal geodesic controls for roadmap 6.2's verify step, same
-            # spirit as the bare "Load Curved Model" button above -- the layer
-            # selector and Clear pair are 6.6.
             if self.content.curved_model_loaded:
+                psim.SameLine()
+                if psim.Button("Clear Curved Model"):
+                    self.content.clear_curved_model()
+
+            # Curved model properties -- a collapsible summary of what just
+            # loaded, right below the Load button so it reads top-down (roadmap
+            # 6.6). Backend owns the strings (curved_model_summary()).
+            if self.content.curved_model_loaded:
+                if psim.TreeNode("Curved Model Properties"):
+                    for line in self.content.curved_model_summary():
+                        psim.TextUnformatted(line)
+                    psim.TreePop()
+            psim.EndDisabled()
+
+            # Toolpath source: which precompute/playback the shared
+            # Run/Pause/Cancel/Reset controls below target -- Planar (G-code)
+            # or a specific curved layer. Ungated so Planar is always
+            # selectable even with no curved model loaded (roadmap 6.6).
+            psim.Spacing()
+            psim.TextUnformatted("Toolpath Source:")
+            layer_names = self.content.curved_layer_names or []
+            tokens = [-1] + list(range(len(layer_names)))
+            labels = ["Planar (G-code)"] + layer_names
+            psim.BeginDisabled(self.content.precompute_running or self.content.playback_running)
+            for i, (tok, label) in enumerate(zip(tokens, labels)):
+                if i:
+                    psim.SameLine()
+                changed, new_val = psim.RadioButton(label, self.content.toolpath_source, tok)
+                if changed:
+                    self.content.toolpath_source = new_val
+                    if new_val != -1:
+                        self.content.apply_live_layer_visibility(new_val)
+            psim.EndDisabled()
+            psim.Spacing()
+
+            # Curved build sequence (6.2 -> 6.3 -> 6.4), laid out top-down so
+            # each stage's control sits directly below the previous stage's
+            # progress bar / status (roadmap 6.6).
+            psim.BeginDisabled(self.content.playback_running)
+            if self.content.curved_model_loaded:
+                # 6.2 geodesics: button, then its own progress bar + status.
                 if self.content.geodesic_running:
                     if psim.Button("Pause Geodesics"):
                         self.content.pause_geodesic_precompute()
                 else:
                     if psim.Button("Build Geodesics"):
                         self.content.run_geodesic_precompute()
-
                 psim.SameLine()
-
                 if psim.Button("Cancel Geodesics"):
                     self.content.cancel_geodesic_precompute()
-
-                if self.content.geodesic_loaded:
-                    # Live-layer selector: drives strict one-at-a-time visibility
-                    # (RX is sealed inside Surface_TX_Base, so it's invisible with
-                    # TX shown). Applied on change so selecting RX immediately hides
-                    # TX. Full playback gating / the S1.32 stack rule are still 6.6.
-                    for i, layer_name in enumerate(self.content.curved_layer_names):
-                        if i:
-                            psim.SameLine()
-                        changed, self.live_layer = psim.RadioButton(
-                            layer_name, self.live_layer, i)
-                        if changed:
-                            self.content.apply_live_layer_visibility(self.live_layer)
-
-                    # Roadmap 6.3: order each layer's pieces, drawing the printed
-                    # pieces as a print-order gradient and the hover travel moves
-                    # between them. Synchronous, so no per-frame pump. Re-apply
-                    # the live-layer view so the fresh overlays obey the selection.
-                    if psim.Button("Build Print Order"):
-                        self.content.build_print_order()
-                        self.content.apply_live_layer_visibility(self.live_layer)
-                    psim.TextWrapped(self.content.curved_order_status)
-
-                    # Roadmap 6.4: attach a per-waypoint TCP orientation
-                    # (nozzle normal to the surface) to each feed point and
-                    # draw the frames as triads. Gated on a built print order.
-                    if self.content.curved_order_loaded:
-                        if psim.Button("Build Orientation Frames"):
-                            self.content.build_orientation_frames()
-                            self.content.apply_live_layer_visibility(self.live_layer)
-                        psim.TextWrapped(self.content.curved_orient_status)
 
                 total = self.content.geodesic_total
                 fraction = (self.content.geodesic_index / total) if total else 0.0
                 psim.ProgressBar(fraction, overlay=f"{fraction * 100:.0f}%" if total else "")
+                psim.TextWrapped(self.content.geodesic_status)
 
-            psim.TextWrapped(self.content.geodesic_status)
+                # 6.3 print order -- appears below the geodesic bar/status.
+                # Synchronous, so no per-frame pump. Re-apply the live-layer
+                # view so the fresh overlays obey the selection.
+                if self.content.geodesic_loaded:
+                    if psim.Button("Build Print Order"):
+                        self.content.build_print_order()
+                        if self.content.toolpath_source != -1:
+                            self.content.apply_live_layer_visibility(self.content.toolpath_source)
+                    psim.TextWrapped(self.content.curved_order_status)
+
+                    # 6.4 orientation frames -- below the print-order status.
+                    if self.content.curved_order_loaded:
+                        if psim.Button("Build Orientation Frames"):
+                            self.content.build_orientation_frames()
+                            if self.content.toolpath_source != -1:
+                                self.content.apply_live_layer_visibility(self.content.toolpath_source)
+                        psim.TextWrapped(self.content.curved_orient_status)
+            psim.EndDisabled()
 
             psim.Spacing()
             psim.Spacing()
@@ -180,13 +202,23 @@ class UI_Menu:
             if psim.TreeNode("Toolpath Settings"):
                 _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 1.0, 100.0)
 
+                # Ground-clearance toggle (roadmap 6.6): reject IK branches
+                # dipping below world z=0. Applies to both the planar and
+                # curved precompute. Disabled mid-solve so a single run can't
+                # be solved half under each rule. Uncheck for a low-plate /
+                # curved-mockup setup where sub-z=0 poses are physically fine.
+                psim.BeginDisabled(self.content.precompute_running)
+                _, self.content.reject_below_ground = psim.Checkbox(
+                    "Reject poses below ground (z<0)", self.content.reject_below_ground)
+                psim.EndDisabled()
+
                 psim.Spacing()
                 if self.content.precompute_running:
                     if psim.Button("Pause Precompute"):
                         self.content.pause_toolpath_ik_precompute()
                 else:
                     if psim.Button("Run Precompute"):
-                        self.content.run_toolpath_ik_precompute(JOINT_LIMITS)
+                        self.content.run_active_toolpath_ik_precompute(JOINT_LIMITS)
 
                 psim.SameLine()
 
