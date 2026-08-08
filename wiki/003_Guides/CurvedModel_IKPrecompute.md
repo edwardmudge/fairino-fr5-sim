@@ -184,8 +184,10 @@ above).
   `_nozzle_clears_plane()`, `_plate_plane()`, `_meshes_clear_plane()`,
   `_branch_clears_ground()` (now takes an optional `plane` arg),
   `curved_precompute_cache_path()`, `_curved_toolpath_cache_meta()`;
-  `CURVED_TIP_CLEARANCE_TOLERANCE_MM` constant; `precompute_cache_path`/
-  `precompute_tip_tolerance_mm` state.
+  `precompute_cache_path`/`precompute_tip_tolerance_mm` state.
+- `examples/curved_surface_printing/study_config.py`:
+  `CURVED_TIP_CLEARANCE_TOLERANCE_MM` (moved here by `settled.md` S1.41 — it
+  is nozzle/material-dependent).
 - `wiki/002_Architecture/settled.md` **S1.37** — the full decision record;
   S1.12/S1.13/S1.21 — the Stage-5 chunked-precompute/ground-clearance/cache
   machinery this reuses; S1.36 — the orientation frames this consumes;

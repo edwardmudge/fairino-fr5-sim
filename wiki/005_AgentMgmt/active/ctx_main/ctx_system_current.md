@@ -82,4 +82,4 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-See `wiki/002_Architecture/settled.md` (S1.1–S1.40).
+See `wiki/002_Architecture/settled.md` (S1.1–S1.42).

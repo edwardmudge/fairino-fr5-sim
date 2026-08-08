@@ -38,3 +38,23 @@ CURVED_LAYERS = [
 CURVED_OBSTACLE_FILE = "Surface_Bot.obj"  # optional non-print collision body
 CURVED_OBSTACLE_STRUCTURE_NAME = "Surface Bot"
 CURVED_OBSTACLE_COLOR = (0.55, 0.55, 0.55)
+
+# The four below are assumptions, not measurements -- they depend on this
+# study's material and nozzle, so they live here rather than in
+# geometry_backend.py. Tune empirically.
+
+# How far a travel move between two curve pieces is offset outward along the
+# local surface normal, so the nozzle hovers over the mockup and any wet traces
+# instead of scraping them. Used by build_print_order().
+CURVED_TRAVEL_HOVER_MM = 4.0
+
+# Nozzle-tip inward slack against a waypoint's surface tangent plane during the
+# curved precompute clearance check. Assumed plausible contact depth; the 6 arm
+# links get zero tolerance. Used by _branch_clears_ground().
+CURVED_TIP_CLEARANCE_TOLERANCE_MM = 1.0
+
+# The PLY toolpath curves carry no extrusion (E) data, and "layer height from Z"
+# is meaningless on a conformal path -- this fixed cross-section stands in for
+# both. Assumed plausible for an elastomer trace. Used by _build_curved_beads().
+CURVED_BEAD_WIDTH_MM = 1.5
+CURVED_BEAD_HEIGHT_MM = 0.5

@@ -83,6 +83,8 @@ CURVE_RADIUS_MM = 0.5  # thin vs. TRAJECTORY_RADIUS_MM (2.0) -- 70 pieces should
 from examples.curved_surface_printing.study_config import (
     CURVED_MODEL_DIR, CURVED_MODEL_ROTATE_X_DEG, CURVED_LAYERS,
     CURVED_OBSTACLE_FILE, CURVED_OBSTACLE_STRUCTURE_NAME, CURVED_OBSTACLE_COLOR,
+    CURVED_TRAVEL_HOVER_MM, CURVED_TIP_CLEARANCE_TOLERANCE_MM,
+    CURVED_BEAD_WIDTH_MM, CURVED_BEAD_HEIGHT_MM,
 )
 
 GEODESIC_CHUNK_SOURCES = 1  # whole Dijkstra sources solved per step() call.
@@ -93,29 +95,6 @@ GEODESIC_CHUNK_SOURCES = 1  # whole Dijkstra sources solved per step() call.
 # heap plus partial dist/prev across frames -- real complexity for a job that
 # finishes in seconds.
 
-# Assumed, not measured -- the toolpath curves carry no clearance data. A travel
-# move between two curve pieces follows the 6.2 geodesic offset this far outward
-# along the local surface normal, so the nozzle hovers over the mockup and any
-# wet traces instead of scraping them. ~3-5mm is a plausible non-contact hop for
-# a soft elastomer bead; tune empirically. Used by build_print_order().
-CURVED_TRAVEL_HOVER_MM = 4.0
-# Assumed, not measured -- how deep the nozzle tip may sit *inward* of its own
-# waypoint's surface tangent plane during a curved precompute clearance check.
-# The tip prints on the surface (signed distance ~0, sometimes slightly negative
-# after mesh discretisation), so it alone gets this inward slack; the 6 arm-link
-# meshes get zero tolerance. ~1mm is a plausible nozzle-contact depth; tune
-# empirically like the other assumed job constants. Used by _branch_clears_ground().
-CURVED_TIP_CLEARANCE_TOLERANCE_MM = 1.0
-# Assumed, not measured -- the curved-print PLY toolpath curves carry no
-# extrusion (E) data, and "layer height from Z" is meaningless on a
-# conformal path -- a fixed cross-section stands in for both, same spirit as
-# FILAMENT_DIAMETER_MM. ~1.5mm is a plausible elastomer trace width for this
-# nozzle; tune empirically. Used by _build_curved_beads().
-CURVED_BEAD_WIDTH_MM = 1.5
-# Assumed, not measured -- same reasoning as CURVED_BEAD_WIDTH_MM. ~0.5mm is
-# a plausible single-pass bead height for a conformal elastomer trace. Used
-# by _build_curved_beads().
-CURVED_BEAD_HEIGHT_MM = 0.5
 # Solid warm red -- the non-printing hops. Deliberately outside the ordered-feed
 # gradient's purple->teal->yellow ramp below, so "printing" (gradient) vs
 # "moving" (this flat colour) read apart at a glance. Used by build_print_order().
@@ -217,14 +196,41 @@ class VisContent:
         self._registered_bead_capacity = 0      # How many beads are actually registered
         # with Polyscope right now, see PLAYBACK_LOOKAHEAD_BEADS
 
-        self.curved_model_loaded = False  # True once load_curved_model() has registered its structures -- roadmap 6.1/6.6
+        # Curved-model state, in dependency order -- each _reset_* helper below
+        # is the single definition of its group's cleared values, shared with
+        # the clear/abort paths (settled.md S1.42).
+        self._reset_curved_model_state()
+        self.geodesic_status = ""   # not in _reset_geodesic_state(): the abort
+                                    # path sets its own explanatory message
+        self._reset_geodesic_state()
+        self._reset_print_order_state()
+        self._reset_orientation_state()
+        self._reset_curved_bead_state()
 
-        # Retained curved-model geometry, world coordinates (already through
-        # T_curved) -- roadmap 6.2 needs the per-piece curves and the print
-        # surfaces that 6.1 previously computed and threw away. All lists are
-        # indexed positionally by CURVED_LAYERS (examples/curved_surface_printing/
-        # study_config.py). The obstacle mesh is deliberately absent from
-        # these: it's a 6.5 collision body, not a print surface.
+        # Initialise the scene
+        self.create_coordinate_frame()
+        self.load_build_plate()
+        self.mesh_data = self.load_data()
+        self.update_arm([0, 0, 0, 0, 0, 0])
+
+
+    # --- Grouped curved-model state resets ---------------------------------
+    # Each helper is the one place a subsystem's cleared state is defined, so
+    # __init__ and the clear/abort paths cannot drift apart (adding a field to
+    # one and forgetting the other was the hazard -- settled.md S1.42).
+    # Deliberately pure state assignment, no Polyscope calls: that is what makes
+    # them safe to call from __init__ before any structure is registered. The
+    # ps.remove_* calls stay at the call sites, where the structure names are
+    # known.
+
+    def _reset_curved_model_state(self):
+        """Retained curved-model geometry, world coordinates (already through
+        T_curved) -- roadmap 6.2 needs the per-piece curves and the print
+        surfaces that 6.1 previously computed and threw away. All lists are
+        indexed positionally by CURVED_LAYERS (examples/curved_surface_printing/
+        study_config.py). The obstacle mesh is deliberately absent from these:
+        it's a 6.5 collision body, not a print surface."""
+        self.curved_model_loaded = False  # True once load_curved_model() has registered its structures -- roadmap 6.1/6.6
         self.curved_pieces_world = None        # list of len(CURVED_LAYERS) lists of (Ni,3) polylines
         self.curved_surface_verts_world = None # list of len(CURVED_LAYERS) (V,3)
         self.curved_surface_vnormals_world = None  # list of len(CURVED_LAYERS) (V,3) outward unit normals -- 6.3 hover, 6.4 orientation
@@ -233,11 +239,15 @@ class VisContent:
         self.T_curved = None                   # (4,4) placement actually used, for the staleness check
         self._T_user_frame_at_curved_load = None  # Plate pose the world state above was built against
 
-        # Chunked geodesic precompute state, see run_geodesic_precompute()
+
+    def _reset_geodesic_state(self):
+        """Chunked geodesic precompute state, see run_geodesic_precompute().
+        Resets geodesic_index/total together, so a stale index can't outlive
+        the arrays it counted (settled.md S1.24). Deliberately excludes
+        geodesic_status, so a caller can set an explanatory message first."""
         self.geodesic_running = False
         self.geodesic_index = 0
         self.geodesic_total = 0
-        self.geodesic_status = ""
         self.geodesic_loaded = False       # True only once both cost matrices are complete -- what 6.3 gates on
         self.geodesic_graphs = None        # list of 2 CSR triples; None/not-None is the start-fresh/resume sentinel
         self.geodesic_snap_nodes = None    # list of 2 (70,) endpoint -> vertex id on its own surface
@@ -249,9 +259,11 @@ class VisContent:
         self.geodesic_cost = None          # list of 2 (70,70) float64, inf = unreachable
         self.geodesic_unreachable = None   # list of 2 ints, count of inf entries per matrix
 
-        # Print-order + travel moves, see build_print_order() -- roadmap 6.3.
-        # All per-layer, derived from the geodesic cost/prev above, so they are
-        # cleared alongside them in _abort_geodesic_precompute().
+
+    def _reset_print_order_state(self):
+        """Print-order + travel moves, see build_print_order() -- roadmap 6.3.
+        All per-layer, derived from the geodesic cost/prev, so they are cleared
+        alongside them in _abort_geodesic_precompute()."""
         self.curved_order_loaded = False       # True once build_print_order() has run -- what 6.5 gates on
         self.curved_print_order = None         # list of len(CURVED_LAYERS) lists of (piece, entry_end)
         self.curved_travel_moves = None        # list of len(CURVED_LAYERS) lists of (M,3) hover polylines
@@ -259,23 +271,27 @@ class VisContent:
         self.curved_travel_naive = None        # list of len(CURVED_LAYERS) file-order travel (mm), the baseline
         self.curved_order_status = ""
 
-        # Per-waypoint TCP orientation frames, see build_orientation_frames()
-        # -- roadmap 6.4. Derived from the print order above, so cleared with
-        # it in _abort_geodesic_precompute().
+
+    def _reset_orientation_state(self):
+        """Per-waypoint TCP orientation frames, see build_orientation_frames()
+        -- roadmap 6.4. Derived from the print order, so cleared with it in
+        _abort_geodesic_precompute()."""
         self.curved_orient_loaded = False      # True once build_orientation_frames() has run -- what 6.5 gates on
         self.curved_orient_frames = None       # list of len(CURVED_LAYERS) lists of (pos_world (3,), R_target (3,3)), print order
         self.curved_orient_status = ""
 
-        # Per-layer printed-bead playback state, see _build_curved_beads() /
-        # _init_curved_toolpath_playback() -- roadmap 6.6. Mirrors the flat
-        # gcode_bead_* fields above, but indexed per layer (lazily sized to
-        # len(CURVED_LAYERS) on first use) so RX's and TX's printed meshes can
-        # coexist -- the S1.32 stack rule requires TX's view to keep showing
-        # RX's already-printed layer beneath it, not just whichever was last
-        # built. Cleared only by clear_curved_model() or a re-order/re-orient
-        # cascade (_abort_geodesic_precompute()) -- never by a generic
-        # precompute abort/cancel, so switching the active toolpath source
-        # can't make a completed layer's printed mesh disappear.
+
+    def _reset_curved_bead_state(self):
+        """Per-layer printed-bead playback state, see _build_curved_beads() /
+        _init_curved_toolpath_playback() -- roadmap 6.6. Mirrors the flat
+        gcode_bead_* fields, but indexed per layer (lazily sized to
+        len(CURVED_LAYERS) on first use) so RX's and TX's printed meshes can
+        coexist -- the S1.32 stack rule requires TX's view to keep showing
+        RX's already-printed layer beneath it, not just whichever was last
+        built. Cleared only by clear_curved_model() or a re-order/re-orient
+        cascade (_abort_geodesic_precompute()) -- never by a generic
+        precompute abort/cancel, so switching the active toolpath source
+        can't make a completed layer's printed mesh disappear."""
         self.curved_bead_verts_full = None
         self.curved_bead_faces = None
         self.curved_bead_reveal_index = None
@@ -283,12 +299,6 @@ class VisContent:
         self.curved_bead_verts_current = None
         self.curved_print_handle = None
         self.curved_bead_registered_capacity = None
-
-        # Initialise the scene
-        self.create_coordinate_frame()
-        self.load_build_plate()
-        self.mesh_data = self.load_data()
-        self.update_arm([0, 0, 0, 0, 0, 0])
 
 
     def create_coordinate_frame(self, scale=1.0, origin=(0, 0, 0), rotation=None, name="Coordinate Frame"):
@@ -563,33 +573,11 @@ class VisContent:
             verts_local[:, idx + 4, 2] = top[:, 0]
         verts_local = verts_local.reshape(-1, 3)
 
-        # Drop cap faces at bead-to-bead boundaries that are provably always
-        # hidden: back-to-back in the G-code (no travel gap), colinear (same
-        # travel direction -- at a turn the two cap planes meet at an angle,
-        # not coincide), and width-matched (same cross-section, so no ledge
-        # is exposed). ~8% of triangles on a real multi-layer print, since
-        # most consecutive segments trace a curved surface and fail the
-        # colinearity test -- settled.md S1.19.
-        u_valid, width_valid = u[valid], width[valid]
-        chained = np.diff(reveal_waypoint_index) == 1
-        colinear = np.sum(u_valid[:-1] * u_valid[1:], axis=1) >= CAP_CULL_COLINEAR_DOT_MIN
-        width_matched = np.abs(width_valid[:-1] - width_valid[1:]) <= CAP_CULL_WIDTH_TOL_MM
-        cullable = chained & colinear & width_matched
-
-        drop_end_cap = np.zeros(K, dtype=bool)    # bead k's end cap (template rows 8-9)
-        drop_start_cap = np.zeros(K, dtype=bool)  # bead k's start cap (template rows 4-5)
-        drop_end_cap[:-1] = cullable
-        drop_start_cap[1:] = cullable
-
-        keep_row = np.ones((K, 12), dtype=bool)
-        keep_row[drop_end_cap, 8] = False
-        keep_row[drop_end_cap, 9] = False
-        keep_row[drop_start_cap, 4] = False
-        keep_row[drop_start_cap, 5] = False
-
-        faces_full = (self._BEAD_BOX_FACE_TEMPLATE[None, :, :] + (np.arange(K) * 8)[:, None, None])
-        faces = faces_full[keep_row]
-        bead_face_prefix = np.concatenate([[0], np.cumsum(keep_row.sum(axis=1))])
+        # Width varies per segment here (it comes from extruded E), so the
+        # width-match term applies -- see bead_faces(), settled.md S1.19.
+        faces, bead_face_prefix = bead_faces(
+            self._BEAD_BOX_FACE_TEMPLATE, K, reveal_waypoint_index,
+            u[valid], width_valid=width[valid])
 
         verts_world = transform_points(self.T_user_frame, verts_local)
 
@@ -786,14 +774,7 @@ class VisContent:
             if CURVED_OBSTACLE_FILE:
                 ps.remove_surface_mesh(CURVED_OBSTACLE_STRUCTURE_NAME, error_if_absent=False)
 
-        self.curved_pieces_world = None
-        self.curved_surface_verts_world = None
-        self.curved_surface_vnormals_world = None
-        self.curved_surface_faces = None
-        self.curved_layer_names = None
-        self.T_curved = None
-        self._T_user_frame_at_curved_load = None
-        self.curved_model_loaded = False
+        self._reset_curved_model_state()
         self.toolpath_source = -1
 
 
@@ -940,19 +921,7 @@ class VisContent:
         _abort_toolpath_ik_precompute() guards against, settled.md S1.24).
         Does not touch geodesic_status, so a caller can set an explanatory
         message first."""
-        self.geodesic_running = False
-        self.geodesic_loaded = False
-        self.geodesic_index = 0
-        self.geodesic_total = 0
-        self.geodesic_graphs = None
-        self.geodesic_snap_nodes = None
-        self.geodesic_snap_dist = None
-        self.geodesic_sources = None
-        self.geodesic_source_row = None
-        self.geodesic_queue = None
-        self.geodesic_prev = None
-        self.geodesic_cost = None
-        self.geodesic_unreachable = None
+        self._reset_geodesic_state()
 
         # The 6.3 print order and its travel moves are derived from the cost
         # matrices and predecessor rows just dropped, so they go stale with
@@ -963,28 +932,15 @@ class VisContent:
                 ps.remove_curve_network(f"Curved Order Feed {name}", error_if_absent=False)
                 ps.remove_curve_network(f"Curved Orient Frames {name}", error_if_absent=False)
                 ps.remove_surface_mesh(f"Curved Print {name}", error_if_absent=False)
-        self.curved_order_loaded = False
-        self.curved_print_order = None
-        self.curved_travel_moves = None
-        self.curved_travel_total = None
-        self.curved_travel_naive = None
-        self.curved_order_status = ""
+        self._reset_print_order_state()
 
         # The 6.4 orientation frames derive from the print order just dropped.
-        self.curved_orient_loaded = False
-        self.curved_orient_frames = None
-        self.curved_orient_status = ""
+        self._reset_orientation_state()
 
         # The 6.6 printed-bead meshes are built from the waypoints derived
         # above (print order + orientation), across every layer -- not just
         # whichever is currently active -- so they go stale with them too.
-        self.curved_bead_verts_full = None
-        self.curved_bead_faces = None
-        self.curved_bead_reveal_index = None
-        self.curved_bead_face_prefix = None
-        self.curved_bead_verts_current = None
-        self.curved_print_handle = None
-        self.curved_bead_registered_capacity = None
+        self._reset_curved_bead_state()
 
 
     def step_geodesic_precompute(self):
@@ -1338,25 +1294,10 @@ class VisContent:
             verts_world[:, idx + 4, :] = corner + normal_v * half_h
         verts_world = verts_world.reshape(-1, 3)
 
-        u_valid = u[valid]
-        chained = np.diff(reveal_waypoint_index) == 1
-        colinear = np.sum(u_valid[:-1] * u_valid[1:], axis=1) >= CAP_CULL_COLINEAR_DOT_MIN
-        cullable = chained & colinear
-
-        drop_end_cap = np.zeros(K, dtype=bool)
-        drop_start_cap = np.zeros(K, dtype=bool)
-        drop_end_cap[:-1] = cullable
-        drop_start_cap[1:] = cullable
-
-        keep_row = np.ones((K, 12), dtype=bool)
-        keep_row[drop_end_cap, 8] = False
-        keep_row[drop_end_cap, 9] = False
-        keep_row[drop_start_cap, 4] = False
-        keep_row[drop_start_cap, 5] = False
-
-        faces_full = (self._BEAD_BOX_FACE_TEMPLATE[None, :, :] + (np.arange(K) * 8)[:, None, None])
-        faces = faces_full[keep_row]
-        bead_face_prefix = np.concatenate([[0], np.cumsum(keep_row.sum(axis=1))])
+        # Fixed cross-section here (CURVED_BEAD_WIDTH_MM), so no width-match
+        # term -- see bead_faces(), settled.md S1.19.
+        faces, bead_face_prefix = bead_faces(
+            self._BEAD_BOX_FACE_TEMPLATE, K, reveal_waypoint_index, u[valid])
 
         return verts_world, faces, reveal_waypoint_index, bead_face_prefix
 
@@ -1696,55 +1637,6 @@ class VisContent:
         return self.solve_ik_tcp_matrix(target_pos_mm, R_target, joint_limits)
 
 
-    def solve_toolpath_ik(self, waypoints, R_target, joint_limits, reference_joint_angles=None):
-        """
-        Solve IK across a whole toolpath, chaining continuity
-        waypoint-to-waypoint -- see settled.md S1.11, roadmap
-        Stage5_README.md 5.4. waypoints is
-        build_toolpath_waypoints_world()'s first return value; R_target is
-        its second (the constant TCP orientation for the whole path).
-
-        For each waypoint, calls solve_ik_tcp_matrix() ranked against the
-        previous waypoint's chosen solution (or reference_joint_angles /
-        self.current_joint_angles for the first waypoint), then walks the
-        ranked branches and takes the first one that clears the posed build plate
-        (_branch_clears_ground -- roadmap 5.5, settled.md S1.13), not
-        blindly the top-ranked branch.
-
-        Aborts the entire solve at the first waypoint with no valid branch,
-        or where every valid branch hits the posed build plate -- no
-        partial motion, matching the abort contract roadmap 5.6's chunked
-        precompute will also need (settled.md S1.12).
-
-        Returns (joint_path, status_message):
-          joint_path: list of joint_angles_deg (np.ndarray[6]), one per
-            waypoint, in order. Empty list on failure.
-          status_message: "Solved N waypoint(s)" on success; on failure, the
-            failing waypoint's index plus either solve_ik_tcp_matrix's own
-            status string verbatim ("Unreachable: ..." / "Reachable but
-            outside joint limits ...") or the plate-clearance failure
-            message when every valid branch hits the posed plate.
-        """
-        if reference_joint_angles is None:
-            reference_joint_angles = self.current_joint_angles
-
-        joint_path = []
-        ref = reference_joint_angles
-        for i, (pos_world_mm, _is_feed_move) in enumerate(waypoints):
-            solutions, status = self.solve_ik_tcp_matrix(
-                pos_world_mm, R_target, joint_limits, reference_joint_angles=ref)
-            if not solutions:
-                return [], f"Waypoint {i}/{len(waypoints)}: {status}"
-
-            clear = next((angles for angles, *_ in solutions if self._branch_clears_ground(angles)), None)
-            if clear is None:
-                return [], f"Waypoint {i}/{len(waypoints)}: all {len(solutions)} valid branch(es) hit the posed build plate"
-
-            ref = clear
-            joint_path.append(ref)
-        return joint_path, f"Solved {len(joint_path)} waypoint(s)"
-
-
     def _toolpath_cache_meta(self, user_frame):
         """Cache-key dict for the toolpath precompute cache -- roadmap
         Stage5_README.md 5.10, settled.md S1.21. Compared by dict equality,
@@ -2068,9 +1960,10 @@ class VisContent:
     def step_toolpath_ik_precompute(self):
         """Advance the in-progress precompute by up to PRECOMPUTE_CHUNK_SIZE
         waypoints -- call every frame from render(). No-ops unless
-        precompute_running. Uses the same per-waypoint solve + posed-plate
-        clearance logic as solve_toolpath_ik, and aborts the whole
-        precompute (no partial motion) at the first waypoint with no
+        precompute_running. Per waypoint: solve_ik_tcp_matrix ranked against
+        the previous waypoint's chosen pose, then the first ranked branch
+        that clears the posed plate (settled.md S1.12/S1.13). Aborts the
+        whole precompute (no partial motion) at the first waypoint with no
         valid/clearing branch."""
         if not self.precompute_running:
             return
@@ -2673,6 +2566,49 @@ def transform_points(T, points):
     """Apply a 4x4 homogeneous transform to an Nx3 point array."""
     homo = np.hstack([points, np.ones((len(points), 1))])
     return (T @ homo.T).T[:, :3]
+
+
+def bead_faces(face_template, K, reveal_index, u_valid, width_valid=None):
+    """Triangle indices for K bead boxes, with always-hidden cap faces culled.
+
+    Drop cap faces at bead-to-bead boundaries that are provably always hidden:
+    back-to-back in the source path (no travel gap), colinear (same travel
+    direction -- at a turn the two cap planes meet at an angle, not coincide),
+    and, where widths vary, width-matched (same cross-section, so no ledge is
+    exposed). ~8% of triangles on a real multi-layer print, since most
+    consecutive segments trace a curved surface and fail the colinearity test
+    -- settled.md S1.19.
+
+    width_valid=None skips the width-match term, for callers whose beads have a
+    fixed cross-section (the curved path, _build_curved_beads).
+
+    Returns (faces, bead_face_prefix):
+      faces: (<=K*12, 3) int, indices into a bead-major (8 rows per bead)
+        vertex array -- fewer than 12 per bead wherever a cap was culled, so
+        not a fixed per-bead stride.
+      bead_face_prefix: (K+1,) int cumulative triangle count, so
+        `faces[:bead_face_prefix[n]]` is exactly the first n beads
+        (settled.md S1.20).
+    """
+    chained = np.diff(reveal_index) == 1
+    colinear = np.sum(u_valid[:-1] * u_valid[1:], axis=1) >= CAP_CULL_COLINEAR_DOT_MIN
+    cullable = chained & colinear
+    if width_valid is not None:
+        cullable = cullable & (np.abs(width_valid[:-1] - width_valid[1:]) <= CAP_CULL_WIDTH_TOL_MM)
+
+    drop_end_cap = np.zeros(K, dtype=bool)    # bead k's end cap (template rows 8-9)
+    drop_start_cap = np.zeros(K, dtype=bool)  # bead k's start cap (template rows 4-5)
+    drop_end_cap[:-1] = cullable
+    drop_start_cap[1:] = cullable
+
+    keep_row = np.ones((K, 12), dtype=bool)
+    keep_row[drop_end_cap, 8] = False
+    keep_row[drop_end_cap, 9] = False
+    keep_row[drop_start_cap, 4] = False
+    keep_row[drop_start_cap, 5] = False
+
+    faces_full = (face_template[None, :, :] + (np.arange(K) * 8)[:, None, None])
+    return faces_full[keep_row], np.concatenate([[0], np.cumsum(keep_row.sum(axis=1))])
 
 
 def read_ply_polyline(filepath):

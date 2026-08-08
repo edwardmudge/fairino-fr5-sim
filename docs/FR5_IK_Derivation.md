@@ -117,11 +117,12 @@ the rest by summed wrapped-angle distance to a reference pose --
 practice per Craig's text (prefer the solution closest to the reference
 configuration). Choosing *which* branch to apply is left to the caller:
 `gui_panel.py`'s "Inverse Kinematics" panel defaults to index 0 but lets
-the user pick any other valid branch from a list. `solve_toolpath_ik`
-(and the chunked precompute that mirrors it) instead passes the
-*previous* waypoint's solved pose as `reference_joint_angles` and always
-takes index 0, giving continuous motion waypoint-to-waypoint instead of
-each one independently chasing the live arm's pose.
+the user pick any other valid branch from a list. The chunked toolpath
+precompute (`step_toolpath_ik_precompute`) instead passes the *previous*
+waypoint's solved pose as `reference_joint_angles` and takes the first
+ranked branch that clears the plate, giving continuous motion
+waypoint-to-waypoint instead of each one independently chasing the live
+arm's pose.
 
 Each returned entry carries `raw_branch_index` -- `solve_ik`'s own
 enumeration position -- purely as a stable ordinal for disambiguating

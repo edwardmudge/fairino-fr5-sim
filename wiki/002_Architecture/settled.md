@@ -2428,3 +2428,126 @@ rejects a nozzle inward of its own plane while the plate check passes; both cach
 metas carry `allow_tcp_through_plate` (not `reject_below_ground`) at version 4.
 **Remaining:** the interactive GUI eyeball (the "Allow TCP through build plate"
 checkbox driving the toggle and greying out mid-solve) needs the Polyscope window.
+
+## S1.41 Assumed job constants move to study_config.py (amends S1.33) -- material/nozzle values follow the study, not the engine
+
+**`geometry_backend.py` + `examples/curved_surface_printing/study_config.py`.**
+The four "assumed, not measured" curved-print job constants move out of
+`geometry_backend.py` and into the study config, joining the asset wiring
+S1.33 already put there:
+
+| Constant | Value | Consumer |
+|---|---|---|
+| `CURVED_TRAVEL_HOVER_MM` | 4.0 | `build_print_order()` |
+| `CURVED_TIP_CLEARANCE_TOLERANCE_MM` | 1.0 | `_branch_clears_ground()` |
+| `CURVED_BEAD_WIDTH_MM` | 1.5 | `_build_curved_beads()` |
+| `CURVED_BEAD_HEIGHT_MM` | 0.5 | `_build_curved_beads()` |
+
+`geometry_backend.py`'s existing single import from `study_config` grows to
+carry them; no call site changes -- the names are unchanged, only where they
+are bound. Values are unchanged, so no behaviour, cache-version or GUI change.
+
+**Reason:** S1.33 split the curved-printing feature into a generic mechanism
+(`geometry_backend.py`/`gui_panel.py`) and one study's concrete config, so that
+cloning the repo for a different curved-print job means writing a new
+`study_config.py` rather than editing the engine. These four constants sat on
+the wrong side of that line: all four are **material- and nozzle-dependent**
+(their own comments justified them as "a plausible elastomer trace width for
+this nozzle", "a soft elastomer bead", "a plausible nozzle-contact depth"), so
+a different job with a different material or nozzle had to edit
+`geometry_backend.py` -- exactly the outcome S1.33 set out to avoid. S1.33's
+closing guidance had named hover as generic job-tuning that could stay; that
+carve-out is withdrawn here, since hover is elastomer-specific on the same
+evidence as the other three.
+
+Kept as **module-level constants**, not the optional `CURVED_LAYERS` `.get(...)`
+fields S1.33 prescribes. That pattern is for genuinely *per-layer* behaviour
+(the per-pass obstacle swap); these four are job-wide, so per-layer entries
+would duplicate identical values across RX and TX. Module-level matches how
+`CURVED_MODEL_ROTATE_X_DEG` and the `CURVED_OBSTACLE_*` values are already
+configured.
+
+**Non-revertible unless:** one of these four becomes genuinely per-layer (an
+RX bead and a TX bead of different width, say) -- at which point it becomes a
+`CURVED_LAYERS` field per S1.33, moving further into the config, not back to
+`geometry_backend.py`.
+
+**Verified on:** 2026-08-08 -- headless under the `fairino-fr5-sim` env:
+`geometry_backend` imports cleanly and all four constants resolve to the same
+values as `study_config`'s; no module-level assignment for any of the four
+remains in `geometry_backend.py`; all call sites
+(`build_print_order`/`_branch_clears_ground`/`_build_curved_beads`) reference
+them unchanged. **Remaining:** no runtime eyeball -- values are identical, so
+geodesics/print-order/precompute behaviour is unchanged by construction.
+
+## S1.42 Pre-commit sweep -- dead `solve_toolpath_ik` removed, curved state resets and bead-face culling deduplicated
+
+**`geometry_backend.py` only.** A duplication sweep before committing the
+curved-printing branch. **No behaviour change on either path** -- every edit is
+code motion or dead-code removal, proven below.
+
+**1. `solve_toolpath_ik()` deleted (47 lines).** The Stage 5.4 synchronous
+whole-path solver. Superseded by the chunked `step_toolpath_ik_precompute`
+(S1.12) and left with **zero call sites** -- verified by AST across
+`geometry_backend.py`/`gui_panel.py`/`main.py`, and the codebase contains no
+`getattr`/`eval`/`exec`/`globals()`, so no dynamic-dispatch path could reach
+it either. `step_toolpath_ik_precompute`'s docstring no longer cross-references
+it. `docs/FR5_IK_Derivation.md` updated for the same reason (it described the
+method as the live continuity consumer).
+
+**2. Five `_reset_*_state()` helpers.** `__init__` and the two reset paths each
+re-declared the same curved-model fields -- **37 assignments duplicated
+verbatim**. Each group now has one definition:
+
+| Helper | Fields | Callers |
+|---|---|---|
+| `_reset_curved_model_state()` | 8 | `__init__`, `clear_curved_model()` |
+| `_reset_geodesic_state()` | 13 | `__init__`, `_abort_geodesic_precompute()` |
+| `_reset_print_order_state()` | 6 | `__init__`, `_abort_geodesic_precompute()` |
+| `_reset_orientation_state()` | 3 | `__init__`, `_abort_geodesic_precompute()` |
+| `_reset_curved_bead_state()` | 7 | `__init__`, `_abort_geodesic_precompute()` |
+
+Two deltas deliberately left at their call sites, not folded in:
+`clear_curved_model()` also sets `toolpath_source = -1`, and `__init__` sets
+`geodesic_status` (the abort path sets its own explanatory message first).
+
+The helpers are **pure state assignment -- no Polyscope calls** -- which is what
+makes them safe from `__init__` before any structure is registered; the
+`ps.remove_*` calls stay at the call sites where the structure names are known.
+The pre-existing `_reset_toolpath_playback_state()` is the naming precedent but
+**not** the structural one: it calls `_clear_gcode_print_mesh()`, so it is not
+`__init__`-safe.
+
+**Consequence for future work:** add a new curved state field to its helper,
+not to `__init__` -- otherwise the clear/abort paths leave it stale. That
+add-one-forget-the-other hazard is the whole reason for the extraction.
+
+**3. `bead_faces()` extracted (module-level).** `_build_gcode_beads` and
+`_build_curved_beads` shared ~14 lines of S1.19 cap-culling (cap-cull ->
+`keep_row` -> `faces_full` -> `bead_face_prefix`), differing only in the
+planar caller's width-match term. Now one function taking `width_valid=None`
+for callers with a fixed cross-section (the curved path). Module-level beside
+`transform_points`/`_bbox_corners`, per S1.1, so it is testable without a
+`VisContent`.
+
+**Comments were reviewed and deliberately left alone** -- dense but accurate,
+with no stale or dangling references, and the 10 guides already carry the
+background. Length alone was not treated as a defect.
+
+**Verified on:** 2026-08-08 -- headless, `fairino-fr5-sim` env, three
+equivalence proofs rather than inspection:
+(a) an AST snapshot of every `self.X = V` assignment reachable from
+`__init__`/`clear_curved_model()`/`_abort_geodesic_precompute()` (following the
+new helper calls) is **identical** before and after -- 75/11/29 assignments
+respectively;
+(b) `bead_faces()` is **bit-identical** to verbatim copies of both original
+inline blocks across 303 randomised cases (varying K, chained/colinear/
+width-matched patterns, plus `K==0`, single-bead, all-cullable and none-chained
+edges), asserted with `np.array_equal` on both returned arrays;
+(c) zero remaining references to `solve_toolpath_ik`, all three modules import
+clean, no never-called functions remain, and FK(0) still returns
+`[-820, -202, 50]`. `geometry_backend.py` 2995 -> 2952 lines.
+**Remaining:** the GUI eyeball -- planar preview/precompute/playback and the
+curved load -> geodesics -> order -> orientation -> precompute -> playback
+cycle, plus a clear-and-reload of the curved model (the path the reset helpers
+touch) -- needs the Polyscope window.

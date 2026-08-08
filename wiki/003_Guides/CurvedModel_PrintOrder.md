@@ -155,7 +155,7 @@ Generic engine tuning, `geometry_backend.py`:
 
 | Constant | Effect |
 |---|---|
-| `CURVED_TRAVEL_HOVER_MM` | Outward offset (mm) applied to every travel polyline along the local surface normal. 4.0 assumed; tune empirically for a different nozzle/material. |
+| `CURVED_TRAVEL_HOVER_MM` | Outward offset (mm) applied to every travel polyline along the local surface normal. 4.0 assumed; tune empirically for a different nozzle/material. Lives in `examples/curved_surface_printing/study_config.py` (nozzle/material-dependent — `settled.md` S1.41), not `geometry_backend.py`. |
 | `CURVED_TRAVEL_COLOR` | Flat colour for travel moves — deliberately off the `CURVED_ORDER_CMAP` gradient ramp. |
 | `CURVED_ORDER_CMAP` | Sequence-gradient colourmap for the print-order overlay (purple→teal→yellow). |
 | `CURVED_ORDER_FEED_RADIUS_MM` | Line radius (mm) of the print-order overlay, drawn over the base curve. |
@@ -166,9 +166,12 @@ Generic engine tuning, `geometry_backend.py`:
   `compute_vertex_normals()`, `_orient_normals_outward()` (module-level, per
   `settled.md` S1.1); `VisContent.build_print_order()`,
   `apply_live_layer_visibility()`, `_sequence_colors()`,
-  `_surface_boundary_vertices()` (the rim-node detector); `CURVED_TRAVEL_HOVER_MM`/
+  `_surface_boundary_vertices()` (the rim-node detector);
   `CURVED_TRAVEL_COLOR`/`CURVED_ORDER_CMAP`/`CURVED_ORDER_FEED_RADIUS_MM`
-  constants. All generic — no RX/TX-specific code (`settled.md` S1.33).
+  presentation constants. All generic — no RX/TX-specific code
+  (`settled.md` S1.33).
+- `examples/curved_surface_printing/study_config.py`: `CURVED_TRAVEL_HOVER_MM`
+  (moved here by `settled.md` S1.41 — it is nozzle/material-dependent).
 - `gui_panel.py`: "Build Print Order" button, RX/TX layer selector driven off
   `content.curved_layer_names`, "I/O Operations" section.
 - `wiki/002_Architecture/settled.md` **S1.35** — the full decision record and
