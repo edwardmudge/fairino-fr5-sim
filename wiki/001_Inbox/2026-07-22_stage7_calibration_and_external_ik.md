@@ -82,6 +82,23 @@ missing is narrower than first drafted:
    exists once §7.1's real offset is in. Real User Frame drops to §7.3
    because nothing in the criteria depends on it.
 
+## Confirmed decisions (user, 2026-08-14) — supervisor's TCP answer
+
+8. **The tool=1 offset is correct** — supervisor, 2026-08-14. The 33.4mm
+   flange-to-tip conflict is an **asset** fault, not a calibration one.
+   `nozzle.obj` gets hidden and the tool is represented by the TCP point
+   alone (§7.1.6–8). Accepted limitation: no tool-body geometry exists on
+   any path afterwards.
+9. **Arm-vs-mockup collision is out of scope and stays unguarded.** A
+   completed TX precompute was observed driving the arm through the
+   shoulder mockup. Nothing in the project checks it — there is no
+   mesh-vs-mesh collision at all; the arm is only tested against the plate
+   *plane*, S1.37's check is nozzle-only by design, and `Surface_Bot.obj`
+   orients normals rather than acting as an obstacle. Recorded as an open
+   question in `wiki/003_Guides/CurvedModel_PrintSetup.md`, not scheduled:
+   closing it needs a mesh-vs-mesh design decision that S1.37 already
+   rejected once on performance grounds.
+
 ## §7.1 — Real TCP Offset
 
 **Leads the stage** because §7.2's identity check compares `FK(joints=0) +
@@ -111,6 +128,38 @@ meaningful once this real offset is in place.
    (`create_coordinate_frame`'s `rotation` param already supports this,
    per `wiki/003_Guides/TCP_Frame.md` — no new mechanism, just a
    non-identity argument at this call site).
+6. **Hide the nozzle mesh.** The supervisor confirmed tool=1 is correct, so
+   `assets/printerHead/nozzle.obj` is not the calibrated head (163.47mm vs
+   196.91mm flange-to-tip — see the conformance audit). `set_enabled(False)`
+   on the `Nozzle` structure — the same
+   `ps.get_surface_mesh(name).set_enabled(...)` idiom
+   `apply_live_layer_visibility` already uses
+   (`geometry_backend.py:1416`). Keep the registration so a corrected
+   asset can be re-enabled later.
+7. **Tool collision becomes the TCP point.** The nozzle mesh is
+   moving-geometry index 6, the tool's body in the posed-plate check, so
+   hiding it visually while still colliding against it would reject poses
+   using a tool 33mm the wrong length. Make `rest_verts[6]` the single TCP
+   point. **Decision: point only, no tool-body model** — it has zero effect
+   on the curved path (§7.2 removes collision there entirely) and the body
+   was never modelled correctly anyway. `allow_tcp_through_plate` keeps its
+   meaning, now gating the point.
+   *Considered and rejected:* a flange→TCP straight line (2 points) or the
+   flange-frame AABB (8 points, 134.8 × 96.4 × 106.3 mm). Both are exact
+   against a plane — signed distance is affine, so the minimum over a convex
+   set is the minimum over its vertices — but neither buys anything for the
+   curved deliverable, and the bracket's real shape is unknown.
+8. **Retire `assets/printerHead/TCP.txt` and `tcp_local`**
+   (`geometry_backend.py:2319`). The TCP point becomes derived from
+   `TCP_OFFSET_6D_MM_DEG` rather than loaded: at zero pose it moves from
+   `[-798.137, -228.017, -109.903]` to `[-954.777, -308.334, 146.448]`.
+
+**Sequencing.** §7.1 lands before §7.2, so in the window between them the
+curved path still runs the plate check — now against the new TCP point
+rather than the mesh. Transient, but it will shift curved reachability, and
+it **invalidates the working setup** recorded in
+`wiki/003_Guides/CurvedModel_PrintSetup.md` (3,175 RX / 2,688 TX at plate
+`[-570, -300, -200]`). Re-validate that procedure after §7.1.
 
 ## §7.2 — Rejection Criteria (spec's table; in-house check narrowed to planar)
 
@@ -360,7 +409,7 @@ Two consequences:
   wiring in the real tool=1 constant — which is precisely why §7.1 leads the
   stage.
 
-### Does not conform — one real conflict
+### Resolved — the one real conflict (closed 2026-08-14)
 
 **Flange→TCP distance disagrees with tool=1 by 33.4mm.**
 
@@ -374,11 +423,31 @@ problem — the two describe tools of different physical length. Either
 `assets/printerHead/` is a different tool than the one tool=1 was calibrated
 against, or the calibration does not match the asset.
 
-Consequence for §7.1: adopting the real offset moves the TCP by 311mm in vector
-terms, after which the **rendered nozzle mesh will no longer sit at the TCP**.
-That is a rendering/asset problem, not an IK one — the IK is correct either way,
-since it targets the TCP frame. Open question against §7.1; do not reconcile the
-asset blind.
+**Disposition (supervisor, 2026-08-14): the tool=1 offset is correct, so the
+asset is at fault.** `nozzle.obj` is not the head tool=1 was calibrated
+against. §7.1 hides the mesh and represents the tool by the TCP point alone
+(§7.1.6–8). Adopting the real offset moves the TCP 311mm; the IK is correct
+either way since it targets the TCP frame, so this was only ever a
+rendering/collision-geometry problem. The asset itself is left in place,
+unhidden-able later if a corrected one arrives.
+
+### Also found — arm-vs-mockup collision is unguarded
+
+A completed TX precompute (2,688 waypoints, plate `[-570, -300, -200]`) drives
+the **arm through the shoulder mockup**. A completed precompute means
+*reachable and plate-clearing*, not *safe*:
+
+- **No mesh-vs-mesh collision exists anywhere in the project.** Arm links are
+  only ever tested against the plate *plane* (S1.40).
+- S1.37's tangent-plane check is **nozzle-only by deliberate design** — testing
+  the links "would reject every real printing pose".
+- `CURVED_OBSTACLE_FILE` (`Surface_Bot.obj`) is displayed but used only by
+  `_orient_normals_outward()`; it is **not** a collision body. The obstacle-mesh
+  approach was rejected as too slow and replaced by the tangent plane (S1.37).
+
+Consequence for §7.4: an exported job can pass all seven Rejection Criteria and
+still drive the arm through the workpiece. Open question and operating
+guidance both in `wiki/003_Guides/CurvedModel_PrintSetup.md`.
 
 ### Naming map — the docs' terms vs this project's
 

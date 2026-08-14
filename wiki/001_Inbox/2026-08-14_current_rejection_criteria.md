@@ -1,0 +1,117 @@
+---
+status: inbox
+stage: pre-7
+scope: geometry_backend.py, gui_panel.py
+---
+
+# Current Rejection Criteria, by Printing Mode
+
+## Scope
+
+**A snapshot of what the code rejects *today*, before Stage 7 changes it.**
+Stage 7 replaces this wholesale — §7.2 adopts the exchange spec's seven-row
+Rejection Criteria table and sets `check_collision=False` on the curved path,
+and §7.1 reduces the tool to a single TCP point. Captured now because the
+current behaviour is otherwise only readable by tracing four functions.
+
+Non-authoritative (`TRUTH_LADDER.md`) — if this and the code disagree, the code
+wins.
+
+## The table
+
+Three paths reach IK. Only two of them print.
+
+| Check | Manual IK panel | Planar (G-code) | Curved (per layer) |
+|---|---|---|---|
+| Geometric reachability | rejects branch | **aborts run** | **aborts run** |
+| Joint limits | rejects branch | **aborts run** | **aborts run** |
+| Posed plate — arm links 0–5 | *not checked* | **always blocks** | **always blocks** |
+| Posed plate — nozzle (mesh 6) | *not checked* | blocks unless `allow_tcp_through_plate` | blocks unless `allow_tcp_through_plate` |
+| Surface tangent plane — nozzle only | n/a | n/a | **blocks**, 1.0mm inward slack |
+| Wrist singularity | label only | flagged, never rejects | flagged, never rejects |
+| Arm vs mockup / workpiece | ✗ never | ✗ never | ✗ never |
+| Arm self-collision | ✗ never | ✗ never | ✗ never |
+| Joint step between waypoints | n/a | ✗ not checked | ✗ not checked |
+| On failure | returns 0 solutions | aborts whole path | aborts whole path |
+
+**Curved = planar + one extra row.** The tangent-plane check is the only
+difference between the two printing modes.
+
+## Where each check lives
+
+| Check | Implementation |
+|---|---|
+| Geometric reachability | `solve_ik()` — returns no branch for an unreachable pose |
+| Joint limits | `solve_ik_tcp_matrix()` → `wrap_into_limits` (tries ±0/360 so asymmetric windows resolve) |
+| Posed plate | `_branch_clears_ground()` → `_meshes_clear_plane()`, plane from `_plate_plane()` |
+| Tangent plane | `_nozzle_clears_plane()` (S1.37) |
+| Abort contract | `step_toolpath_ik_precompute()` |
+
+**Planar vs curved is one argument.** `_begin_toolpath_precompute()`'s
+`tip_tolerance_mm`: `None` from `run_toolpath_ik_precompute` (planar),
+`CURVED_TIP_CLEARANCE_TOLERANCE_MM` (= 1.0) from
+`run_curved_toolpath_ik_precompute`. Non-`None` is what enables the
+tangent-plane row. That single value is the whole difference.
+
+## Two things the table doesn't show
+
+**Branch choice is not "first valid".** Branches are ranked by summed
+wrapped-angle distance to the **previous waypoint's** solved pose (continuity,
+S1.5/S1.11), then the first *ranked* branch that clears is taken. So clearance
+filters an already-ordered list; it does not pick.
+
+**Failure is all-or-nothing.** The first waypoint with no valid or no clearing
+branch aborts the entire precompute — no partial joint path is kept (S1.12).
+The status line names which check failed and at which waypoint.
+
+## ⚠ Two limitations worth knowing before trusting a solve
+
+### 1. Joint limits are the conservative range, not the physical one
+
+Every mode passes `gui_panel.JOINT_LIMITS`, a deliberately **practical slider
+range**, not the robot's real limits:
+
+| Joint | Used here | Physical (`docs/FR5_Joint_Limits.md`) |
+|---|---|---|
+| J1 | −170 … +170 | −174 … +174 |
+| **J2** | **−130 … +80** | **−264 … +84** |
+| J3 | −155 … +155 | −159 … +159 |
+| **J4** | **−170 … +80** | **−264 … +84** |
+| J5 | −170 … +170 | −174 … +174 |
+| J6 | −170 … +170 | −174 … +174 |
+
+Strictly inside the physical limits on all six joints, so nothing unsafe is
+accepted — but poses the real robot **could** reach are rejected here, J2 and J4
+by a wide margin. Stage 7 §7.2's joint-limit row must use the physical values.
+
+### 2. "Solved" does not mean "collision-free"
+
+A completed precompute means **reachable and plate-clearing**. Nothing more.
+
+- There is **no mesh-vs-mesh collision anywhere in this project.** Arm links are
+  only ever tested against the plate *plane*.
+- S1.37's tangent-plane check is **nozzle-only by deliberate design** — testing
+  the arm links "would reject every real printing pose", since the arm
+  legitimately sits inward of a local tangent plane while reaching its contact
+  point.
+- `CURVED_OBSTACLE_FILE` (`Surface_Bot.obj`) is loaded and displayed but used
+  **only** to orient surface normals — it is *not* a collision body. The
+  obstacle-mesh approach was rejected as too slow and replaced by the tangent
+  plane (S1.37).
+
+Observed consequence: a completed TX precompute (2,688 waypoints) drives the
+**arm through the shoulder mockup**. Judge that by eye — see
+[`../003_Guides/CurvedModel_PrintSetup.md`](../003_Guides/CurvedModel_PrintSetup.md).
+
+## What Stage 7 changes
+
+- **§7.1** — the tool becomes a single TCP point (the nozzle mesh is hidden as
+  it is not the calibrated tool), so no tool-*body* check remains on any path.
+- **§7.2** — this table is replaced by the exchange spec's seven rows (identity,
+  TCP offset, joint limits, per-point FK, joint step, `num_points`, `|J5|<2°`
+  warn), and the curved path gets `check_collision=False`: rows 3–5 disappear
+  there entirely. Planar keeps them.
+- Note the spec's rows validate **data**, not **geometry** — so after §7.2 an
+  export can pass every check and still drive the arm through the workpiece.
+
+See `2026-07-22_stage7_calibration_and_external_ik.md` §7.1/§7.2.

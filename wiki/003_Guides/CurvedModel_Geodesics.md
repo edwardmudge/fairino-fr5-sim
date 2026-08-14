@@ -43,11 +43,15 @@ separate: two graphs, two endpoint sets, two cost matrices. Merging them into
 one 140×140 matrix would produce a large block of numbers with no physical
 meaning.
 
-Because the two passes are structurally identical, every geodesic structure
-on `VisContent` is a **2-element list** indexed by `GEODESIC_LAYER_RX` /
-`GEODESIC_LAYER_TX`, rather than a duplicated `_rx`/`_tx` attribute pair.
-This diverges from the flat `precompute_*` naming next door; see
-`settled.md` S1.31 for why.
+Because the passes are structurally identical, every geodesic structure on
+`VisContent` is a **list indexed positionally by `CURVED_LAYERS`**
+(`examples/curved_surface_printing/study_config.py`), rather than a duplicated
+`_rx`/`_tx` attribute pair. This diverges from the flat `precompute_*` naming
+next door; see `settled.md` S1.31 for why.
+
+The original named `GEODESIC_LAYER_RX`/`GEODESIC_LAYER_TX` index constants were
+**removed by S1.33**, which generalised the feature over however many layers the
+study config describes — there is no longer a fixed two-layer assumption.
 
 ## How it's computed
 

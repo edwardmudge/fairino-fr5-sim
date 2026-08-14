@@ -137,10 +137,15 @@ concern that ruled it out above.
 
 ## Reachability is a placement property, not a code concern
 
-At the adopted X+30 pose, the curved run solves all 3,175 RX waypoints with
-TCP-through enabled. The unshifted placement stopped at the 1,809-waypoint
-joint-limit boundary; the X shift moves the path clear of that reachability
-failure while retaining the same low plate height.
+At the adopted X+30 pose, the curved run solves all 3,175 RX waypoints. The
+unshifted placement stopped at the 1,809-waypoint joint-limit boundary; the X
+shift moves the path clear of that reachability failure while retaining the
+same low plate height.
+
+The current cache was produced with `allow_tcp_through_plate` **False** — the
+nozzle *is* blocked below the plate. (Earlier prose here said "TCP-through
+enabled"; the cache metadata is the evidence. See
+[`CurvedModel_PrintSetup.md`](CurvedModel_PrintSetup.md).)
 
 ## Measured properties
 
@@ -149,7 +154,7 @@ Verified headless, 2026-07-22.
 | Check | Result |
 |---|---|
 | Planar regression | The planar path uses the same posed-plate clearance gate; stale v3 caches miss under version 4 and are rebuilt |
-| RX precompute | All 3,175 RX waypoints solve with the adopted X+30 placement and TCP-through enabled |
+| RX precompute | All 3,175 RX waypoints solve with the adopted X+30 placement. The shipped cache records `allow_tcp_through_plate: false` |
 | FK round-trip on solved poses | Target position matches to 6.7e-13mm; `R_target[i]` matches to 3e-15 — the per-waypoint orientation threads through IK exactly |
 | Nozzle clearance | A solved branch clears its own tangent plane; shifting that plane outward past the tip by more than the tolerance correctly rejects it |
 | Per-layer cache plumbing | `curved_rx.precompute.npz` / `curved_tx.precompute.npz` remain independent; both cache metas include `allow_tcp_through_plate` at version 4 |

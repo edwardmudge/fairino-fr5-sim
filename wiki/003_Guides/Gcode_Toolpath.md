@@ -119,6 +119,12 @@ per-structure transparency-mode opt-in found), not on rendering cost.
    `(K+1,)` cumulative-triangle-count array, so `faces[:bead_face_prefix[n]]`
    is exactly the triangles for the first `n` beads — see `settled.md`
    S1.19, S1.20.
+
+   The culling itself lives in the module-level **`bead_faces()`**, shared
+   with the curved path's `_build_curved_beads()` (`settled.md` S1.42). Its
+   `width_valid` argument is what differs: supplied here, since G-code bead
+   width varies with extruded E; omitted for curved beads, which have a fixed
+   cross-section and so skip the width-match term.
 10. The mesh is registered via `ps.register_surface_mesh("G-code Print",
     ...)` and colored `GCODE_COLOR` — same-name re-registration replaces
     the prior mesh on reload, no explicit clear needed for that case. An
@@ -200,7 +206,8 @@ Module-level constants in `geometry_backend.py`:
 
 - `geometry_backend.py`: `parse_gcode()`, `load_gcode()`,
   `clear_gcode_preview()`, `_build_gcode_beads()` (including its
-  `bead_face_prefix` return value), `_BEAD_BOX_FACE_TEMPLATE`, `GCODE_DIR`,
+  `bead_face_prefix` return value), `bead_faces()` (module-level, the shared
+  cap-culling — S1.42), `_BEAD_BOX_FACE_TEMPLATE`, `GCODE_DIR`,
   `GCODE_FILE`, `FILAMENT_DIAMETER_MM`, `GCODE_COLOR`, `GCODE_MOVE_RE`,
   `CAP_CULL_COLINEAR_DOT_MIN`, `CAP_CULL_WIDTH_TOL_MM`.
 - `gui_panel.py`: "Load G-code preview" button ("I/O Operations" section) is

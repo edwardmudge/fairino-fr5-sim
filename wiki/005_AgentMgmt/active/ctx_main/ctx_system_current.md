@@ -47,18 +47,28 @@ corresponding FR5 arm configuration in an interactive 3D window.
 
 ### S1.40 current setup amendment
 
-The adopted RX setup moves the plate to `[-570, -300, 0]` at working height,
-loads the curved model, then loads the saved pose `[-570, -300, -200]` with
-TCP-through enabled. Rebuild geodesics/order/orientation before RX precompute.
-This X+30 setup solves all 3,175 RX waypoints. The earlier S1.38
-`reject_below_ground` description is historical and superseded by S1.40.
+The adopted setup moves the plate to `[-570, -300, 0]` at working height,
+loads the curved model, then loads the saved pose `[-570, -300, -200]`.
+Rebuild geodesics/order/orientation before precompute. This solves all
+**3,175 RX** and **2,688 TX** waypoints — both with
+`allow_tcp_through_plate` **False** (nozzle blocked), per the cache metadata;
+an earlier note here said "TCP-through enabled", which the artifacts
+contradict. Full procedure and its rationale:
+`wiki/003_Guides/CurvedModel_PrintSetup.md`. ⚠ A completed precompute is
+*not* a collision-free guarantee — the arm passes through the mockup on TX;
+nothing checks arm-vs-mockup. The earlier S1.38 `reject_below_ground`
+description is historical and superseded by S1.40.
 
 ## Directory Structure
 
 ```
 /
-├── assets/          FR5 link meshes, nozzle, build plate
-├── docs/            DH table, joint limits, mesh convention, Polyscope API
+├── assets/          FR5 link meshes, nozzle, build plate, curved-model PLY/OBJ
+├── docs/            DH table, joint limits, mesh convention, Polyscope API,
+│                    supervisor calibration data (saved_coords_*)
+├── examples/        per-study config the generic engine reads (S1.33) —
+│                    curved_surface_printing/study_config.py + the supervisor's
+│                    external_ik_exchange_spec_EN.md
 ├── wiki/            you are here
 ├── main.py          entry point, wires backend + UI together
 ├── gui_panel.py      UI panel — joint sliders, IK controls, I/O buttons

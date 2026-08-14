@@ -35,7 +35,11 @@ CURVED_LAYERS = [
 ]
 # Print order defaults to list order -- RX first, per settled.md S1.32.
 
-CURVED_OBSTACLE_FILE = "Surface_Bot.obj"  # optional non-print collision body
+# Optional non-print body under the print surfaces. Used to orient surface
+# normals outward (_orient_normals_outward) -- NOT a collision body: the
+# obstacle-mesh clearance approach was rejected as too slow and replaced by the
+# per-waypoint tangent-plane check (settled.md S1.37).
+CURVED_OBSTACLE_FILE = "Surface_Bot.obj"
 CURVED_OBSTACLE_STRUCTURE_NAME = "Surface Bot"
 CURVED_OBSTACLE_COLOR = (0.55, 0.55, 0.55)
 

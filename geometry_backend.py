@@ -642,8 +642,9 @@ class VisContent:
 
     def load_curved_model(self):
         """Load the toolpath-curve PLY files and surface OBJ meshes described
-        by CURVED_LAYERS (plus the optional CURVED_OBSTACLE_FILE collision
-        body) and place them above the build plate -- roadmap
+        by CURVED_LAYERS (plus the optional CURVED_OBSTACLE_FILE, which orients
+        normals outward -- not a collision body, S1.37) and place them above
+        the build plate -- roadmap
         Stage6_README.md 6.1. Generic over however many layers the study
         config describes -- see examples/curved_surface_printing/. Static
         workpiece geometry, same as load_build_plate()/load_gcode():
