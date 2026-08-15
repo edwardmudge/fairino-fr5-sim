@@ -1,7 +1,7 @@
 ---
 status: active
 scope: current-truth
-last_verified_against_code: 2026-07-22
+last_verified_against_code: 2026-08-14
 ---
 
 # Agent Boot File — FR5 Simulator (Current State)
@@ -27,7 +27,7 @@ corresponding FR5 arm configuration in an interactive 3D window.
 | FK maths (`compute_fk`) | done | See `docs/FR5_DH_Table.md` |
 | Mesh loading + rendering | done | Delta-transform pipeline — see `docs/FR5_Mesh_Convention.md` |
 | Joint sliders | done | "Forward Kinematics" panel, `gui_panel.py` |
-| Tool head + TCP tracking | done | See `wiki/003_Guides/TCP_Frame.md` |
+| Tool head + TCP tracking | done | **Real calibrated tool=1 offset since Stage 7.1** (`TCP_OFFSET_6D_MM_DEG`, flange-relative 6D pose with a genuine ~87°/−13°/61° rotation) — replaces S1.4's world point + borrowed rotation. `nozzle.obj` is hidden (not the calibrated head); the tool is the **TCP point alone** for collision, plus a visual-only flange→TCP "Tool Axis" stalk. See `wiki/003_Guides/TCP_Frame.md`, `settled.md` **S1.43** |
 | Analytical IK | done | Closed-form solver, multi-solution — see `settled.md` S1.4/S1.5 |
 | TCP trajectory recording | done | See `wiki/003_Guides/TCP_Trajectory.md` |
 | G-code toolpath preview | done | G0/G1-only parser, fixed `model.gcode` path, registered via an explicit "Load G-code preview" click — does **not** auto-reload on plate reposition (that auto-reload was removed, see `settled.md` S1.23); removable via a conditionally-shown "Clear G-code preview" button (`clear_gcode_preview()`) — see `wiki/003_Guides/Gcode_Toolpath.md`, `settled.md` S1.7/S1.8 |
@@ -45,11 +45,14 @@ corresponding FR5 arm configuration in an interactive 3D window.
 | Hide guide overlays during playback (Stage 6.7) | done | New `playback_active` flag, distinct from `playback_running` (survives Pause, cleared only by Reset). `run_toolpath_playback()` sets it and re-applies `apply_live_layer_visibility`, which now force-hides the order-feed/travel/orient curve networks + base toolpath curve while `playback_active` — surfaces and growing beads keep the `i <= layer` stack rule, so you can watch the object form. `reset_toolpath_playback()` clears it and restores the full guide view. Planar source is a no-op (the `G-code Print` mesh is the playback mesh). `gui_panel.py` untouched — see `settled.md` **S1.39** |
 | Posed-plate collision (Stage 6.8) | done | Replaces the world-`z=0` proxy with a check against the **actual posed build plate** (`_plate_plane()` from `T_user_frame`, infinite plane through the top face). Arm links (0-5) **always** blocked below it; nozzle (6) blocked unless the new **`allow_tcp_through_plate`** toggle (default OFF). `_meshes_clear_plane()` generalizes the old nozzle signed-distance test; the two `moving_geometry_*min_z` helpers are deleted; the curved tangent-plane check (S1.37) still layers on top. GUI checkbox "Reject poses below ground (z<0)" → "Allow TCP through build plate". `PRECOMPUTE_CACHE_VERSION` **3→4** (`reject_below_ground`→`allow_tcp_through_plate` in both metas). **Consequence (spec):** a precompute at the default plate pose rejects early (the arm reaches below the plate) — reposition the plate lower via the Build Plate controls, don't disable the check. The working plate poses / print procedure live in the supervisor's print-setup docs; `saved_position.json` holds the adopted plate pose — see `settled.md` **S1.40** |
 
+| Real TCP offset (Stage 7.1) | done | `T_flange_to_tcp` is now `pose_to_matrix(*TCP_OFFSET_6D_MM_DEG)` — the real tool=1 calibration, superseding S1.4. New module-level `pose_to_matrix`/`matrix_to_pose` helpers (a refactor of a convention already inline, not new maths). `Nozzle` registered but `set_enabled(False)`; collision geometry split from render geometry (`moving_geometry_rest_verts` = 6 arm links + the TCP point); visual-only "Tool Axis" stalk at index 9, loop now `range(10)`. `PRECOMPUTE_CACHE_VERSION` **4→5**. `USER_FRAME_ORIGIN_MM` moved `[-600,-300,0]` → `[-570,-300,-100]` to keep the planar path reachable. Identity check passes at 0.000000mm/0.0003°, unblocking 7.2 — see `settled.md` **S1.43** |
+| Rejection criteria / real User Frame / job export (Stage 7.2–7.5) | not started | Planned only — see `tutorials/Stage7_README.md` and the inbox note |
+
 ### S1.40 current setup amendment
 
 The adopted setup moves the plate to `[-570, -300, 0]` at working height,
 loads the curved model, then loads the saved pose `[-570, -300, -200]`.
-Rebuild geodesics/order/orientation before precompute. This solves all
+Rebuild geodesics/order/orientation before precompute. This solved all
 **3,175 RX** and **2,688 TX** waypoints — both with
 `allow_tcp_through_plate` **False** (nozzle blocked), per the cache metadata;
 an earlier note here said "TCP-through enabled", which the artifacts
@@ -58,6 +61,13 @@ contradict. Full procedure and its rationale:
 *not* a collision-free guarantee — the arm passes through the mockup on TX;
 nothing checks arm-vs-mockup. The earlier S1.38 `reject_below_ground`
 description is historical and superseded by S1.40.
+
+⚠ **Stale since Stage 7.1.** S1.43 moved the TCP 310.97mm, so every solved
+branch changes and the RX/TX counts above are pre-7.1 evidence. The curved path
+has not been re-run. Re-validating is deliberately deferred: 7.2 removes the
+curved clearance checks entirely and 7.3 replaces `saved_position.json` with the
+real User Frame, so the setup is likely to change again first. The **planar**
+path *was* re-validated — 181,375/181,375, at the new default plate pose.
 
 ## Directory Structure
 
@@ -92,4 +102,4 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-See `wiki/002_Architecture/settled.md` (S1.1–S1.42).
+See `wiki/002_Architecture/settled.md` (S1.1–S1.43).

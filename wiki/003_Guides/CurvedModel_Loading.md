@@ -132,8 +132,9 @@ more:
 - **IK precompute now reuses Stage 5's machinery per layer** (roadmap 6.5,
   done) — `run_curved_toolpath_ik_precompute(layer, ...)` feeds the same
   chunked solver from `build_curved_toolpath_waypoints_world(layer)`, with
-  per-waypoint `R_target` and nozzle-tip tangent-plane clearance instead of
-  an obstacle mesh. `geometry_backend.py`-only; no GUI button and no curved
+  per-waypoint `R_target` and tool-tip tangent-plane clearance instead of
+  an obstacle mesh (the tested body became the TCP point at Stage 7.1, and
+  7.2 removes the check). `geometry_backend.py`-only; no GUI button and no curved
   playback yet (roadmap 6.6). See
   [`CurvedModel_IKPrecompute.md`](CurvedModel_IKPrecompute.md), `settled.md` S1.37.
 - **The 90° rotation is a fixed constant**, not derived from the build

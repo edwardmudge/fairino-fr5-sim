@@ -2551,3 +2551,100 @@ clean, no never-called functions remain, and FK(0) still returns
 curved load -> geodesics -> order -> orientation -> precompute -> playback
 cycle, plus a clear-and-reload of the curved model (the path the reset helpers
 touch) -- needs the Polyscope window.
+
+
+## S1.43 Real tool=1 TCP offset (roadmap 7.1) -- supersedes S1.4's derived rotation; nozzle mesh hidden, tool reduced to the TCP point, default plate pose moved to keep planar reachable
+
+**Decision:** `T_flange_to_tcp` is now the real calibrated tool=1 offset,
+`pose_to_matrix(*TCP_OFFSET_6D_MM_DEG)` with
+`[-134.777, 96.448, 106.334, 86.647, -13.136, 60.612]` (mm, deg) from
+`docs/saved_coords_data_and_usage_EN.md` 1.2. This **supersedes S1.4's
+construction** -- a `TCP.txt` world point with rotation borrowed from
+`inv(T_zero[5])` -- which could not represent a tool with its own orientation
+offset from the flange. `tcp_local` is gone; the TCP is derived, not loaded.
+
+**Reason:** S1.4's rotation-borrowing was explicitly a stand-in that "only
+works because the current tool has no real orientation offset". tool=1 has one
+(~87 / -13 / 61 deg). Roadmap 7.2's identity check compares against a reference
+TCP pose that is only meaningful once this is wired in, which is why 7.1 leads
+the stage.
+
+**Two module-level helpers**, beside `rot_x`/`rot_y`/`rot_z` per S1.1:
+`pose_to_matrix(x, y, z, rx, ry, rz)` (the docs' one convention for every 6D
+pose they publish, `R = Rz @ Ry @ Rx`) and `matrix_to_pose(T)` (the exchange
+spec's extraction formulas, for 7.2's degree-valued rotation error).
+`pose_to_matrix` is a **refactor, not new maths** -- the same composition was
+already inline in `solve_ik_tcp` and `load_build_plate`.
+
+**The asset is wrong, not the calibration.** The supervisor confirmed on
+2026-08-14 that tool=1 is correct, so the 33.4mm flange-to-tip conflict
+(`nozzle.obj` 163.47mm vs tool=1 196.91mm) means `nozzle.obj` is not the head
+that was calibrated. Magnitude is frame-independent, so this was never a
+convention mismatch. Consequences:
+
+1. **The `Nozzle` structure is registered but `set_enabled(False)`.** Not
+   deleted, and still wired into `rest_verts`/`update_fns`, so a corrected
+   asset needs one flag flipped. `nozzle.obj` stays on disk.
+2. **The tool's collision body is the single TCP point**, not the mesh --
+   colliding against a hidden asset of the wrong length would reject poses on
+   geometry the real head does not have. *Considered and rejected:* a
+   flange->TCP line (2 points) or the flange-frame AABB (8 points). Both are
+   exact against a plane, but neither buys anything for the curved deliverable
+   and the real bracket shape is unknown.
+3. **A visual-only "Tool Axis" stalk** (flange origin -> TCP, 196.91mm, a
+   2-node curve network at index 9) replaces the mesh *on screen*, since
+   otherwise nothing shows where the tool points. Deliberately **not** in the
+   collision set -- see the rejection above.
+
+**Render vs. collision geometry are now separate lists.** `rest_verts[6]` is
+still the nozzle's render buffer (`update_fns[6]` needs its full vertex count),
+so the collision set became its own `moving_geometry_rest_verts` =
+6 arm links + the TCP point. `_meshes_clear_plane`/`_nozzle_clears_plane` index
+that; `_moving_geometry_deltas` is unchanged, since `Delta_6` is correct for
+the point exactly as it was for the mesh. Index 6's bbox is 8 coincident
+corners -- degenerate but harmless, the corners bound is then exact.
+`_nozzle_clears_plane` is thereby a literal tip test and more permissive than
+before; 7.2 removes it outright.
+
+**`PRECOMPUTE_CACHE_VERSION` 4 -> 5.** Neither cache meta hashes the TCP
+offset, so every cached joint path would otherwise load as a hit having been
+solved for a different tool.
+
+**`USER_FRAME_ORIGIN_MM` moved `[-600, -300, 0]` -> `[-570, -300, -100]`.**
+Not cosmetic and not optional: the real offset puts the flange at
+TCP + `[-41.6, -108.95, 158.66]` instead of `[-21.9, 26.0, 159.9]`, and that
+extra ~109mm in -Y pushed the far corner of the bed outside the arm's 820mm
+envelope. Measured: **3 of 181,375** planar waypoints needed a wrist centre up
+to **835.35mm** out (worst over-extension 15.35mm), and waypoint 0 was one of
+them -- so S1.12's abort-on-first-failure killed the whole path at index 0.
++19.4mm X restores reach; -100 Z clears the residual posed-plate rejection.
+The old pose had 646mm max wrist-centre distance, i.e. a margin the new tool
+consumed. `assets/buildPlate/saved_position.json` was **not** touched -- it
+still holds the 6.8 curved setup, and 7.3 replaces it with the real User Frame.
+
+**Verified on:** 2026-08-14 -- headless, `fairino-fr5-sim` env:
+(a) `matrix_to_pose(pose_to_matrix(...))` round-trips to 0.0, and
+`pose_to_matrix` matches the docs' 3 listing element-for-element;
+(b) the identity check -- FK(0) + TCP reproduces
+`[-954.777, -308.334, 146.448, -161.378, -58.051, -25.434]` to **0.000000 mm /
+0.0003 deg**, against 7.2's 0.1mm / 0.5deg thresholds, and flange->TCP measures
+196.911mm;
+(c) IK/FK round-trip over 200 seeded poses -- all solved, FK of **every**
+returned branch reproduces the target TCP pose to 5e-11 mm. Seed recovery is
+1992/2000 over a wider sweep, but the **same 8 seeds miss identically with no
+tool at all, with S1.4's transform, and with this one** -- it is `solve_ik`'s
+8-branch enumeration, unrelated to the offset, and the miss set being identical
+across all three is itself evidence the TCP layer is an exact change of
+variables;
+(d) the full planar precompute at the new default solves **181,375 / 181,375**
+in 111s, matching the pre-7.1 baseline exactly, after correctly rejecting the
+stale v4 cache. Joint ranges stay well inside the `gui_panel` sliders (widest
+is J3, 14.4..84.2 deg against +/-155).
+**GUI eyeball done:** hidden nozzle, tilted TCP triad, and the Tool Axis stalk
+tracking the arm all confirmed.
+
+**Note for 7.2:** max joint step between adjacent waypoints measures **57.32
+deg** against the spec's 30 deg rejection row -- but that was measured across
+the whole path, so the large steps are almost certainly G0 travel moves, which
+are segment *boundaries*. 7.2 must measure **within** a segment before treating
+this as a violation.

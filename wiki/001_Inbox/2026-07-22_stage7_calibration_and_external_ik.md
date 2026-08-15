@@ -99,11 +99,36 @@ missing is narrower than first drafted:
    closing it needs a mesh-vs-mesh design decision that S1.37 already
    rejected once on performance grounds.
 
-## §7.1 — Real TCP Offset
+## §7.1 — Real TCP Offset ✅ IMPLEMENTED 2026-08-14 (`settled.md` S1.43)
+
+All 8 points below landed as specified, with three deltas worth noting:
+
+- **Point 7 needed an extra split.** `rest_verts[6]` is simultaneously the
+  nozzle's *render* buffer (`update_fns[6]` needs its full vertex count), so
+  the TCP point could not simply replace it. Collision geometry became its own
+  list, `moving_geometry_rest_verts` = 6 arm links + the TCP point.
+- **A visual-only "Tool Axis" stalk was added** (flange → TCP, index 9, loop
+  now `range(10)`). Not in this spec — added because hiding the mesh left
+  nothing on screen showing where the tool points. Deliberately excluded from
+  the collision set, consistent with point 7's rejection of the 2-point line
+  *as a collision proxy*.
+- **`PRECOMPUTE_CACHE_VERSION` 4 → 5 happened here, not at §7.2.** Neither
+  cache meta hashes the TCP offset, so stale caches would have loaded as hits.
+  §7.2's planned bump is therefore **5 → 6**.
+
+**Nothing was deleted.** `TCP.txt` keeps its value under a legacy header; only
+the dead `TCP_FILE`/`tcp_local` code lines went.
+
+**Unplanned consequence:** the real offset broke the *planar* path at the old
+default plate pose — 3 of 181,375 waypoints fell outside the arm's 820mm
+envelope and waypoint 0 was one, so S1.12's abort-on-first-failure killed it at
+index 0. `USER_FRAME_ORIGIN_MM` moved `[-600,-300,0]` → `[-570,-300,-100]`,
+where all 181,375 solve. `saved_position.json` untouched (§7.3 replaces it).
 
 **Leads the stage** because §7.2's identity check compares `FK(joints=0) +
 TCP` against the exchange spec's reference TCP 6D pose, which is only
-meaningful once this real offset is in place.
+meaningful once this real offset is in place. **That check now measures
+0.000000 mm / 0.0003° against thresholds of 0.1mm / 0.5° — §7.2 is unblocked.**
 
 1. New module-level `pose_to_matrix(x, y, z, rx, ry, rz)` — port
    `docs/saved_coords_data_and_usage_EN.md` §3 verbatim
@@ -203,9 +228,11 @@ collision) and `wrap_into_limits` branch filtering in
 `solve_ik_tcp_matrix` — the solver still needs a limit window to pick a
 representable branch; only its source changes (see the joint-limits row).
 
-`solve_toolpath_ik()` (`geometry_backend.py:1678`) is **uncalled** — the
+~~`solve_toolpath_ik()` (`geometry_backend.py:1678`) is **uncalled** — the
 live path is the chunked precompute — so its `_branch_clears_ground` call
-is already dead code. Worth deleting the whole method here.
+is already dead code. Worth deleting the whole method here.~~ **Stale —
+already done.** S1.42's pre-commit sweep deleted the method (47 lines, zero
+call sites verified by AST) before Stage 7 started. Nothing to do here.
 
 ### Part 2 — the spec's table, all seven rows
 

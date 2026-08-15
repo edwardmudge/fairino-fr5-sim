@@ -93,3 +93,65 @@ Robot6.obj → Delta_6 = T_0_6(q) @ inv(T_0_6(0))
 nozzle.obj → Same Delta_6 as Robot6
 TCP.txt    → Delta_6 @ [x, y, z, 1]
 ```
+
+---
+
+## Changed in Stage 7.1 (2026-08-14)
+
+Everything above still describes the Delta convention correctly — that is
+unchanged and remains the hard rule. What changed is **what the tool is**.
+The "Nozzle and TCP" section above is kept as the record of the old setup.
+
+**`TCP.txt` is no longer read.** The TCP is now derived from the real
+calibrated tool=1 offset, a module-level constant in `geometry_backend.py`:
+
+```python
+TCP_OFFSET_6D_MM_DEG = np.array([-134.777, 96.448, 106.334, 86.647, -13.136, 60.612])
+T_flange_to_tcp = pose_to_matrix(*TCP_OFFSET_6D_MM_DEG)   # flange-local, mm/deg
+T_zero_tcp = T_zero[5] @ T_flange_to_tcp                  # zero-pose world pose
+```
+
+Source: `docs/saved_coords_data_and_usage_EN.md` §1.2. This is a genuine
+**flange-local 6D pose with rotation**, not a zero-pose world point — the
+previous construction had to borrow its rotation from `inv(T_zero[5])`
+(`settled.md` S1.4) and could not express a tool that is itself rotated
+relative to the flange, which tool=1 is (~87° / −13° / 61°).
+
+The zero-pose TCP world point therefore moves **310.97 mm**:
+
+```
+old (TCP.txt):  [-798.137, -228.017, -109.903]
+new (tool=1) :  [-954.777, -308.334,  146.448]
+```
+
+`TCP.txt` is retained on disk with a legacy header, as a record.
+
+**`nozzle.obj` is registered but hidden** (`set_enabled(False)`). The
+supervisor confirmed on 2026-08-14 that the tool=1 calibration is correct, so
+the 33.4 mm flange-to-tip disagreement (asset 163.47 mm vs tool=1 196.91 mm)
+means this asset is simply not the head that was calibrated. Magnitude is
+frame-independent, so it was never a convention problem. The mesh stays wired
+into `rest_verts`/`update_fns` so a corrected asset only needs the flag
+flipped.
+
+**Two new flange-mounted structures**, both following the same Delta
+convention as everything else here:
+
+```
+TCP point   → Delta_6, at T_zero_tcp[:3, 3]            (index 7)
+TCP Frame   → Delta_6, triad now tilted by T_zero_tcp[:3, :3]
+                       rather than world-aligned        (index 8)
+Tool Axis   → Delta_6, 2-node line: flange origin → TCP (index 9, new)
+```
+
+`apply_delta_transform`'s loop is `range(10)`, not `range(9)`.
+
+**Collision geometry is now a separate list from render geometry.** The tool's
+collision body is the single **TCP point**, not the nozzle mesh — colliding
+against a hidden asset of the wrong length would reject poses on geometry the
+real head does not have. `rest_verts[6]` is still the nozzle's render buffer
+(its `update_fns` entry needs the full vertex count), so the clearance checks
+index `moving_geometry_rest_verts` = 6 arm links + the TCP point instead. The
+Tool Axis stalk is **visual only** and deliberately absent from that set.
+
+Full rationale and measurements: `settled.md` S1.43.

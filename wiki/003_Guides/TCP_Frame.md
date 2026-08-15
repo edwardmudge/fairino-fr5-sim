@@ -31,13 +31,20 @@ convention (`docs/FR5_Mesh_Convention.md`): `tcp_local`-adjacent points are
 zero-pose-frame geometry and must move via `Delta_6`, not via a bespoke
 translation.
 
-The frame's initial basis (world-aligned axes at zero pose, centred on
-`tcp_local`) is an arbitrary choice — per Craig, frame assignment is
-always a convention, not a physical property of the link. Any three
-orthonormal axes rigidly attached to the flange rotate identically once
-carried through `Delta_6`, so a world-aligned zero-pose basis is just as
-valid a "frame 6" as the tool's real CAD axes would be for the purpose of
-visualising orientation change.
+Since Stage 7.1 the frame's initial basis is the **tool's own rest
+orientation** — `(T_zero[5] @ T_flange_to_tcp)[:3, :3]`, centred on that
+transform's translation — so the triad is visibly tilted at zero pose
+rather than world-aligned. Blue Z is the nozzle approach axis (the nozzle
+approaches along −Z, into the surface), which is what the curved path
+targets per `settled.md` S1.36.
+
+Per Craig, frame assignment is always a convention, not a physical
+property of the link: any three orthonormal axes rigidly attached to the
+flange rotate identically once carried through `Delta_6`, so the earlier
+world-aligned basis was equally valid *for visualising orientation
+change*. What makes the tool's own axes the better choice now is that
+there is a real tool orientation to show — see "Changed in Stage 7.1"
+below.
 
 This will matter directly once Stage 4 (IK) starts: IK targets are a
 desired *pose* (position + orientation), and being able to see the tool's
@@ -55,31 +62,62 @@ identity/axis-aligned for every other caller including this one), and
 Polyscope structure `name`, and to return the raw `nodes` array alongside
 the handle.
 
-`load_data()` calls it once with `origin=self.tcp_local` (the same
-zero-pose point the "TCP" point cloud uses) to register the "TCP Frame"
-curve network, then appends its rest-pose nodes / handle /
-`update_node_positions` to the same `rest_verts` / `mesh_handles` /
-`update_fns` lists everything else in `apply_delta_transform()` uses.
+`load_data()` calls it once with `origin=T_zero_tcp[:3, 3]` (the same
+zero-pose point the "TCP" point cloud uses) and
+`rotation=T_zero_tcp[:3, :3]` to register the "TCP Frame" curve network,
+then appends its rest-pose nodes / handle / `update_node_positions` to
+the same `rest_verts` / `mesh_handles` / `update_fns` lists everything
+else in `apply_delta_transform()` uses.
 
-`apply_delta_transform()`'s loop (`range(9)`) reaches the TCP frame at
+`apply_delta_transform()`'s loop (`range(10)`) reaches the TCP frame at
 index 8; `src = min(8, 5)` resolves to `T_current[5]` / `T_zero[5]`
 (Delta_6) — exactly the same delta already applied to the nozzle (index
-6) and TCP point (index 7). No special-casing needed: the frame's four
-rest-pose nodes (origin + three axis tips, all in the zero-pose world
-frame) go through `Delta_6 = T_0_6(q) @ inv(T_0_6(0))` like any other
-flange-mounted geometry, which is what makes the triad rotate correctly.
+6), TCP point (index 7) and Tool Axis stalk (index 9). No special-casing
+needed: the frame's four rest-pose nodes (origin + three axis tips, all
+in the zero-pose world frame) go through
+`Delta_6 = T_0_6(q) @ inv(T_0_6(0))` like any other flange-mounted
+geometry, which is what makes the triad rotate correctly.
 
 ## How to tune it
 
-One module-level constant in `geometry_backend.py`:
+Module-level constants in `geometry_backend.py`:
 
 | Constant | Effect |
 |---|---|
-| `TCP_FRAME_SCALE_MM` | Axis length, in world units (mm). Larger = easier to see at a distance, but can visually clutter the nozzle at close range. |
+| `TCP_FRAME_SCALE_MM` | Axis length, in world units (mm). Larger = easier to see at a distance, but can visually clutter the tool at close range. |
+| `TOOL_AXIS_COLOR` | Colour of the flange→TCP stalk. Chosen to read against the triad's red/green/blue and the orange G-code preview. |
+| `TOOL_AXIS_RADIUS_MM` | Stalk thickness, world units (mm). |
 
 ## Code anchors
 
 - `geometry_backend.py`: `create_coordinate_frame()` (generalised),
-  the "TCP Frame" registration block in `load_data()` (right after
-  `self.tcp_local` is loaded), and index 8 in `apply_delta_transform()`'s
-  loop.
+  the "TCP Frame" and "Tool Axis" registration blocks in `load_data()`
+  (right after `T_flange_to_tcp` is built), and indices 8 and 9 in
+  `apply_delta_transform()`'s loop.
+
+## Changed in Stage 7.1 (2026-08-14)
+
+Two things above were previously true and are no longer, corrected in
+place rather than left to mislead. The superseded reasoning is kept here.
+
+**The triad used to be world-aligned at zero pose, centred on
+`tcp_local`.** `tcp_local` was a bare zero-pose *world* point loaded from
+`assets/printerHead/TCP.txt`, with no rotation of its own, so
+`create_coordinate_frame` was called with the default identity rotation
+and the "arbitrary but equally valid basis" argument above carried the
+justification. That reasoning was sound for a tool with no measured
+orientation. Stage 7.1 wired in the real calibrated tool=1 offset, which
+*does* carry an orientation (~87° / −13° / 61°), so the triad now shows
+the tool's actual rest axes and `tcp_local` no longer exists. The
+zero-pose TCP moved 310.97 mm as a result.
+
+**Index 8 used to be the last entry, and the loop was `range(9)`.**
+Stage 7.1 appended the "Tool Axis" stalk at index 9 — a 2-node curve
+network from the flange origin to the TCP, 196.91 mm long. It exists
+because `nozzle.obj` is now hidden (it is not the head tool=1 was
+calibrated against), leaving nothing on screen to show where the tool
+points. It is **visual only**: the tool's collision body is the single
+TCP point, and the stalk is deliberately excluded from the clearance
+set.
+
+Full rationale and measurements: `settled.md` S1.43.

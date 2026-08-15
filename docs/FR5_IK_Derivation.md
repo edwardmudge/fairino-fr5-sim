@@ -139,3 +139,51 @@ round-trip through `compute_fk -> solve_ik -> compute_fk` within 1e-6;
 12/12 joint-limit boundary cases pass; 100/100 near-singularity (θ5
 within 2° of 0) cases pass at a relaxed 1e-4 tolerance; TCP-targeting
 round-trip 100/100.
+
+---
+
+## Changed in Stage 7.1 (2026-08-14)
+
+The derivation above is unchanged — `solve_ik` still solves for the flange
+pose, and `solve_ik_tcp` still converts the target once via
+`T_target_flange = T_target_tcp @ inv(T_flange_to_tcp)`. Only **how
+`T_flange_to_tcp` is built** changed. The account above is kept as the record.
+
+**Superseded:** the rotation is no longer `inv(T_zero[5])`'s, and the
+translation is no longer `tcp_local` expressed in that frame. Both now come
+from the real calibrated tool=1 offset:
+
+```python
+TCP_OFFSET_6D_MM_DEG = np.array([-134.777, 96.448, 106.334, 86.647, -13.136, 60.612])
+T_flange_to_tcp = pose_to_matrix(*TCP_OFFSET_6D_MM_DEG)
+```
+
+`pose_to_matrix` is a new module-level helper implementing the supervisor
+docs' single convention for every 6D pose they publish
+(`R = Rz(rz) @ Ry(ry) @ Rx(rx)`, `docs/saved_coords_data_and_usage_EN.md` §3).
+It is a **refactor, not new maths** — the same composition was already inline
+in `solve_ik_tcp` (`rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)`) and
+`load_build_plate`. A companion `matrix_to_pose(T)` does the inverse
+extraction, so rotation error can be reported in degrees.
+
+The old rotation came out to `Rot_x(-90°)` — a real rotation, but one derived
+from *the mesh's* zero-pose frame rather than from any tool measurement. It
+only worked because the previous asset had no true orientation offset from the
+flange. tool=1 has one (~87° / −13° / 61°), which that construction could not
+represent at all.
+
+**Consequence for branch selection:** nothing in the algorithm changes, but
+the *flange* pose required for a given TCP target does, so the branch that
+gets picked at a given waypoint generally differs from pre-7.1. The flange now
+sits at TCP + `[-41.6, -108.95, 158.66]` (world, for `R_target = I`) instead of
+`[-21.9, 26.0, 159.9]`. That shifted the planar path's worst wrist-centre
+distance from 646 mm to 835 mm against an 820 mm envelope, which is why the
+default build-plate pose moved — see `settled.md` S1.43.
+
+**Re-verified after the change** (headless, `fairino-fr5-sim`): 200/200 seeded
+TCP-targeting round-trips solve, and FK of *every* returned branch reproduces
+the target TCP pose to 5e-11 mm. Over a wider 2000-seed sweep, 1992 recover the
+seed configuration exactly — and the same 8 seeds miss identically with **no
+tool at all**, with the old transform, and with the new one, so that gap is
+`solve_ik`'s 8-branch enumeration rather than anything the TCP layer does.
+Full-path evidence: 181,375/181,375 planar waypoints solve.

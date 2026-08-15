@@ -4,18 +4,37 @@ status: active
 
 # Curved Print: The Working Setup
 
-## ⚠ Scope — this documents the *current* code
+## ⚠ Scope — SUPERSEDED by Stage 7.1, not yet re-validated
 
-This procedure applies to the code **as it stands today**: the original
+This procedure was written against the pre-7.1 code: the original
 `assets/printerHead/nozzle.obj` mesh and the `settled.md` S1.4 `tcp_local` TCP
 construction.
 
-**Stage 7.1 will invalidate it.** That sub-stage replaces the TCP with the real
-calibrated tool=1 offset and hides the nozzle mesh, moving the TCP **311mm**
-(zero-pose `[-798.137, -228.017, -109.903]` → `[-954.777, -308.334, 146.448]`).
-Reachability is a direct function of where the TCP sits, so the procedure must
-be re-validated after 7.1 and **the solve results recorded below will not carry
-over**. See
+**Stage 7.1 landed on 2026-08-14 and invalidated it** (`settled.md` S1.43). It
+replaced the TCP with the real calibrated tool=1 offset and hid the nozzle
+mesh, moving the TCP **310.97mm** (zero-pose
+`[-798.137, -228.017, -109.903]` → `[-954.777, -308.334, 146.448]`).
+Reachability is a direct function of where the TCP sits.
+
+**The solve results recorded below (3,175 RX / 2,688 TX) are therefore
+historical.** The curved path has *not* been re-run since 7.1 — treat every
+number here as pre-7.1 evidence, not a current expectation. The procedure's
+*shape* (the order of operations) is still expected to hold; only the poses and
+counts are in question.
+
+Two further reasons to re-derive rather than re-run verbatim:
+
+- The tool's collision body is now the **single TCP point**, not the nozzle
+  mesh, so the clearance this procedure was tuned to create is more permissive
+  than it was.
+- Stage **7.2** removes both the posed-plate and tangent-plane checks from the
+  curved path entirely, and **7.3** replaces `saved_position.json` with the real
+  User Frame. Re-validating now would likely be wasted work — this guide is best
+  rewritten once 7.3 lands.
+
+For reference, the *planar* path was re-validated at 7.1 and does solve
+181,375/181,375, but only after `USER_FRAME_ORIGIN_MM` moved from
+`[-600, -300, 0]` to `[-570, -300, -100]`. See
 [`../001_Inbox/2026-07-22_stage7_calibration_and_external_ik.md`](../001_Inbox/2026-07-22_stage7_calibration_and_external_ik.md)
 §7.1.
 

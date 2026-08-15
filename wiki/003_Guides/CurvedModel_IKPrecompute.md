@@ -84,13 +84,14 @@ point outward of *this waypoint's own* tangent plane (point = the waypoint,
 normal = its `R_target[:,2]`, already computed by 6.4) also clears every
 surface further inward — for either pass, with no obstacle mesh at all.
 
-**The check applies to the nozzle tip only** (`_nozzle_clears_plane()`), **not
-the arm links.** The supporting-hyperplane proof bounds where the *surface*
-is, not where the *arm* is — the arm must span from its base up to the
+**The check applies to the tool tip only** (`_nozzle_clears_plane()` — since
+Stage 7.1 this is the **TCP point**, not the nozzle mesh; see the note at the
+end), **not the arm links.** The supporting-hyperplane proof bounds where the
+*surface* is, not where the *arm* is — the arm must span from its base up to the
 contact point, so its lower links legitimately sit far *inward* of a local
 tangent plane (measured Robot1 ~-92mm, Robot2 ~-194mm at a real waypoint)
-while the nozzle tip sits on the surface (~0). Testing the links would reject
-every real printing pose. The nozzle gets `CURVED_TIP_CLEARANCE_TOLERANCE_MM`
+while the tip sits on the surface (~0). Testing the links would reject
+every real printing pose. The tip gets `CURVED_TIP_CLEARANCE_TOLERANCE_MM`
 (~1.0mm, assumed) of *inward* slack — it prints *on* the surface, so its
 worst signed distance is ~0 and sometimes slightly negative after mesh
 discretisation; the tolerance is *added* to the signed distance (subtracting
@@ -106,13 +107,14 @@ an infinite plane, so the plate must sit below the whole arm, including the
 base and lower links. This replaces the old world-z=0 proxy and the removed
 `reject_below_ground` toggle.
 
-The six arm-link meshes are always rejected below the posed plate. The nozzle
-is also rejected by default; the GUI's **Allow TCP through build plate** toggle
-(`allow_tcp_through_plate`, default OFF) is the only exception, and it never
-permits an arm link through the plate. On curved runs, this plate check is
-layered with the existing nozzle-only tangent-plane check. The toggle changes
-which IK branch is accepted, so it is included in both precompute cache keys;
-`PRECOMPUTE_CACHE_VERSION` is 4. `_branch_clears_ground(angles, plane)` still
+The six arm-link meshes are always rejected below the posed plate. The tool
+(the TCP point since 7.1) is also rejected by default; the GUI's **Allow TCP
+through build plate** toggle (`allow_tcp_through_plate`, default OFF) is the
+only exception, and it never permits an arm link through the plate. On curved
+runs, this plate check is layered with the existing tip-only tangent-plane
+check. The toggle changes which IK branch is accepted, so it is included in
+both precompute cache keys; `PRECOMPUTE_CACHE_VERSION` is 4 (**5 since Stage
+7.1**). `_branch_clears_ground(angles, plane)` still
 uses `plane=None` for planar paths and a waypoint tangent plane for curved paths.
 
 **RX setup requires a decoupled load order.** `load_curved_model()` places the
@@ -125,8 +127,8 @@ adopted X+30 pose solves all 3,175 RX waypoints.
 
 ## Known limitation
 
-**Full arm-vs-mockup collision beyond the nozzle is not checked.** The
-supporting-hyperplane argument only bounds the nozzle tip; nothing here stops
+**Full arm-vs-mockup collision beyond the tool tip is not checked.** The
+supporting-hyperplane argument only bounds the tip; nothing here stops
 an arm link from intersecting the mockup elsewhere. The posed-plate check
 handles the plate as an infinite plane, not the finite curved obstacle. This is the same
 simplification class as the old planar z=0 proxy (which also never checked
@@ -156,12 +158,52 @@ Verified headless, 2026-07-22.
 | Planar regression | The planar path uses the same posed-plate clearance gate; stale v3 caches miss under version 4 and are rebuilt |
 | RX precompute | All 3,175 RX waypoints solve with the adopted X+30 placement. The shipped cache records `allow_tcp_through_plate: false` |
 | FK round-trip on solved poses | Target position matches to 6.7e-13mm; `R_target[i]` matches to 3e-15 — the per-waypoint orientation threads through IK exactly |
-| Nozzle clearance | A solved branch clears its own tangent plane; shifting that plane outward past the tip by more than the tolerance correctly rejects it |
+| Tip clearance | A solved branch clears its own tangent plane; shifting that plane outward past the tip by more than the tolerance correctly rejects it. Measured against the *nozzle mesh* — 7.1 reduced the tested body to the TCP point |
 | Per-layer cache plumbing | `curved_rx.precompute.npz` / `curved_tx.precompute.npz` remain independent; both cache metas include `allow_tcp_through_plate` at version 4 |
 
 **Remaining:** the RX path still stops at its genuine joint-limit boundary;
 the interactive GUI checkbox/disable-state eyeball remains a physical-window
 check.
+
+---
+
+## Changed in Stage 7.1 (2026-08-14)
+
+The clearance *design* above is unchanged — the supporting-hyperplane argument
+and the tip-only-not-links reasoning both still hold, and were always really
+about the tip rather than the mesh. Two things it says are now stale:
+
+**The tested body is the single TCP point, not the nozzle mesh.**
+`_nozzle_clears_plane()` keeps its name (7.2 deletes it, so renaming would
+churn every reference for one sub-stage) but now indexes
+`moving_geometry_rest_verts[6]`, which is the TCP point. Consequences:
+
+- The check is **strictly more permissive** than when measured above. The
+  mesh's shoulders used to be able to fail a waypoint the tip itself cleared;
+  they cannot now.
+- `CURVED_TIP_CLEARANCE_TOLERANCE_MM` (~1.0mm) was chosen against mesh
+  behaviour. Against a point it is doing a different job, and has not been
+  re-tuned. It is moot in practice — see below.
+- The 8-corner bbox bound degenerates to 8 coincident points, so the
+  corners-first escalation is a no-op here.
+
+**The measured results above predate 7.1 and have not been re-run.** The real
+tool=1 offset moved the TCP 310.97mm, so every solved branch changes. Treat the
+3,175 RX figure, the `X+30` adopted pose and the 1,809-waypoint boundary as
+historical — see the warning at the top of
+[`CurvedModel_PrintSetup.md`](CurvedModel_PrintSetup.md).
+
+**`PRECOMPUTE_CACHE_VERSION` is 5**, not 4: the TCP offset is a constant rather
+than a cache-key field, so the bump is what invalidates joint paths solved for
+the old tool.
+
+**Stage 7.2 removes this check entirely** on the curved path, along with
+`_nozzle_clears_plane()`, `precompute_tip_tolerance_mm` and
+`CURVED_TIP_CLEARANCE_TOLERANCE_MM`. The posed-plate check narrows to planar
+only. Nothing replaces either on the curved path — the exchange spec's
+Rejection Criteria validate *data*, not geometry. That is a deliberate,
+recorded trade (`settled.md` S1.43 and the Stage 7 inbox note §7.2), which is
+why re-tuning the tolerance now would be wasted work.
 
 ## Current scope and limitations
 

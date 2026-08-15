@@ -33,6 +33,21 @@ its limit, which leaves little room for the wrist joints to also pick a
 free orientation. Keeping the plate on the same side as the natural rest
 direction, at a radius well inside the reachable envelope, avoids that.
 
+**The value moved in Stage 7.1: `[-600, -300, 0]` → `[-570, -300, -100]`.**
+The quadrant reasoning above is unchanged; what changed is the *radius*
+margin. Reach is a property of the **wrist centre**, not the TCP, so it
+depends on the tool offset — and the real tool=1 offset sits ~109mm further
+in −Y than the placeholder it replaced. That consumed the margin: the far
+corner of the bed needed a wrist centre **835.35mm** out against an
+**820mm** envelope, and only 3 of 181,375 planar waypoints failed — but one
+was waypoint 0, and IK aborts the whole path on the first failure
+(`settled.md` S1.12). +30mm X restores reach (19.4mm was the minimum);
+−100mm Z clears the residual posed-plate rejection. All 181,375 solve there.
+
+Practical consequence when re-tuning this constant: check it against the
+**wrist centre under the current TCP offset**, not the plate corner's
+distance from the base. See `settled.md` S1.43.
+
 ## How it's computed
 
 `VisContent.load_build_plate(position_mm=USER_FRAME_ORIGIN_MM,
@@ -108,7 +123,7 @@ Module-level constants in `geometry_backend.py`:
 
 | Constant | Effect |
 |---|---|
-| `USER_FRAME_ORIGIN_MM` | Default base-frame `[x, y, z]` translation to the plate's corner, used when `load_build_plate()` is called argument-free (startup, Reset). Keep it in the same quadrant as the zero/home-pose TCP direction (see above) and within the ~830–1124mm reach envelope. |
+| `USER_FRAME_ORIGIN_MM` | Default base-frame `[x, y, z]` translation to the plate's corner, used when `load_build_plate()` is called argument-free (startup, Reset). `[-570, -300, -100]` since Stage 7.1. Keep it in the same quadrant as the zero/home-pose TCP direction (see above), and check the **whole toolpath's worst wrist centre** against the 820mm envelope — not the plate corner's own distance from the base. The margin depends on the TCP offset, so it must be re-checked whenever that changes (see "Why this particular placement"). |
 | `USER_FRAME_SCALE_MM` | Length of the fixed axis triad drawn at the corner, world units (mm). |
 | `BUILD_PLATE_POSITION_FILE` | Path to the saved-position JSON (`assets/buildPlate/saved_position.json`) read/written by the Save/Load Position buttons. |
 | `PLATE_THICKNESS_MM` | Measured thickness (mm) of `BambuLab_BuildPlate.obj`. Shifts the plate mesh and G-code waypoints up in their local Z before the `T_user_frame` transform, so `position_mm` marks the resting/bottom face and the print lands on the real top surface. |

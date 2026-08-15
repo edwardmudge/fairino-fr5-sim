@@ -12,14 +12,29 @@ import trimesh
 MESH_DIR = "assets/fr5_meshes"
 MESH_FILES = [f"Robot{i}.obj" for i in range(7)]  # Robot0 (base) .. Robot6
 
-# Tool head: nozzle mesh + TCP point, same zero-pose convention, mounted on the flange (Delta_6)
+# Tool head, mounted on the flange (Delta_6). The nozzle mesh follows the
+# zero-pose world convention like the link meshes, but is hidden since roadmap
+# 7.1 -- it is not the head tool=1 was calibrated against. The TCP is no longer
+# a zero-pose world point read from TCP.txt (now legacy, kept as a record); it
+# is derived from the flange-local offset below.
 PRINTER_HEAD_DIR = "assets/printerHead"
 NOZZLE_FILE = "nozzle.obj"
-TCP_FILE = "TCP.txt"
+
+# Real calibrated tool offset, flange frame: [x, y, z, rx, ry, rz] (mm, deg).
+# Source: docs/saved_coords_data_and_usage_EN.md 1.2, tool_index=1 -- the only
+# tool in active use. Supersedes the TCP.txt world point + borrowed rotation
+# (settled.md S1.4); see roadmap 7.1. A second tool becomes a tool_index-keyed
+# dict here, not before.
+TCP_OFFSET_6D_MM_DEG = np.array([-134.777, 96.448, 106.334, 86.647, -13.136, 60.612])
 
 TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
 TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
+# Flange->TCP stalk standing in for the hidden nozzle mesh (roadmap 7.1) --
+# yellow, so it reads against the TCP triad's red/green/blue and the orange
+# G-code preview.
+TOOL_AXIS_COLOR = (0.95, 0.85, 0.15)
+TOOL_AXIS_RADIUS_MM = 4.0
 
 PLAYBACK_RENDER_STRIDE = 50  # Push arm/bead updates to Polyscope every Nth
 # solved waypoint, not every frame -- full-buffer re-uploads make coarser
@@ -44,8 +59,17 @@ PLATE_THICKNESS_MM = 0.75
 
 # Placed in the (-X, -Y) quadrant to match the arm's natural zero/home-pose
 # reach direction -- the opposite quadrant only reaches via a near-limit J1
-# rotation, leaving little margin for the wrist to also orient freely
-USER_FRAME_ORIGIN_MM = np.array([-600.0, -300.0, 0.0])
+# rotation, leaving little margin for the wrist to also orient freely.
+#
+# Moved from [-600, -300, 0] by roadmap 7.1: the real tool=1 offset puts the
+# flange at TCP + [-41.6, -108.95, 158.66] instead of [-21.9, 26.0, 159.9]
+# (world, for the planar R_target = I -- the offset is orientation-dependent),
+# and that extra ~109mm in -Y pushed the far corner of the bed past the arm's
+# 820mm envelope -- 3 of 181,375 waypoints needed a wrist centre up to 835.35mm
+# out, and waypoint 0 was one of them. +30 X buys the reach back (19.4 needed);
+# -100 Z clears the residual posed-plate rejection. Measured, not guessed: all
+# 181,375 planar waypoints solve here under the gui_panel slider limits.
+USER_FRAME_ORIGIN_MM = np.array([-570.0, -300.0, -100.0])
 USER_FRAME_SCALE_MM = 50.0  # Fixed axes drawn at the user frame, world units (mm)
 BUILD_PLATE_POSITION_FILE = os.path.join(BUILD_PLATE_DIR, "saved_position.json")  # GUI Save/Load Position buttons
 
@@ -123,7 +147,7 @@ PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # settled.md S1.13's verification), so this is roughly a 12ms slice per frame.
 
 GCODE_PRECOMPUTE_CACHE = os.path.join(GCODE_DIR, "model.precompute.npz")  # roadmap 5.10, settled.md S1.21
-PRECOMPUTE_CACHE_VERSION = 4  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6; 4: allow_tcp_through_plate in key + posed-plate clearance, roadmap 6.8)
+PRECOMPUTE_CACHE_VERSION = 5  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6; 4: allow_tcp_through_plate in key + posed-plate clearance, roadmap 6.8; 5: real tool=1 TCP offset, roadmap 7.1 -- every cached joint path was solved for a different flange->TCP transform, and the offset is a constant rather than a cache-key field)
 
 
 def curved_precompute_cache_path(layer_name):
@@ -2303,43 +2327,73 @@ class VisContent:
             self.mesh_handles.append(handle)
             self.update_fns.append(handle.update_vertex_positions)
 
-        # Nozzle rides on the flange -- same Delta_6 as Robot6, see docs/FR5_Mesh_Convention.md
+        # Nozzle rides on the flange -- same Delta_6 as Robot6, see docs/FR5_Mesh_Convention.md.
+        # Registered but hidden (roadmap 7.1): the supervisor confirmed the tool=1
+        # calibration is correct, so this asset -- 163.47mm flange-to-tip against
+        # tool=1's 196.91mm -- is simply not the head that was calibrated. Kept
+        # wired into rest_verts/update_fns so a corrected asset only needs the
+        # set_enabled flag flipped back.
         nozzle = self.load_mesh(os.path.join(PRINTER_HEAD_DIR, NOZZLE_FILE))
         self.rest_verts.append(nozzle.vertices.copy())
         nozzle_handle = ps.register_surface_mesh("Nozzle", nozzle.vertices, nozzle.faces)
+        nozzle_handle.set_enabled(False)
         self.mesh_handles.append(nozzle_handle)
         self.update_fns.append(nozzle_handle.update_vertex_positions)
 
-        # Zero-pose bbox corners for the moving-geometry set (Robot1..6 + nozzle,
-        # rest_verts[0:7] -- excludes the TCP point/frame appended below, which
-        # are visualization markers, not solid robot geometry). See
-        # _meshes_clear_plane (roadmap 6.8).
-        self.moving_geometry_rest_bbox_corners = [_bbox_corners(v) for v in self.rest_verts]
+        # Fixed flange->TCP transform for IK -- the real calibrated tool=1 offset
+        # (roadmap 7.1), replacing S1.4's world point + rotation borrowed from
+        # inv(T_zero[5]), which could not express a tool with its own orientation.
+        self.T_flange_to_tcp = pose_to_matrix(*TCP_OFFSET_6D_MM_DEG)
+        T_zero_tcp = self.T_zero[5] @ self.T_flange_to_tcp  # TCP pose at zero joints
+        # .copy() so this is rest-pose data in its own right, not a view into
+        # T_zero_tcp -- it is shared by the collision set and rest_verts, same
+        # as every other entry in those lists (which all copy).
+        tcp_point = T_zero_tcp[:3, 3].reshape(1, 3).copy()
 
-        self.tcp_local = np.loadtxt(os.path.join(PRINTER_HEAD_DIR, TCP_FILE))  # Zero-pose world frame [x, y, z]
-
-        # Fixed flange->TCP transform for IK; rotation comes from inv(T_zero[5]),
-        # not assumed identity -- see settled.md S1.4 for why.
-        T_zero_flange_inv = self.T_zero_inv[5]
-        self.T_flange_to_tcp = T_zero_flange_inv.copy()
-        self.T_flange_to_tcp[:3, 3] = (T_zero_flange_inv @ np.append(self.tcp_local, 1.0))[:3]
+        # Zero-pose bbox corners for the moving-geometry set (Robot1..6 + the tool).
+        # The tool's collision body is the TCP point alone, NOT the nozzle mesh
+        # (roadmap 7.1): colliding against a hidden asset of the wrong length would
+        # reject poses on geometry the real head doesn't have. Its bbox is therefore
+        # 8 coincident corners -- degenerate but harmless, the corners bound is then
+        # exact. Excludes the TCP frame/axis appended below, which are visualization
+        # markers, not solid geometry. See _meshes_clear_plane (roadmap 6.8).
+        self.moving_geometry_rest_verts = self.rest_verts[:6] + [tcp_point]
+        self.moving_geometry_rest_bbox_corners = [
+            _bbox_corners(v) for v in self.moving_geometry_rest_verts]
 
         # TCP point, also Delta_6, but a Polyscope point cloud -- update_point_positions,
         # not update_vertex_positions, hence the per-object self.update_fns lookup
-        tcp_point = self.tcp_local.reshape(1, 3)
         self.rest_verts.append(tcp_point)
         point_cloud = ps.register_point_cloud("TCP", tcp_point)
         self.mesh_handles.append(point_cloud)
         self.update_fns.append(point_cloud.update_point_positions)
 
         # TCP orientation triad, also Delta_6 -- axis tips defined in the zero-pose
-        # world frame around tcp_local, so they rotate with the tool via the same
-        # Delta transform (curve network -> update_node_positions)
+        # world frame around the TCP point, so they rotate with the tool via the same
+        # Delta transform (curve network -> update_node_positions). The triad takes
+        # the tool's own rest orientation, not world-aligned axes: with a real offset
+        # the tool is genuinely rotated relative to the flange, and blue Z is the
+        # nozzle approach axis the curved path targets.
         tcp_frame_handle, tcp_frame_rest_nodes = self.create_coordinate_frame(
-            scale=TCP_FRAME_SCALE_MM, origin=self.tcp_local, name="TCP Frame")
+            scale=TCP_FRAME_SCALE_MM, origin=T_zero_tcp[:3, 3],
+            rotation=T_zero_tcp[:3, :3], name="TCP Frame")
         self.rest_verts.append(tcp_frame_rest_nodes)
         self.mesh_handles.append(tcp_frame_handle)
         self.update_fns.append(tcp_frame_handle.update_node_positions)
+
+        # Flange->TCP stalk, also Delta_6 -- the only thing left showing where the
+        # tool sits once the nozzle mesh is hidden (roadmap 7.1). Visual only: it is
+        # deliberately absent from moving_geometry_rest_verts, since the flange->TCP
+        # line was considered and rejected as a collision proxy in favour of the
+        # point alone.
+        tool_axis_nodes = np.array([self.T_zero[5][:3, 3], T_zero_tcp[:3, 3]])
+        tool_axis_handle = ps.register_curve_network(
+            "Tool Axis", tool_axis_nodes, np.array([[0, 1]]))
+        tool_axis_handle.set_color(TOOL_AXIS_COLOR)
+        tool_axis_handle.set_radius(TOOL_AXIS_RADIUS_MM, relative=False)
+        self.rest_verts.append(tool_axis_nodes)
+        self.mesh_handles.append(tool_axis_handle)
+        self.update_fns.append(tool_axis_handle.update_node_positions)
 
         return meshes
 
@@ -2349,11 +2403,11 @@ class VisContent:
 
         Delta_i = T_0_i(q) @ inv(T_0_i(0)) -- see docs/FR5_Mesh_Convention.md.
         Robot0 is the fixed base and is never updated. The nozzle (index 6),
-        TCP point (index 7), and TCP frame (index 8) ride on the flange,
-        reusing Delta_6 (index 5).
+        TCP point (index 7), TCP frame (index 8) and flange->TCP tool axis
+        (index 9) ride on the flange, reusing Delta_6 (index 5).
         """
         T_current = self.compute_fk(joint_angles_deg)
-        for i in range(9):
+        for i in range(10):
             src = min(i, 5)
             Delta = T_current[src] @ self.T_zero_inv[src]
 
@@ -2379,11 +2433,12 @@ class VisContent:
 
 
     def _moving_geometry_deltas(self, joint_angles_deg):
-        """Delta_i for each moving mesh (Robot1..Robot6 + nozzle), reusing
-        Delta_6 for the nozzle -- same src = min(i, 5) mapping as
+        """Delta_i for each moving collision body (Robot1..Robot6 + the TCP
+        point), reusing Delta_6 for the tool -- same src = min(i, 5) mapping as
         apply_delta_transform, but pure computation with no Polyscope side
         effects (used by the ground-clearance checks below, not per-frame
-        rendering)."""
+        rendering). Indexes moving_geometry_rest_verts, not rest_verts: index 6
+        is the TCP point, not the hidden nozzle mesh (roadmap 7.1)."""
         T_current = self.compute_fk(joint_angles_deg)
         return [T_current[min(i, 5)] @ self.T_zero_inv[min(i, 5)] for i in range(7)]
 
@@ -2394,7 +2449,8 @@ class VisContent:
         (roadmap 6.8). A vertex's signed distance is (world - point) @ normal,
         positive on the outward (+normal) side; a mesh clears iff its worst
         (min) signed distance is >= -tol. `indices` are moving-geometry indices
-        (0..5 = Robot1..6 arm links, 6 = nozzle), matching _moving_geometry_deltas.
+        (0..5 = Robot1..6 arm links, 6 = the TCP point), matching
+        _moving_geometry_deltas.
 
         Same corners-first / exact-vertices-fallback structure as
         _nozzle_clears_plane: signed distance is linear, so its min over the
@@ -2405,7 +2461,8 @@ class VisContent:
         deltas = self._moving_geometry_deltas(joint_angles_deg)
         for i in indices:
             delta = deltas[i]
-            for verts in (self.moving_geometry_rest_bbox_corners[i], self.rest_verts[i]):
+            for verts in (self.moving_geometry_rest_bbox_corners[i],
+                          self.moving_geometry_rest_verts[i]):
                 homo = np.hstack([verts, np.ones((len(verts), 1))])
                 world = (delta @ homo.T).T[:, :3]
                 if ((world - point) @ normal).min() + tol >= 0:
@@ -2416,14 +2473,19 @@ class VisContent:
 
 
     def _nozzle_clears_plane(self, joint_angles_deg, point, normal, tip_tolerance_mm):
-        """True if the nozzle mesh stays outward of the given plane, allowing
+        """True if the tool stays outward of the given plane, allowing
         tip_tolerance_mm of inward slack -- the surface-penetration half of the
         curved clearance check (roadmap 6.5, settled.md S1.37). The plane passes
         through `point` with unit outward `normal`; a vertex's signed distance
-        is (world - point) @ normal, positive outward. The nozzle clears iff its
+        is (world - point) @ normal, positive outward. The tool clears iff its
         worst (min) signed distance is >= -tip_tolerance_mm.
 
-        Only the nozzle (moving-geometry index 6) is tested, NOT the arm links.
+        Since roadmap 7.1 the tool body is the single TCP point rather than the
+        nozzle mesh, so this is now literally a tip test -- and a more permissive
+        one, since the mesh's shoulders no longer count. Roadmap 7.2 removes the
+        check entirely.
+
+        Only the tool (moving-geometry index 6) is tested, NOT the arm links.
         The plane is a supporting hyperplane for the convex mockup stack, so a
         point on its outward side provably clears every surface behind it -- but
         that bounds where the *surface* is, not where the *arm* is. The arm must
@@ -2439,7 +2501,8 @@ class VisContent:
         corners is a lower bound on its min over the true mesh -- a non-negative
         corner result proves clearance."""
         delta = self._moving_geometry_deltas(joint_angles_deg)[6]
-        for verts in (self.moving_geometry_rest_bbox_corners[6], self.rest_verts[6]):
+        for verts in (self.moving_geometry_rest_bbox_corners[6],
+                      self.moving_geometry_rest_verts[6]):
             homo = np.hstack([verts, np.ones((len(verts), 1))])
             world = (delta @ homo.T).T[:, :3]
             if ((world - point) @ normal).min() + tip_tolerance_mm >= 0:
@@ -2467,8 +2530,9 @@ class VisContent:
         1. **Posed build-plate check** (always, both paths -- roadmap 6.8): the
            plate is modelled as the infinite plane through its top/print face
            (_plate_plane, from self.T_user_frame). The 6 arm-link meshes (0-5)
-           may NEVER dip below it (zero tolerance). The nozzle (mesh 6) may,
-           only when self.allow_tcp_through_plate is set. Because the plane is
+           may NEVER dip below it (zero tolerance). The tool (index 6 -- the TCP
+           point since roadmap 7.1, not the hidden nozzle mesh) may, only when
+           self.allow_tcp_through_plate is set. Because the plane is
            infinite the plate must sit below the whole arm -- if the arm reaches
            below the plate the fix is to move the plate lower (Build Plate
            controls), not to disable the check. Replaces the old world-z=0 proxy
@@ -2938,6 +3002,39 @@ def rot_y(theta):
 def rot_z(theta):
     c, s = np.cos(theta), np.sin(theta)
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+
+def pose_to_matrix(x, y, z, rx, ry, rz):
+    """6D pose [mm, mm, mm, deg, deg, deg] -> 4x4 homogeneous transform.
+
+    The supervisor docs' one conversion for every 6D pose they publish (TCP
+    offsets, User Frame) -- docs/saved_coords_data_and_usage_EN.md 3,
+    R = Rz(rz) @ Ry(ry) @ Rx(rx). Not a new convention: that is already what
+    solve_ik_tcp and load_build_plate compose inline from rot_x/rot_y/rot_z,
+    so this builds on those rather than restating the matrices.
+    """
+    T = np.eye(4)
+    T[:3, 3] = [x, y, z]
+    rx_r, ry_r, rz_r = np.radians([rx, ry, rz])
+    T[:3, :3] = rot_z(rz_r) @ rot_y(ry_r) @ rot_x(rx_r)
+    return T
+
+
+def matrix_to_pose(T):
+    """4x4 homogeneous transform -> 6D pose [mm, mm, mm, deg, deg, deg].
+
+    Inverse of pose_to_matrix, using the exchange spec's own extraction
+    formulas. Degenerate at ry = +/-90 deg (gimbal lock: rx and rz stop being
+    separable and the atan2 pair collapses onto their sum) -- untreated,
+    because the poses this reports on are real tool/waypoint orientations
+    where that is a measure-zero case, and silently picking a branch there
+    would hide the ambiguity rather than surface it.
+    """
+    R = np.asarray(T)[:3, :3]
+    ry = np.arcsin(-R[2, 0])
+    rx = np.arctan2(R[2, 1], R[2, 2])
+    rz = np.arctan2(R[1, 0], R[0, 0])
+    return np.concatenate([np.asarray(T)[:3, 3], np.degrees([rx, ry, rz])])
 
 
 # Validation

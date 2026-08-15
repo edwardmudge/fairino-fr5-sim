@@ -1,1 +1,11 @@
+# LEGACY -- no longer read by geometry_backend.py as of Stage 7.1 (2026-08-14).
+# Superseded by the TCP_OFFSET_6D_MM_DEG constant, the real calibrated tool=1
+# offset from docs/saved_coords_data_and_usage_EN.md 1.2.
+#
+# What this was: the TCP as a bare zero-pose *world* point, with no rotation, so
+# the flange->TCP transform had to borrow its rotation from inv(T_zero[5])
+# (settled.md S1.4). That could not express a tool with a real orientation
+# offset from the flange, which tool=1 has (~87 / -13 / 61 deg).
+#
+# Retained as a record. np.loadtxt skips '#' lines, so it still loads unchanged.
 -798.137 -228.017 -109.903
