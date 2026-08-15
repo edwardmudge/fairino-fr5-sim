@@ -34,3 +34,18 @@ J4: [-170, 80]
 J5: [-170, 170]
 J6: [-170, 170]
 ```
+
+> **Sliders only, since roadmap 7.2.** These govern `gui_panel.JOINT_LIMITS` and
+> nothing else. Every **solver** call — the toolpath precompute, the manual IK
+> panel, and the exchange spec's joint-limit rejection row — passes
+> `geometry_backend.PHYSICAL_JOINT_LIMITS`, the table above.
+>
+> Until 7.2 the solver borrowed this constant, so it rejected poses the arm can
+> physically reach: J2 by ~134° and J4 by ~94°. Measured effect of the split —
+> **425 valid IK branches vs 207** over an 80-pose sample.
+>
+> The two are not interchangeable, and the narrowing here is still deliberate:
+> J2's shallow floor is a hand-rolled collision proxy, and dragging a slider has
+> no continuity or clearance check behind it. Note that this project has **no
+> mesh-vs-mesh collision anywhere**, so that proxy is doing more work than its
+> comment suggests. See `settled.md` S1.44.

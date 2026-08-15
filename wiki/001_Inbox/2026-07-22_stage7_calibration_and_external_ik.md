@@ -186,7 +186,51 @@ it **invalidates the working setup** recorded in
 `wiki/003_Guides/CurvedModel_PrintSetup.md` (3,175 RX / 2,688 TX at plate
 `[-570, -300, -200]`). Re-validate that procedure after §7.1.
 
-## §7.2 — Rejection Criteria (spec's table; in-house check narrowed to planar)
+## §7.2 — Rejection Criteria ✅ IMPLEMENTED 2026-08-15 (`settled.md` S1.44)
+
+Landed as specified below, with four deltas:
+
+- **The tangent-plane check was already dead when removed.** This spec treats it
+  as a live curved-only guard being traded away. §7.1 had already made it
+  incapable of rejecting anything — the tool became a single TCP point, which IK
+  pins to the very plane being tested. Measured before deleting: **7,471
+  evaluations, zero rejections**, worst signed distance 3.4e-13mm against a
+  1.0mm tolerance. So the nozzle guard was lost at §7.1; §7.2 deleted dead code.
+- **Segments were pulled forward from §7.4.4**, because rows 5 and 6 need them.
+  It turned out to be **one shared builder**, not two: both sources already emit
+  `(pos, is_feed_move)` waypoints, and a maximal `is_feed` run *is* the spec's
+  continuous extrusion line. `build_print_order` is not consulted — the piece
+  boundaries are already in the flags. Verified 35 segments == 35 pieces on both
+  curved layers.
+- **`PRECOMPUTE_CACHE_VERSION` 5 → 6** as predicted, but one bump now covers two
+  changes: the collision rule *and* the joint-limit switch.
+- **`CURVED_TIP_CLEARANCE_TOLERANCE_MM` kept, not deleted** — left in
+  `study_config.py` under a legacy marker, unimported. It is a tuned material
+  value and the project's convention is to mark legacy rather than remove.
+
+**Joint limits went further than "a new constant for the check".** The solver
+had been borrowing `gui_panel.JOINT_LIMITS`, a *slider* range, so it rejected
+poses the arm can physically reach. `PHYSICAL_JOINT_LIMITS` now feeds the
+precompute, the manual IK panel **and** row 3; sliders keep the practical range.
+Measured: **425 valid branches vs 207** over an 80-pose sample.
+
+**⚠ Found by this work — curved jobs fail row 5.** 23/35 RX and 15/35 TX
+segments contain >30° joint steps *inside* a feed run (worst 180.10°), caused by
+a discrete reference-axis switch in `_orientation_frames_for_points` (S1.36).
+Planar passes all seven rows cleanly (181,375/181,375 solved; worst
+within-segment step **5.85°**; 0/20,350 segments violating), which also settles
+§7.1's open note — the 57.32° planar steps really were G0 travel boundaries.
+Not fixed here; it is an S1.36 defect whose fix re-runs the curved pipeline that
+§7.3 forces anyway. See
+`wiki/001_Inbox/2026-08-15_orientation_frame_flips_row5.md`.
+
+**Scope question answered:** the seven rows are **universal** — both toolpath
+sources and any future one. The *collision narrowing* is the curved-only half.
+Two separate questions; see S1.44.
+
+---
+
+### Original spec (below, as written 2026-08-08)
 
 Two halves: retire this project's own pose rejection on the **curved**
 path, and implement the exchange spec's Rejection Criteria table verbatim

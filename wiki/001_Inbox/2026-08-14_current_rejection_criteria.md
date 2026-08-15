@@ -115,3 +115,42 @@ Observed consequence: a completed TX precompute (2,688 waypoints) drives the
   export can pass every check and still drive the arm through the workpiece.
 
 See `2026-07-22_stage7_calibration_and_external_ik.md` §7.1/§7.2.
+
+---
+
+## Changed in Stage 7.2 — implemented 2026-08-15 (`settled.md` S1.44)
+
+The table above is now **historical**. What actually landed, and where it
+differed from the prediction:
+
+**As predicted.** The curved path lost both clearance checks; planar kept Stage
+6.8 behaviour exactly; the spec's seven rows went in verbatim as
+`validate_job()`; `PRECOMPUTE_CACHE_VERSION` bumped (5 → 6, not 4 → 5 — §7.1
+had already taken it to 5).
+
+**Differed — the tangent-plane check was already dead.** This note describes it
+as an active row that "blocks, 1.0mm inward slack". It had not blocked anything
+since §7.1: that stage made the tool's collision body the single TCP point,
+which IK pins to the very plane being tested. Measured before deletion — 7,471
+evaluations, zero rejections, worst signed distance 3.4e-13mm against a 1.0mm
+tolerance. So removing it changed no outcome, and the "Curved = planar + one
+extra row" summary above was already untrue when written.
+
+**Differed — the joint-limit limitation was fixed, not just noted.** §2's
+warning that every mode passes the conservative slider range is resolved:
+`PHYSICAL_JOINT_LIMITS` now feeds the precompute, the manual IK panel, and the
+spec's row 3. `gui_panel.JOINT_LIMITS` governs the sliders only. Measured
+effect: 425 valid branches vs 207 over an 80-pose sample.
+
+**Still true, and now worse.** §2's "solved does not mean collision-free" holds
+with more force: the curved path has *no* geometric rejection at all, and
+nozzle-vs-workpiece protection has been absent since §7.1. See
+[`../003_Guides/CurvedModel_PrintSetup.md`](../003_Guides/CurvedModel_PrintSetup.md)
+"Changed in Stage 7.2".
+
+**New, found by the criteria.** Curved solved paths **fail** the spec's
+joint-step row — 23/35 RX and 15/35 TX segments contain >30° steps inside a feed
+run, from a reference-axis flip in `_orientation_frames_for_points`. Planar
+passes all seven rows cleanly (worst within-segment step 5.85°, 0/20,350
+segments violating). See
+[`2026-08-15_orientation_frame_flips_row5.md`](2026-08-15_orientation_frame_flips_row5.md).

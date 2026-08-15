@@ -121,6 +121,40 @@ This matters for Stage 7: an exported job can pass all seven of the exchange
 spec's Rejection Criteria and still drive the arm through the workpiece — those
 criteria validate *data*, not *geometry*.
 
+## Changed in Stage 7.2 — the gap is wider than the section above says
+
+The section above is retained as the record, but it now understates the problem
+in two ways. Both are settled facts, not predictions (`settled.md` **S1.44**).
+
+**1. It is the arm *and the nozzle body*, and it has been since 7.1.**
+The section says the tangent-plane check guards the nozzle. It no longer does,
+and stopped when **7.1** reduced the tool's collision body to the single TCP
+point: the check tested that point against the tangent plane through its own
+waypoint, which IK pins it to, so the signed distance was identically zero.
+Measured across all 5,863 cached RX+TX waypoints and 1,608 candidate branches,
+it returned "clear" **every single time**, worst distance 3.4e-13mm against a
+1.0mm tolerance. 7.2 deleted it as dead code; the protection was already gone.
+So the thing to judge by eye is the arm **and** the tool.
+
+**2. The curved path now has no geometric rejection at all.**
+7.2 narrowed this project's own pose rejection to the **planar** path (confirmed
+decision #6). Curved precomputes no longer run the posed-plate check either. A
+curved solve now means *reachable and within joint limits*, nothing more —
+"clears the plate" is no longer part of it. Planar is unchanged and keeps Stage
+6.8 behaviour exactly.
+
+**What this means in practice.** Before running a curved job on the real
+machine, step through playback and watch both the arm and the tool against the
+mockup. The simulator will not stop you, and after 7.2 it will not even stop you
+driving through the build plate.
+
+Closing this still needs the mesh-vs-mesh design decision S1.37 rejected once on
+performance grounds. A cheaper option now exists than when that call was made:
+`curved_surface_verts_world` and `nearest_vertex_index` are already computed per
+waypoint for the orientation frames, so a point-to-surface distance test could
+reuse them. It still needs real tool geometry — which no longer exists on any
+path — and a performance budget. Logged as a Stage 8 candidate, not scheduled.
+
 ## Code anchors
 
 - `geometry_backend.py`: `load_build_plate()` (the plate-move invalidation and

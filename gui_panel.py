@@ -1,10 +1,17 @@
 import polyscope.imgui as psim
 import numpy as np
 
-from geometry_backend import USER_FRAME_ORIGIN_MM, PRECOMPUTE_CHUNK_SIZE
+from geometry_backend import (USER_FRAME_ORIGIN_MM, PRECOMPUTE_CHUNK_SIZE,
+                              PHYSICAL_JOINT_LIMITS)
 
 # FR5 practical joint slider ranges (degrees), asymmetric per joint.
-# Source: docs/FR5_Joint_Limits.md "Practical Slider Ranges"
+# Source: docs/FR5_Joint_Limits.md "Practical Slider Ranges".
+#
+# Sliders ONLY. Every solver call passes PHYSICAL_JOINT_LIMITS instead
+# (roadmap 7.2) -- until then the solver borrowed this constant, so it rejected
+# poses the arm can physically reach. Narrowing here still makes sense: dragging
+# a joint by hand has no continuity or clearance check behind it, and J2's floor
+# is deliberately shallow for that reason.
 JOINT_LIMITS = [
     (-170, 170),  # J1
     (-130, 80),   # J2
@@ -220,7 +227,7 @@ class UI_Menu:
                         self.content.pause_toolpath_ik_precompute()
                 else:
                     if psim.Button("Run Precompute"):
-                        self.content.run_active_toolpath_ik_precompute(JOINT_LIMITS)
+                        self.content.run_active_toolpath_ik_precompute(PHYSICAL_JOINT_LIMITS)
 
                 psim.SameLine()
 
@@ -323,7 +330,7 @@ class UI_Menu:
 
             if psim.Button("Solve IK"):
                 self.ik_solutions, self.ik_status = self.content.solve_ik_tcp(
-                    self.ik_target_pos, self.ik_target_rpy, JOINT_LIMITS)
+                    self.ik_target_pos, self.ik_target_rpy, PHYSICAL_JOINT_LIMITS)
                 self.ik_selected_index = 0
                 if self.ik_solutions:
                     self.joint_angles = self.ik_solutions[0][0].copy()

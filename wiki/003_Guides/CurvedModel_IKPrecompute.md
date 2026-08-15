@@ -4,6 +4,22 @@ status: active
 
 # Curved-Surface IK Precompute
 
+> ⚠ **Changed in Stage 7.2 (`settled.md` S1.44) — the clearance sections below
+> are historical.** The curved path now runs **no clearance check at all**:
+> `_nozzle_clears_plane` (the tangent-plane check) is deleted, and the
+> posed-plate check was narrowed to the planar path. A curved solve now means
+> *reachable and within joint limits*, nothing more.
+>
+> The tangent-plane check was also already inert before it was removed — §7.1
+> made the tool's collision body a single TCP point, which IK pins to the very
+> plane being tested, so its signed distance was identically zero (measured:
+> 7,471 evaluations, zero rejections, worst 3.4e-13mm against a 1.0mm
+> tolerance). Everything below describing it as live describes §6.5's design,
+> not current behaviour. The planar path is unchanged.
+>
+> The precompute's planar/curved discriminator is now the boolean
+> `check_collision` on `_begin_toolpath_precompute` (was `tip_tolerance_mm`).
+
 ## What it is
 
 `run_curved_toolpath_ik_precompute(layer, ...)` wires a print layer's ordered,

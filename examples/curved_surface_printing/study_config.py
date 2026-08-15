@@ -38,23 +38,31 @@ CURVED_LAYERS = [
 # Optional non-print body under the print surfaces. Used to orient surface
 # normals outward (_orient_normals_outward) -- NOT a collision body: the
 # obstacle-mesh clearance approach was rejected as too slow and replaced by the
-# per-waypoint tangent-plane check (settled.md S1.37).
+# per-waypoint tangent-plane check (settled.md S1.37). Roadmap 7.2 then removed
+# that check too, so the curved path has no clearance test at all -- this mesh
+# is still normals-only, and now nothing else guards the workpiece (S1.44).
 CURVED_OBSTACLE_FILE = "Surface_Bot.obj"
 CURVED_OBSTACLE_STRUCTURE_NAME = "Surface Bot"
 CURVED_OBSTACLE_COLOR = (0.55, 0.55, 0.55)
 
 # The four below are assumptions, not measurements -- they depend on this
 # study's material and nozzle, so they live here rather than in
-# geometry_backend.py. Tune empirically.
+# geometry_backend.py. Tune empirically. (Still four, as settled.md S1.41 says;
+# one of them is legacy since 7.2 but is still a tuned material assumption.)
 
 # How far a travel move between two curve pieces is offset outward along the
 # local surface normal, so the nozzle hovers over the mockup and any wet traces
 # instead of scraping them. Used by build_print_order().
 CURVED_TRAVEL_HOVER_MM = 4.0
 
+# LEGACY since roadmap 7.2 -- nothing imports this.
 # Nozzle-tip inward slack against a waypoint's surface tangent plane during the
-# curved precompute clearance check. Assumed plausible contact depth; the 6 arm
-# links get zero tolerance. Used by _branch_clears_ground().
+# curved precompute clearance check (_nozzle_clears_plane, settled.md S1.37).
+# That check was removed: roadmap 7.1 had already reduced the tool's collision
+# body to the single TCP point, which IK pins to the very plane being tested, so
+# the check could no longer reject anything. Kept here rather than deleted -- it
+# is a tuned material value, and would be needed again if a real tool body and a
+# real surface-collision test ever arrive.
 CURVED_TIP_CLEARANCE_TOLERANCE_MM = 1.0
 
 # The PLY toolpath curves carry no extrusion (E) data, and "layer height from Z"

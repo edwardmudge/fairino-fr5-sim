@@ -2138,6 +2138,25 @@ perpendicular on a steep part of the shell), which needs the GUI window.
 
 ## S1.37 Curved IK precompute (roadmap 6.5) -- Stage 5's machinery reused per layer, per-waypoint `R_target`, and nozzle-tip clearance against each waypoint's own tangent plane instead of an obstacle mesh
 
+> ⚠ **Changed in Stage 7.2 (2026-08-15) -- the clearance half of this decision
+> is superseded by S1.44. The reuse half still stands.**
+>
+> - The **tangent-plane nozzle check is gone**: `_nozzle_clears_plane()` is
+>   deleted, `CURVED_TIP_CLEARANCE_TOLERANCE_MM` is legacy and unimported, and
+>   `_branch_clears_ground()` no longer takes a `plane`. It had also been
+>   *incapable of rejecting anything* since 7.1, which made the tool a single TCP
+>   point that IK pins to the very plane being tested -- measured 7,471
+>   evaluations, zero rejections, worst 3.4e-13mm against a 1.0mm tolerance.
+> - The curved path now runs **no clearance check whatsoever** -- it lost the
+>   posed-plate check too. A curved solve means "reachable and within joint
+>   limits", nothing more.
+> - `_begin_toolpath_precompute`'s planar/curved discriminator is now the boolean
+>   `check_collision`, not `tip_tolerance_mm`.
+>
+> **Everything below describing the tangent-plane check as live describes 6.5's
+> design, not current behaviour.** The shared-seam reuse, the per-waypoint
+> `(N,3,3)` `R_target`, and the per-layer caching are all unchanged. See **S1.44**.
+
 **Reuses Stage 5's chunked precompute (S1.11/S1.12/S1.21) rather than rewriting
 it.** The chunked solver now loads from either source through one shared seam,
 `_begin_toolpath_precompute(waypoints, R_target_array, ...)`. The G-code entry
@@ -2388,6 +2407,14 @@ result (guides vanish on Run, stay hidden through Pause, return on Reset; beads
 still grow; planar unaffected) needs the Polyscope window on a physical GPU.
 
 ## S1.40 Posed-plate collision replacing the world-z=0 proxy (roadmap 6.8) -- arm always blocked, TCP optional; cache 3->4
+
+> ⚠ **Narrowed in Stage 7.2 (2026-08-15) -- this check is now PLANAR ONLY.**
+> The mechanism below is unchanged and still correct for the planar path
+> (`_plate_plane`, `_meshes_clear_plane`, `allow_tcp_through_plate`, arm always
+> blocked / TCP gated). What changed is *when it runs*: curved precomputes skip
+> it entirely via `check_collision=False`. Where this section says "both paths"
+> or layers the S1.37 tangent-plane check on top, read **S1.44** -- that check is
+> deleted and the curved path has no geometric rejection left at all.
 
 **Roadmap 6.8. `geometry_backend.py` + `gui_panel.py`.** Replaces the crude
 world-`z=0` clearance proxy (`reject_below_ground`, S1.13/S1.38) with a check
@@ -2648,3 +2675,221 @@ deg** against the spec's 30 deg rejection row -- but that was measured across
 the whole path, so the large steps are almost certainly G0 travel moves, which
 are segment *boundaries*. 7.2 must measure **within** a segment before treating
 this as a violation.
+
+> **Answered by 7.2 (2026-08-15).** The hypothesis holds for **planar** but is
+> **wrong for curved**: there the >30 deg steps sit *inside* feed segments, from
+> a reference-axis flip in `_orientation_frames_for_points`, not at boundaries.
+> See S1.44 and `wiki/001_Inbox/2026-08-15_orientation_frame_flips_row5.md`.
+
+
+## S1.44 Exchange-spec Rejection Criteria adopted (roadmap 7.2) -- seven rows on both toolpath sources, in-house collision narrowed to planar, solver moved to the physical joint limits; cache 5->6
+
+**Decision:** the external IK exchange spec's seven-row Rejection Criteria table
+(`examples/curved_surface_printing/external_ik_exchange_spec_EN.md`) is the
+definition of a valid print job, implemented verbatim as module-level
+`validate_job(vis, segments)` returning `(ok, [CheckResult])`. In exchange, this
+project's own pose rejection is **narrowed to the planar path**.
+
+### Scope: the two halves answer the scoping question differently
+
+This is the load-bearing distinction and the easiest thing to get wrong.
+
+**The seven rows are universal** -- both toolpath sources, and any future one.
+Not one row reads a surface, a normal's provenance, RX/TX, or anything in
+`study_config.py`: rows 1-2 are properties of the solver and the calibration and
+do not even read the toolpath; rows 3-7 are properties of the robot and the
+data. The only shoulder-specific content in the spec is cosmetic (its example
+folder name `print_job_TX_sensors/`). One export path (confirmed decision #1,
+2026-07-22) therefore gets **one source-agnostic validator**.
+
+**The collision narrowing is curved-only** -- deliberately asymmetric. Planar
+keeps Stage 6.8 behaviour exactly; the flat plate is a real, cheap, already
+validated constraint and removing it there would buy nothing. Do not let the
+table's symmetry pull this symmetric.
+
+**These rows validate data, not geometry.** A job can pass all seven and still
+drive the arm through the plate or the workpiece.
+
+### Part 1 -- the narrowing
+
+`_begin_toolpath_precompute`'s `tip_tolerance_mm=None` argument (which *was* the
+planar/curved discriminator) becomes a boolean `check_collision`:
+`run_toolpath_ik_precompute` passes **True**, `run_curved_toolpath_ik_precompute`
+passes **False**. `step_toolpath_ik_precompute` filters the ranked branches
+through `_branch_clears_ground` only when set, and takes `solutions[0]`
+otherwise. A flag rather than a read of `self.toolpath_source`, because the
+precompute snapshots its own per-run state at begin and a live-mutating source
+field could change mid-solve. `_abort_toolpath_ik_precompute` resets it to
+**True**, the checked direction.
+
+`_branch_clears_ground` loses its `plane` parameter and keeps only the plate
+half. `_plate_plane`, `_meshes_clear_plane` and `allow_tcp_through_plate` are
+untouched.
+
+**`_nozzle_clears_plane` deleted -- it superseded S1.37, which was already
+dead.** Not a judgement call: **7.1 had made the check incapable of rejecting
+anything.** It tested the tool against the tangent plane through a waypoint, but
+7.1 reduced the tool's collision body to the single TCP point, which IK pins to
+that exact waypoint. Signed distance was therefore identically zero.
+
+**Measured before deleting** (2026-08-15, headless): over all **5,863** cached
+RX+TX waypoints and **1,608** re-solved candidate branches -- including branches
+the precompute did not choose -- it returned `True` **7,471 / 7,471** times, with
+worst \|signed distance\| **3.4e-13 mm** against a 1.0mm tolerance. Twelve orders
+of magnitude of margin. Removing it changed no accept/reject outcome.
+
+**Consequence, recorded where it will be read:** nozzle-vs-workpiece protection
+was lost at **7.1**, not here. Combined with the plate check going, the curved
+path now has *no* geometric rejection whatsoever. `CurvedModel_PrintSetup.md`'s
+open question is widened accordingly, from "the arm passes through the mockup"
+to "the arm **and the nozzle body** pass through the mockup".
+`CURVED_TIP_CLEARANCE_TOLERANCE_MM` stays in `study_config.py` under a legacy
+marker -- a tuned material value, unimported.
+
+### Part 2 -- segments, pulled forward from 7.4
+
+Rows 5 and 6 need a segment concept neither path had. **Both sources already
+emit `(pos, is_feed_move)` waypoints**, and on each a segment is exactly a
+maximal run of consecutive `is_feed=True` -- precisely the spec's "one
+continuous extrusion line". So `build_export_segments()` is **one shared
+function**, not two per-path builders, and needs no reference to
+`build_print_order`: the piece boundaries are already in the flags. Travel runs
+are dropped, not exported (the spec has the receiving side re-insert a travel
+MoveJ between segments). Only the solved prefix is used, so a paused precompute
+yields the segments solved so far.
+
+Verified against real data: **35 segments == 35 print-order pieces** on both RX
+and TX, with segment lengths summing exactly to the feed-waypoint count
+(2,527 RX / 2,000 TX).
+
+### Part 3 -- the seven rows
+
+Constants live in `geometry_backend.py`, not `study_config.py`: they are
+robot/spec-level, and S1.41 reserves that module for material- and
+nozzle-dependent values.
+
+**Nothing calls `validate_job` or `build_export_segments` yet.** Both are
+module/class-level API with no caller: the export writer is 7.4 and the GUI
+hookup is 7.5. "Implemented" here means "built and verified headless", not
+"reachable from the app".
+
+- **Row 2 is circular** for a single-source project -- we *are* the calibration.
+  Kept per confirmed decision #5 (implement verbatim), and it earns its place:
+  `TCP_CALIBRATION_REFERENCE_6D` is transcribed separately from the supervisor
+  doc, so the pair catches a mistyped digit in either constant.
+- **Row 5 measures within a segment only.** A large jump *between* segments is
+  legal -- the receiving side inserts a travel MoveJ there.
+- **Row 6** has no ply to count until 7.4, so it checks the structural invariant
+  the line count will inherit: positions, joints and normals must agree. Note
+  this is **tautological for segments `build_export_segments` produced** -- it
+  slices all three arrays with the same `sl`, so they cannot disagree. Same
+  circularity as row 2, and kept for the same reason: it starts earning its keep
+  the moment 7.4 writes a real line count, or anything hand-builds a segment.
+- **Row 7 is WARN, and must not reject.** It is also a *different* notion from
+  `solve_ik`'s `is_singular` (`|sin(theta5)| < 1e-6`, near-exact degeneracy);
+  the spec's 2 deg band is far wider.
+
+### Part 4 -- physical vs practical joint limits
+
+`gui_panel.JOINT_LIMITS` was never drift: it cites `docs/FR5_Joint_Limits.md`,
+but that doc's separate **"Practical Slider Ranges"** section. The real defect
+was that **the solver borrowed a slider constant**. New
+`PHYSICAL_JOINT_LIMITS` in `geometry_backend.py` (J2/J4 -264..+84) now feeds the
+precompute call site, the manual IK panel, and row 3. `JOINT_LIMITS` keeps the
+sliders, where the conservative range is honest -- hand-dragging a joint has no
+continuity or clearance check behind it.
+
+**Accepted risk:** J2 gains ~134 deg and J4 ~94 deg of deep-negative travel on
+both print paths, at the same moment the curved path loses its last geometric
+check. J2's shallow floor was documented as a collision-safety proxy, and
+nothing replaces it. Measured effect on branch availability: **425 valid
+branches vs 207** over an 80-pose sample -- the solver was rejecting more than
+half of what the arm can reach.
+
+Note also that `wrap_into_limits` returns the first of `k in (0, +/-360)` inside
+the window, so a wider window can change which *representation* is selected,
+which changes `wrapped_dist` ranking. Solved paths shift even where they already
+succeeded -- which is why the planar path was re-run rather than assumed.
+
+### Cache
+
+`PRECOMPUTE_CACHE_VERSION` **5 -> 6**. One bump covers both changes: neither
+cache meta hashes the collision rule or the joint limits.
+
+### Verified on 2026-08-15 -- headless, `fairino-fr5-sim` env
+
+- **Each of the seven rows fires alone.** Seven fixtures, each FK-consistent by
+  construction so only the row under test breaks: every one failed its own row
+  with the right message while **all six others still passed**, and row 7 warned
+  without rejecting. A clean job passes all seven.
+- **Segment builder**: counts, lengths, travel exclusion, sequential indices,
+  `R_target` Z column as `normal_base`, partial-precompute prefix, and the
+  empty case. Plus the real-data match above.
+- **The narrowing**: `_nozzle_clears_plane` and `precompute_tip_tolerance_mm`
+  gone, `_branch_clears_ground` signature reduced, planar passing
+  `check_collision=True` and curved `False`, the step loop bypassing the filter,
+  and the plate check still discriminating (rejects an arm below the plate,
+  accepts one above).
+- **Limits**: both solver call sites on `PHYSICAL_JOINT_LIMITS`, sliders still
+  on `JOINT_LIMITS`, physical strictly containing practical.
+- **Cache**: all three on-disk caches (two v4, one v5) correctly rejected at v6.
+- **Planar re-run end to end** under the new physical limits: **181,375 /
+  181,375** solved in 120s at `USER_FRAME_ORIGIN_MM = [-570, -300, -100]`,
+  after correctly rejecting the stale v5 cache. Segments into **20,350** runs
+  (134,618 feed / 46,757 travel waypoints, lengths summing exactly). The full
+  seven-row validator returns **ACCEPTED**, worst per-point FK error
+  **0.000000mm**. Solved joint ranges are unchanged and sit well inside even the
+  slider window (widest J3, 14.4..84.2 deg), so widening the solver's window did
+  not move the planar solution -- it only stopped rejecting reachable poses
+  elsewhere.
+
+  This also **settles 7.1's open note**: max step across the whole path
+  reproduces at **57.32 deg**, but within a feed segment it is **5.85 deg**,
+  with **0 of 20,350** segments violating row 5. The large steps really were G0
+  travel boundaries, exactly as hypothesised -- for planar.
+
+### Found by this work -- curved jobs currently fail row 5
+
+Running the new validator over the existing curved solved paths: **23 of 35 RX
+segments and 15 of 35 TX segments** contain >30 deg joint steps *inside* a feed
+run, worst **180.10 deg**. Cause is a discrete reference-axis switch in
+`_orientation_frames_for_points` (S1.36): `argmin(|world_axes @ z|)` flips as the
+normal sweeps, spinning the commanded frame about its own Z. The spin is
+physically free (the nozzle is rotationally symmetric) but IK tracks it, so J6
+jumps. Correlation is near 1:1 -- RX 74 switches / 78 large steps, TX 62 / 63.
+
+**Not fixed here** -- 7.2's remit was to implement the criteria, and the criteria
+found it. It is an S1.36 defect whose fix re-runs the whole curved pipeline,
+which 7.3 forces anyway. Full diagnosis and three fix options:
+`wiki/001_Inbox/2026-08-15_orientation_frame_flips_row5.md`.
+
+### Known gap -- a cached precompute exports zero segments
+
+Found in 7.2's pre-commit review, *not* by the verification above.
+`load_toolpath_precompute_cache()` restores `precompute_joint_path` but **not**
+`precompute_waypoints`/`precompute_R_target` -- both runners return on a cache
+hit before `_begin_toolpath_precompute()`, the only place those are assigned. So
+after any cache hit `build_export_segments()` returns `[]`: without the
+`is_feed_move` flags there is nothing to segment on.
+
+The verification above missed it because the planar end-to-end run happened
+**after correctly rejecting the stale v5 cache** -- i.e. only ever on the
+fresh-solve path.
+
+**Consequence, and why it needed a fix before this commit:** rows 3-7 are all
+"no offender found" tests, so they passed vacuously at `n_points = 0` while rows
+1-2 never read the toolpath. An empty job reported **ACCEPTED**.
+
+**Fixed here, the safety half only.** `validate_job` gained an **in-house row 0,
+"job is non-empty" (REJECT)** -- explicitly *not* one of the spec's seven; the
+spec never contemplates exporting nothing. `results` is therefore **8 long**,
+row 0 first, then the seven in table order. A cached job still exports zero
+segments; it now says so loudly instead of passing.
+
+**Deferred to 7.4:** persisting `waypoint_positions`, `waypoint_is_feed` and the
+`R_target` Z column in the npz. That is a schema change
+(`PRECOMPUTE_CACHE_VERSION` 6 -> 7, every cache invalidated) and 7.4 needs those
+positions in the exported ply anyway, so it pays for itself there and not here.
+`PRECOMPUTE_CACHE_VERSION` stays at **6** for this stage. Full diagnosis,
+including the cheaper curved-only half:
+`wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md`.

@@ -4,6 +4,7 @@ import json
 import time
 import heapq
 import hashlib
+from collections import namedtuple
 import polyscope as ps
 import numpy as np
 import trimesh
@@ -26,6 +27,48 @@ NOZZLE_FILE = "nozzle.obj"
 # (settled.md S1.4); see roadmap 7.1. A second tool becomes a tool_index-keyed
 # dict here, not before.
 TCP_OFFSET_6D_MM_DEG = np.array([-134.777, 96.448, 106.334, 86.647, -13.136, 60.612])
+
+# The robot's real limits, from the teach pendant (docs/FR5_Joint_Limits.md
+# "Physical Joint Limits"). Every solver call and the export self-check use
+# these. NOT gui_panel.JOINT_LIMITS, which is the same doc's separate
+# "Practical Slider Ranges" -- a conservative hand-driving range that governs
+# the sliders only. Roadmap 7.2 split the two: the solver had been borrowing
+# the slider constant, which rejected poses the arm can physically reach
+# (J2/J4 by ~134 and ~94 degrees).
+PHYSICAL_JOINT_LIMITS = [
+    (-174, 174),  # J1
+    (-264, 84),   # J2  asymmetric
+    (-159, 159),  # J3
+    (-264, 84),   # J4  asymmetric
+    (-174, 174),  # J5
+    (-174, 174),  # J6
+]
+
+# --- External IK exchange spec: Rejection Criteria thresholds (roadmap 7.2) ---
+# Source: examples/curved_surface_printing/external_ik_exchange_spec_EN.md.
+# Robot/format-level, so they live here rather than in study_config.py, which
+# S1.41 reserves for material- and nozzle-dependent job values.
+
+# Expected TCP 6D pose at joints=[0]*6, from the spec's "Reference Values".
+# FK(0) + TCP_OFFSET_6D_MM_DEG must reproduce this or the whole calibration
+# chain is wrong -- the spec's first and most fundamental row.
+IDENTITY_REFERENCE_TCP_POSE_6D = np.array(
+    [-954.777, -308.334, 146.448, -161.378, -58.051, -25.434])
+IDENTITY_POS_TOL_MM = 0.1
+IDENTITY_ROT_TOL_DEG = 0.5
+
+# The tool=1 offset as transcribed independently from saved_coords_data_and_usage_EN.md
+# 1.2. Deliberately a second copy of TCP_OFFSET_6D_MM_DEG: comparing the two
+# is the spec's "TCP offset vs. our calibration" row, which reads circular for a
+# single-source project but does catch a mistyped digit in either constant.
+TCP_CALIBRATION_REFERENCE_6D = np.array(
+    [-134.777, 96.448, 106.334, 86.647, -13.136, 60.612])
+TCP_OFFSET_POS_TOL_MM = 0.5
+TCP_OFFSET_ROT_TOL_DEG = 0.5
+
+PER_POINT_FK_TOL_MM = 0.1   # FK(joints) + TCP vs the exported tcp_xyz_base_mm
+JOINT_STEP_MAX_DEG = 30.0   # Max change in any joint between adjacent points
+SINGULARITY_WARN_J5_DEG = 2.0  # |J5| below this warns (does NOT reject)
 
 TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
@@ -107,9 +150,12 @@ CURVE_RADIUS_MM = 0.5  # thin vs. TRAJECTORY_RADIUS_MM (2.0) -- 70 pieces should
 from examples.curved_surface_printing.study_config import (
     CURVED_MODEL_DIR, CURVED_MODEL_ROTATE_X_DEG, CURVED_LAYERS,
     CURVED_OBSTACLE_FILE, CURVED_OBSTACLE_STRUCTURE_NAME, CURVED_OBSTACLE_COLOR,
-    CURVED_TRAVEL_HOVER_MM, CURVED_TIP_CLEARANCE_TOLERANCE_MM,
+    CURVED_TRAVEL_HOVER_MM,
     CURVED_BEAD_WIDTH_MM, CURVED_BEAD_HEIGHT_MM,
 )
+# CURVED_TIP_CLEARANCE_TOLERANCE_MM is deliberately no longer imported --
+# roadmap 7.2 removed the tangent-plane check it fed. Left in study_config.py
+# under a legacy marker rather than deleted.
 
 GEODESIC_CHUNK_SOURCES = 1  # whole Dijkstra sources solved per step() call.
 # Measured per source: ~50ms on Surface_RX_Offset (30,284 verts), ~85ms on
@@ -147,7 +193,7 @@ PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # settled.md S1.13's verification), so this is roughly a 12ms slice per frame.
 
 GCODE_PRECOMPUTE_CACHE = os.path.join(GCODE_DIR, "model.precompute.npz")  # roadmap 5.10, settled.md S1.21
-PRECOMPUTE_CACHE_VERSION = 5  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6; 4: allow_tcp_through_plate in key + posed-plate clearance, roadmap 6.8; 5: real tool=1 TCP offset, roadmap 7.1 -- every cached joint path was solved for a different flange->TCP transform, and the offset is a constant rather than a cache-key field)
+PRECOMPUTE_CACHE_VERSION = 6  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6; 4: allow_tcp_through_plate in key + posed-plate clearance, roadmap 6.8; 5: real tool=1 TCP offset, roadmap 7.1 -- every cached joint path was solved for a different flange->TCP transform, and the offset is a constant rather than a cache-key field; 6: roadmap 7.2 -- curved runs no longer reject on clearance at all, and every run now solves against PHYSICAL_JOINT_LIMITS rather than the narrower slider range, which changes both which branches are valid and which representation wrap_into_limits picks)
 
 
 def curved_precompute_cache_path(layer_name):
@@ -189,7 +235,7 @@ class VisContent:
         self.precompute_status = ""
         self.precompute_cache_meta = None  # Cache key captured at precompute-start, see run_toolpath_ik_precompute()
         self.precompute_cache_path = None  # Which cache file this precompute writes to (per-layer for curved, roadmap 6.5)
-        self.precompute_tip_tolerance_mm = None  # Non-None -> curved run; enables per-waypoint tangent-plane clearance
+        self.precompute_check_collision = True  # False -> curved run; skips the posed-plate check entirely (roadmap 7.2)
         self.toolpath_source = -1  # -1 = planar G-code; 0..len(CURVED_LAYERS)-1 = that curved layer.
                                     # Single source of truth for what the shared Run/Pause/Cancel/Reset
                                     # precompute+playback controls currently target -- roadmap 6.6.
@@ -1774,15 +1820,21 @@ class VisContent:
 
     def _begin_toolpath_precompute(self, waypoints, R_target_array, joint_limits,
                                    reference_joint_angles, cache_meta, cache_path,
-                                   tip_tolerance_mm=None):
+                                   check_collision=True):
         """Load a freshly-built waypoint source into precompute state -- the
         shared seam behind run_toolpath_ik_precompute (planar) and
         run_curved_toolpath_ik_precompute (curved), roadmap 6.5. R_target_array
         is (N,3,3), one target orientation per waypoint (settled.md S1.12's
-        constant becomes a per-waypoint array). Every run checks the posed
-        build plate; a non-None tip_tolerance_mm additionally enables the
-        curved per-waypoint tangent-plane check. cache_path is where a completed
-        solve is written."""
+        constant becomes a per-waypoint array). cache_path is where a completed
+        solve is written.
+
+        check_collision is the whole planar/curved difference (roadmap 7.2):
+        True (planar) keeps Stage 6.8's posed-plate rejection, False (curved)
+        drops it, leaving the external IK exchange spec's Rejection Criteria as
+        the only definition of a bad job -- and those validate data, not
+        geometry. A flag rather than a read of self.toolpath_source because the
+        precompute snapshots its own per-run state here at begin, and a
+        live-mutating source field could change mid-solve."""
         self.precompute_waypoints = waypoints
         self.precompute_R_target = R_target_array
         self.precompute_joint_limits = joint_limits
@@ -1793,7 +1845,7 @@ class VisContent:
             reference_joint_angles if reference_joint_angles is not None else self.current_joint_angles)
         self.precompute_cache_meta = cache_meta
         self.precompute_cache_path = cache_path
-        self.precompute_tip_tolerance_mm = tip_tolerance_mm
+        self.precompute_check_collision = check_collision
 
 
     def run_toolpath_ik_precompute(self, joint_limits, reference_joint_angles=None):
@@ -1862,7 +1914,7 @@ class VisContent:
             R_target_array = np.broadcast_to(R_target, (len(waypoints), 3, 3))
             self._begin_toolpath_precompute(
                 waypoints, R_target_array, joint_limits, reference_joint_angles,
-                cache_meta, cache_path=GCODE_PRECOMPUTE_CACHE, tip_tolerance_mm=None)
+                cache_meta, cache_path=GCODE_PRECOMPUTE_CACHE, check_collision=True)
 
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
@@ -1908,8 +1960,7 @@ class VisContent:
                 return
             self._begin_toolpath_precompute(
                 waypoints, R_target_array, joint_limits, reference_joint_angles,
-                cache_meta, cache_path=cache_path,
-                tip_tolerance_mm=CURVED_TIP_CLEARANCE_TOLERANCE_MM)
+                cache_meta, cache_path=cache_path, check_collision=False)
 
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
@@ -1976,20 +2027,23 @@ class VisContent:
         self.precompute_joint_path = []
         self.precompute_cache_meta = None
         # Clear the curved-run markers too, so cancelling a curved precompute and
-        # starting the planar one can't carry over the wrong cache path or the
-        # tangent-plane tolerance (roadmap 6.5).
+        # starting the planar one can't carry over the wrong cache path or run
+        # the planar path with clearance checking still switched off (roadmap
+        # 6.5/7.2). Resets to the checked default, the safe direction.
         self.precompute_cache_path = None
-        self.precompute_tip_tolerance_mm = None
+        self.precompute_check_collision = True
 
 
     def step_toolpath_ik_precompute(self):
         """Advance the in-progress precompute by up to PRECOMPUTE_CHUNK_SIZE
         waypoints -- call every frame from render(). No-ops unless
-        precompute_running. Per waypoint: solve_ik_tcp_matrix ranked against
-        the previous waypoint's chosen pose, then the first ranked branch
-        that clears the posed plate (settled.md S1.12/S1.13). Aborts the
-        whole precompute (no partial motion) at the first waypoint with no
-        valid/clearing branch."""
+        precompute_running. Per waypoint: solve_ik_tcp_matrix ranked against the
+        previous waypoint's chosen pose, then a branch is picked per
+        precompute_check_collision (roadmap 7.2) -- planar takes the first ranked
+        branch that clears the posed plate (settled.md S1.12/S1.13/S1.40), curved
+        filters nothing and takes the closest-to-reference branch outright.
+        Aborts the whole precompute (no partial motion) at the first waypoint
+        with no valid branch, or -- planar only -- no clearing one."""
         if not self.precompute_running:
             return
 
@@ -2006,23 +2060,19 @@ class VisContent:
                 self.precompute_status = status_msg
                 return
 
-            # Every run checks the posed build plate. Curved runs additionally
-            # check this waypoint's own outward tangent plane (point = the
-            # waypoint, normal = R_i's Z column), the supporting-hyperplane
-            # clearance of settled.md S1.37.
-            plane = (None if self.precompute_tip_tolerance_mm is None
-                     else (pos_world_mm, R_i[:, 2], self.precompute_tip_tolerance_mm))
-            clear = next((angles for angles, *_ in solutions
-                          if self._branch_clears_ground(angles, plane)), None)
+            # Planar runs filter the ranked branches by posed-plate clearance.
+            # Curved runs don't filter at all (roadmap 7.2) and take the
+            # closest-to-reference branch directly -- see _begin_toolpath_precompute.
+            if not self.precompute_check_collision:
+                clear = solutions[0][0]
+            else:
+                clear = next((angles for angles, *_ in solutions
+                              if self._branch_clears_ground(angles)), None)
             if clear is None:
-                # Name the checks actually active (roadmap 6.8): the posed-plate
-                # check always applies, the tangent plane is curved-only.
-                checks = ["the build plate" + ("" if self.allow_tcp_through_plate else " (arm + nozzle)")]
-                if plane is not None:
-                    checks.append("their surface tangent plane")
                 status_msg = (
                     f"Waypoint {i}/{self.precompute_total}: all {len(solutions)} valid branch(es) "
-                    f"hit {' or '.join(checks)}")
+                    f"hit the build plate"
+                    f"{'' if self.allow_tcp_through_plate else ' (arm + nozzle)'}")
                 self._abort_toolpath_ik_precompute()
                 self.precompute_status = status_msg
                 return
@@ -2037,6 +2087,60 @@ class VisContent:
             self.save_toolpath_precompute_cache(self.precompute_cache_path)
         else:
             self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
+
+
+    def build_export_segments(self):
+        """Split the solved path into the exchange spec's "segments" -- roadmap
+        7.2. A segment is one continuous extrusion line, which on both toolpath
+        sources is exactly a maximal run of consecutive is_feed_move waypoints:
+
+          planar  build_toolpath_waypoints_world -- is_feed is G1 vs G0
+          curved  build_curved_toolpath_waypoints_world -- True per print-order
+                  piece, False per inter-piece travel hop
+
+        So this is one shared function rather than two per-path builders, and it
+        needs no reference to build_print_order: the piece boundaries are already
+        encoded in the flags. Travel runs are dropped, not exported -- the spec
+        states the receiving side re-inserts a travel MoveJ between adjacent
+        segments.
+
+        Returns a list of ExportSegment. Only the solved prefix is used, so a
+        partial (paused) precompute yields the segments solved so far.
+
+        Returns [] when there is no waypoint source to split, which is NOT only
+        "no precompute has completed": a precompute loaded from disk cache also
+        yields [], because load_toolpath_precompute_cache() restores
+        precompute_joint_path but not precompute_waypoints/_R_target. Known gap,
+        deferred to 7.4 (it needs a cache schema change) -- see
+        wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md. validate_job()'s
+        in-house row 0 exists so that empty result can never read as ACCEPTED.
+        """
+        if not self.precompute_joint_path or self.precompute_waypoints is None:
+            return []
+
+        solved = len(self.precompute_joint_path)
+        segments, run_start = [], None
+        for i in range(solved + 1):
+            # One past the end closes any run still open at the frontier.
+            is_feed = i < solved and bool(self.precompute_waypoints[i][1])
+            if is_feed and run_start is None:
+                run_start = i
+            elif not is_feed and run_start is not None:
+                sl = slice(run_start, i)
+                segments.append(ExportSegment(
+                    index=len(segments),
+                    positions=np.array([p for p, _ in self.precompute_waypoints[sl]]),
+                    joints=np.array(self.precompute_joint_path[sl]),
+                    # settled.md S1.36/S1.12: R_target's Z column is already the
+                    # outward surface (or plate) normal, a unit vector in the base
+                    # frame -- exactly the spec's normal_base. Nothing to recompute.
+                    # Read-only and 0-strided on the planar path (that R_target is
+                    # a np.broadcast_to view of one constant) -- 7.4's writer must
+                    # copy before mutating.
+                    normals=np.asarray(self.precompute_R_target[sl])[:, :, 2],
+                ))
+                run_start = None
+        return segments
 
 
     def _clear_gcode_print_mesh(self):
@@ -2452,12 +2556,11 @@ class VisContent:
         (0..5 = Robot1..6 arm links, 6 = the TCP point), matching
         _moving_geometry_deltas.
 
-        Same corners-first / exact-vertices-fallback structure as
-        _nozzle_clears_plane: signed distance is linear, so its min over the
-        rigid-transformed 8 AABB corners is a lower bound on its min over the
-        true mesh -- a non-negative corner result proves clearance without
-        touching the full vertex set. Each mesh is tested independently and a
-        single penetrating mesh fails the whole set."""
+        Corners-first, exact vertices only if inconclusive: signed distance is
+        linear, so its min over the rigid-transformed 8 AABB corners is a lower
+        bound on its min over the true mesh -- a non-negative corner result
+        proves clearance without touching the full vertex set. Each mesh is
+        tested independently and a single penetrating mesh fails the whole set."""
         deltas = self._moving_geometry_deltas(joint_angles_deg)
         for i in indices:
             delta = deltas[i]
@@ -2472,42 +2575,16 @@ class VisContent:
         return True
 
 
-    def _nozzle_clears_plane(self, joint_angles_deg, point, normal, tip_tolerance_mm):
-        """True if the tool stays outward of the given plane, allowing
-        tip_tolerance_mm of inward slack -- the surface-penetration half of the
-        curved clearance check (roadmap 6.5, settled.md S1.37). The plane passes
-        through `point` with unit outward `normal`; a vertex's signed distance
-        is (world - point) @ normal, positive outward. The tool clears iff its
-        worst (min) signed distance is >= -tip_tolerance_mm.
-
-        Since roadmap 7.1 the tool body is the single TCP point rather than the
-        nozzle mesh, so this is now literally a tip test -- and a more permissive
-        one, since the mesh's shoulders no longer count. Roadmap 7.2 removes the
-        check entirely.
-
-        Only the tool (moving-geometry index 6) is tested, NOT the arm links.
-        The plane is a supporting hyperplane for the convex mockup stack, so a
-        point on its outward side provably clears every surface behind it -- but
-        that bounds where the *surface* is, not where the *arm* is. The arm must
-        span from its base up to the contact point, so its lower links
-        legitimately sit far *inward* of a local tangent plane; testing them
-        would reject every real printing pose. The nozzle is the only part
-        required to stay on the surface it prints. (Arm-vs-plate clearance is
-        handled separately by the posed-plate check in
-        _branch_clears_ground().)
-
-        Cheap 8-corner bbox bound first, exact vertices only if inconclusive:
-        signed distance is linear, so its min over the rigid-transformed AABB
-        corners is a lower bound on its min over the true mesh -- a non-negative
-        corner result proves clearance."""
-        delta = self._moving_geometry_deltas(joint_angles_deg)[6]
-        for verts in (self.moving_geometry_rest_bbox_corners[6],
-                      self.moving_geometry_rest_verts[6]):
-            homo = np.hstack([verts, np.ones((len(verts), 1))])
-            world = (delta @ homo.T).T[:, :3]
-            if ((world - point) @ normal).min() + tip_tolerance_mm >= 0:
-                return True
-        return False
+    # _nozzle_clears_plane() lived here until roadmap 7.2 -- the S1.37
+    # tangent-plane check, curved-only. Removed because roadmap 7.1 had already
+    # made it incapable of rejecting anything: it tested the tool against the
+    # plane through that waypoint, but 7.1 reduced the tool's collision body to
+    # the single TCP point, which IK pins to that exact waypoint. Its signed
+    # distance was therefore identically zero (measured: <1e-12 mm over all
+    # 5,863 cached RX+TX waypoints and every candidate branch, against a 1.0mm
+    # tolerance), so it returned True unconditionally. Deleting it changed no
+    # accept/reject outcome. Nozzle-vs-workpiece protection was lost at 7.1, not
+    # here -- see wiki/003_Guides/CurvedModel_PrintSetup.md.
 
 
     def _plate_plane(self):
@@ -2522,43 +2599,29 @@ class VisContent:
         return point, normal
 
 
-    def _branch_clears_ground(self, joint_angles_deg, plane=None):
-        """True if this branch's moving geometry stays clear of its obstacle(s).
+    def _branch_clears_ground(self, joint_angles_deg):
+        """True if this branch's moving geometry stays clear of the posed build
+        plate (roadmap 6.8). The plate is modelled as the infinite plane through
+        its top/print face (_plate_plane, from self.T_user_frame). The 6 arm-link
+        meshes (0-5) may NEVER dip below it (zero tolerance). The tool (index 6 --
+        the TCP point since roadmap 7.1, not the hidden nozzle mesh) may, only
+        when self.allow_tcp_through_plate is set. Because the plane is infinite
+        the plate must sit below the whole arm -- if the arm reaches below the
+        plate the fix is to move the plate lower (Build Plate controls), not to
+        disable the check. Replaces the old world-z=0 proxy (settled.md
+        S1.13/S1.38); each mesh set uses the cheap-corners / exact-verts bound of
+        _meshes_clear_plane.
 
-        Two independent checks, layered:
-
-        1. **Posed build-plate check** (always, both paths -- roadmap 6.8): the
-           plate is modelled as the infinite plane through its top/print face
-           (_plate_plane, from self.T_user_frame). The 6 arm-link meshes (0-5)
-           may NEVER dip below it (zero tolerance). The tool (index 6 -- the TCP
-           point since roadmap 7.1, not the hidden nozzle mesh) may, only when
-           self.allow_tcp_through_plate is set. Because the plane is
-           infinite the plate must sit below the whole arm -- if the arm reaches
-           below the plate the fix is to move the plate lower (Build Plate
-           controls), not to disable the check. Replaces the old world-z=0 proxy
-           (settled.md S1.13/S1.38); each mesh set uses the same cheap-corners /
-           exact-verts bound as before (_meshes_clear_plane).
-
-        2. **Tangent-plane nozzle check** (curved path only, plane not None):
-           the nozzle tip must stay outward of that waypoint's own surface
-           tangent plane, within tip_tolerance_mm of inward slack (roadmap 6.5,
-           settled.md S1.37). Only the nozzle is checked (see
-           _nozzle_clears_plane); a separate obstacle (the mockup shell), layered
-           on top of the plate check.
-
-        The plate check applies unconditionally; the tangent-plane check only
-        when a plane is supplied (curved)."""
+        **Planar path only since roadmap 7.2.** Curved precomputes no longer call
+        this at all -- see _begin_toolpath_precompute's check_collision. The
+        second, curved-only tangent-plane check that used to layer on top of this
+        went with it (note above _plate_plane)."""
         point, normal = self._plate_plane()
         if not self._meshes_clear_plane(joint_angles_deg, range(6), point, normal, 0.0):
             return False
         if not self.allow_tcp_through_plate:
             if not self._meshes_clear_plane(joint_angles_deg, (6,), point, normal, 0.0):
                 return False
-
-        if plane is not None:
-            point, normal, tip_tolerance_mm = plane
-            return self._nozzle_clears_plane(joint_angles_deg, point, normal, tip_tolerance_mm)
-
         return True
 
 
@@ -3035,6 +3098,179 @@ def matrix_to_pose(T):
     rx = np.arctan2(R[2, 1], R[2, 2])
     rz = np.arctan2(R[1, 0], R[0, 0])
     return np.concatenate([np.asarray(T)[:3, 3], np.degrees([rx, ry, rz])])
+
+
+# ============================================================================
+# External IK exchange spec -- Rejection Criteria (roadmap 7.2)
+#
+# The spec's seven-row table, implemented verbatim as the definition of a valid
+# print job. Source: external_ik_exchange_spec_EN.md "Rejection Criteria".
+#
+# Scope: BOTH toolpath sources and any future one. Not one of the seven rows
+# reads a surface, a normal's provenance, or anything study-specific -- they
+# validate the robot and the data, so planar G-code and curved layers go through
+# the same validator. (The collision *narrowing* of 7.2 is the asymmetric half:
+# that one is curved-only. Different question, different answer.)
+#
+# These rows validate DATA, NOT GEOMETRY. A job can pass every row here and
+# still drive the arm through the build plate or the workpiece -- see
+# wiki/003_Guides/CurvedModel_PrintSetup.md.
+# ============================================================================
+
+# One continuous extrusion line plus its solved joints -- see
+# VisContent.build_export_segments(). positions (N,3) mm base frame, joints
+# (N,6) deg, normals (N,3) unit base frame.
+ExportSegment = namedtuple("ExportSegment", "index positions joints normals")
+
+# One row's outcome. action is "REJECT" or "WARN"; detail carries the measured
+# value and where it was found, so a caller can say which row failed and why
+# rather than refusing silently.
+CheckResult = namedtuple("CheckResult", "row passed action detail")
+
+
+def _pose_delta(pose_a, pose_b):
+    """(position error mm, rotation error deg) between two 6D poses. Rotation
+    error is the largest per-axis difference, wrapped into (-180, 180] so a
+    179 deg / -179 deg pair reads as 2 deg rather than 358."""
+    pos = float(np.linalg.norm(np.asarray(pose_a)[:3] - np.asarray(pose_b)[:3]))
+    d = (np.asarray(pose_a)[3:] - np.asarray(pose_b)[3:] + 180.0) % 360.0 - 180.0
+    return pos, float(np.abs(d).max())
+
+
+def validate_job(vis, segments):
+    """Run the exchange spec's seven Rejection Criteria over a job about to be
+    exported. Returns (ok, results): ok is False if any REJECT row failed; WARN
+    rows never affect it. results is a list of CheckResult, always 8 long -- an
+    in-house "job is non-empty" row first, then the spec's seven in table order,
+    so a caller can render the whole table.
+
+    vis is a VisContent (for compute_fk and T_flange_to_tcp); segments is
+    build_export_segments()'s output.
+    """
+    results = []
+
+    # --- Row 0: job is non-empty (IN-HOUSE, not one of the spec's seven) ---
+    # Rows 3-7 are all "no offender found" tests, so they pass vacuously over an
+    # empty segment list and an empty job would report ACCEPTED. The spec never
+    # states this because it never contemplates exporting nothing. Reachable
+    # today: build_export_segments() returns [] after a precompute cache hit --
+    # see wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md.
+    n_export_points = sum(len(s.joints) for s in segments)
+    results.append(CheckResult(
+        "job is non-empty (in-house)", n_export_points > 0, "REJECT",
+        f"{len(segments)} segment(s), {n_export_points} point(s)" if n_export_points
+        else f"nothing to export ({len(segments)} segment(s), 0 point(s)) -- "
+             "the remaining rows pass vacuously on an empty job"))
+
+    # --- Row 1: identity check -------------------------------------------
+    # FK(0) + the real tool offset must reproduce the spec's published TCP pose.
+    # If this fails, the DH table, the rotation convention or the tool offset is
+    # wrong and nothing downstream is trustworthy.
+    actual = matrix_to_pose(vis.compute_fk([0] * 6)[5] @ vis.T_flange_to_tcp)
+    dp, dr = _pose_delta(actual, IDENTITY_REFERENCE_TCP_POSE_6D)
+    results.append(CheckResult(
+        "identity check", dp < IDENTITY_POS_TOL_MM and dr < IDENTITY_ROT_TOL_DEG, "REJECT",
+        f"FK(joints=0)+TCP vs spec reference: {dp:.6f}mm / {dr:.4f}deg "
+        f"(limits {IDENTITY_POS_TOL_MM}mm / {IDENTITY_ROT_TOL_DEG}deg)"))
+
+    # --- Row 2: TCP offset vs our calibration -----------------------------
+    # Circular for a single-source project -- we are the calibration. Kept
+    # because TCP_CALIBRATION_REFERENCE_6D is transcribed separately from the
+    # supervisor doc, so the pair does catch a mistyped digit in either.
+    dp, dr = _pose_delta(TCP_OFFSET_6D_MM_DEG, TCP_CALIBRATION_REFERENCE_6D)
+    results.append(CheckResult(
+        "TCP offset vs calibration", dp < TCP_OFFSET_POS_TOL_MM and dr < TCP_OFFSET_ROT_TOL_DEG, "REJECT",
+        f"tool=1 offset vs saved_coords 1.2: {dp:.6f}mm / {dr:.6f}deg "
+        f"(limits {TCP_OFFSET_POS_TOL_MM}mm / {TCP_OFFSET_ROT_TOL_DEG}deg)"))
+
+    # Rows 3/4/7 are per-point and 5/6 per-segment; walk once, keeping one
+    # offender per row so the message names a concrete location rather than just
+    # a count. Rows 3/4/6 keep the first offender found; row 5 keeps the worst
+    # step inside the first violating segment, which is the more useful pointer.
+    bad_limit = bad_fk = bad_step = bad_count = None
+    worst_fk = 0.0
+    worst_step = None  # None -> no segment had >1 point, so row 5 never ran
+    singular = []
+    n_points = 0
+
+    for seg in segments:
+        n_points += len(seg.joints)
+
+        # Row 6 here: no ply exists until 7.4 writes one, so the check is the
+        # structural invariant its line count will inherit -- the three arrays
+        # must describe the same number of points.
+        if bad_count is None and not (len(seg.positions) == len(seg.joints) == len(seg.normals)):
+            bad_count = (f"segment {seg.index}: positions={len(seg.positions)}, "
+                         f"joints={len(seg.joints)}, normals={len(seg.normals)}")
+
+        for i, angles in enumerate(seg.joints):
+            # Row 3 -- the real physical envelope, NOT gui_panel.JOINT_LIMITS.
+            if bad_limit is None:
+                for j, (a, (lo, hi)) in enumerate(zip(angles, PHYSICAL_JOINT_LIMITS)):
+                    if not (lo <= a <= hi):
+                        bad_limit = (f"segment {seg.index} point {i}: "
+                                     f"J{j+1}={a:.3f}deg outside [{lo}, {hi}]")
+                        break
+
+            # Row 4 -- does FK actually put the TCP where we claim it does?
+            err = float(np.linalg.norm(
+                (vis.compute_fk(angles)[5] @ vis.T_flange_to_tcp)[:3, 3] - seg.positions[i]))
+            worst_fk = max(worst_fk, err)
+            if bad_fk is None and err >= PER_POINT_FK_TOL_MM:
+                bad_fk = f"segment {seg.index} point {i}: {err:.6f}mm"
+
+            # Row 7 -- WARN only. Wider than solve_ik's own is_singular
+            # (|sin(theta5)| < 1e-6, near-exact degeneracy); this is a band
+            # around it where the wrist is merely ill-conditioned.
+            if abs(angles[4]) < SINGULARITY_WARN_J5_DEG:
+                singular.append(f"segment {seg.index} point {i} (J5={angles[4]:.3f}deg)")
+
+        # Row 5 -- adjacent points WITHIN a segment. Deliberately not across
+        # segment boundaries: the receiving side re-inserts a travel MoveJ
+        # there, so a large jump between segments is expected and legal.
+        if len(seg.joints) > 1:
+            steps = np.abs(np.diff(np.asarray(seg.joints), axis=0))
+            worst_step = max(worst_step or 0.0, float(steps.max()))
+            if bad_step is None and steps.max() > JOINT_STEP_MAX_DEG:
+                k, j = np.unravel_index(steps.argmax(), steps.shape)
+                bad_step = (f"segment {seg.index} points {k}->{k+1}: "
+                            f"J{j+1} moves {steps[k, j]:.3f}deg")
+
+    results.append(CheckResult(
+        "joint limits", bad_limit is None, "REJECT",
+        bad_limit or f"all {n_points} point(s) within physical limits"))
+    results.append(CheckResult(
+        "per-point FK", bad_fk is None, "REJECT",
+        (bad_fk + f" (limit {PER_POINT_FK_TOL_MM}mm)") if bad_fk
+        else f"worst error {worst_fk:.6f}mm over {n_points} point(s) (limit {PER_POINT_FK_TOL_MM}mm)"))
+    results.append(CheckResult(
+        "joint step within segment", bad_step is None, "REJECT",
+        (bad_step + f" (limit {JOINT_STEP_MAX_DEG}deg)") if bad_step
+        else (f"worst step {worst_step:.3f}deg (limit {JOINT_STEP_MAX_DEG}deg)"
+              if worst_step is not None
+              else "not evaluated -- no segment has two adjacent points")))
+    results.append(CheckResult(
+        "num_points consistency", bad_count is None, "REJECT",
+        bad_count or f"{len(segments)} segment(s), {n_points} point(s), arrays agree"))
+    if singular:
+        detail = (f"{len(singular)} near-singular point(s): {', '.join(singular[:3])}"
+                  + (" ..." if len(singular) > 3 else ""))
+    else:
+        detail = f"no point within {SINGULARITY_WARN_J5_DEG}deg of wrist singularity"
+    results.append(CheckResult("|J5| < 2deg singularity", not singular, "WARN", detail))
+
+    ok = all(r.passed for r in results if r.action == "REJECT")
+    return ok, results
+
+
+def format_validation(ok, results):
+    """One line per row, table order, for a status pane or a console run."""
+    lines = [f"{'PASS' if r.passed else ('WARN' if r.action == 'WARN' else 'FAIL')}  "
+             f"{r.row}: {r.detail}" for r in results]
+    lines.append(f"==> job {'ACCEPTED' if ok else 'REJECTED'}"
+                 + (" (with warnings)" if ok and any(
+                     not r.passed for r in results if r.action == "WARN") else ""))
+    return "\n".join(lines)
 
 
 # Validation
