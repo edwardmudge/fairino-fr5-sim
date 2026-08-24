@@ -2893,3 +2893,106 @@ positions in the exported ply anyway, so it pays for itself there and not here.
 `PRECOMPUTE_CACHE_VERSION` stays at **6** for this stage. Full diagnosis,
 including the cheaper curved-only half:
 `wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md`.
+
+---
+
+## S1.45 Real calibrated User Frame adopted (roadmap 7.3) -- `saved_position.json` replaces the 6.8 demo pose; neither toolpath runs there, and that is the finding
+
+**Decision:** `assets/buildPlate/saved_position.json` holds the **real
+calibrated User Frame**, `user_index=1` from
+`docs/saved_coords_data_and_usage_EN.md` §1.1 -- read from the physical robot
+(192.168.58.2) on 2026-05-28. It replaces the Stage 6.8 demo pose outright, per
+confirmed decision #4 (2026-07-22): no dual demo/real slot.
+
+| | position (mm) | rpy (deg) |
+|---|---|---|
+| was -- 6.8 demo pose | `[-570, -300, -200]` | `[0, 0, 0]` |
+| now -- real, `user_index=1` | `[649.456, 133.762, 322.778]` | `[-0.369, 0.329, -89.080]` |
+
+**Data and docs only. No code changed, and none needed to.** This is the whole
+implementation surface of 7.3:
+
+- The rotation convention already matched exactly. `load_build_plate()` builds
+  `R = Rz(yaw) @ Ry(pitch) @ Rx(roll)` from `[roll, pitch, yaw]`; the doc's §3
+  `pose_to_matrix` is `R = Rz(rz) @ Ry(ry) @ Rx(rx)` from `[rx, ry, rz]`.
+  Verified `max |ΔT| = 0.0`, and `matrix_to_pose` round-trips to the six input
+  digits. The numbers go straight into the file.
+- This is the first saved pose carrying a **real rotation** (~89° yaw), and
+  every consumer already handled one: `create_coordinate_frame`'s `rotation`
+  param (S1.6), `gui_panel`'s `bp_target_rpy` sync, and the full-4x4
+  `user_frame` cache key.
+- **No `PRECOMPUTE_CACHE_VERSION` bump.** Both cache metas already hash the
+  whole 4x4, so every existing cache misses at the new pose by construction.
+  Stays at **6**.
+
+**The old pose is retained, not deleted**, under the file's inert
+`_legacy_stage6_8_demo_pose` key. `load_saved_build_plate_position()` reads only
+`position_mm` / `rpy_deg`, so nothing can select it -- it is a record, which is
+what the no-dual-slot decision rules out selecting, not recording.
+
+### `USER_FRAME_ORIGIN_MM` deliberately did NOT move with it
+
+The startup/**Reset** default stays `[-570, -300, -100]`. It is a *chosen* pose,
+tuned at 7.1 so all 181,375 planar waypoints solve; the file is the *measured*
+one. Keeping them separate means the real frame is opt-in per session ("Load
+Saved Position", S1.6 -- never read at startup), so nothing regressed for
+anyone not clicking that button. Given the finding below, that separation is
+now load-bearing rather than incidental.
+
+### The finding: neither toolpath runs at the real frame, for two different reasons
+
+§7.3 recorded reachability here as a known, unverified risk, and said a failure
+was to be recorded rather than reverted. Both paths fail. Measured 2026-08-15,
+headless, `PHYSICAL_JOINT_LIMITS`, `allow_tcp_through_plate = False`.
+
+**Planar aborts at waypoint 0 -- on the plate check, not on reach.**
+`Waypoint 0/181375: all 8 valid branch(es) hit the build plate (arm + nozzle)`.
+IK is fine: waypoint 0 yields **8 valid branches**, and an IK-only sweep found
+**0 / 13,952** sampled waypoints unreachable. The posed-plate check (S1.40,
+still live on this path after 7.2) rejects all of them.
+
+| | plate top plane | deepest arm-link signed distance, best branch | branches clearing |
+|---|---|---|---|
+| default `[-570,-300,-100]` | z = **-99.2mm** | **+125.4mm** | 8 / 8 |
+| real User Frame | z = **+323.5mm** | **-253.2mm** | **0 / 8** |
+
+S1.40 models the plate as an **infinite plane**, which is sound only while the
+plate sits below the whole arm. The real frame is **323.5mm above the base
+origin**, so the plane cuts through the shoulder and elbow -- links nowhere near
+the print. `allow_tcp_through_plate` cannot rescue it: it gates the tool point,
+and links 0-5 are blocked unconditionally. **This is a modelling limitation, not
+a robot limitation** -- and S1.40's prescribed fix ("move the plate lower") is
+unavailable, because the height is now a measurement rather than a knob.
+
+**Curved is genuinely out of reach.** It never meets the above, having lost all
+collision checking at 7.2, and fails on plain geometry instead:
+
+| Layer | Feed points | Solved, real frame | Solved, demo pose | TCP distance from base |
+|---|---|---|---|---|
+| RX | 2,527 | **226** (91.1% unreachable) | 2,527 (100%) | median 912mm, max 945mm |
+| TX | 2,000 | **186** (90.7% unreachable) | 2,000 (100%) | median 916mm, max 947mm |
+
+All failures are `"Unreachable: no geometric solution"` -- the `a2 + a3 = 820mm`
+chain does not extend that far. **Placement, not calibration:**
+`load_curved_model()` centres the assembly on the plate (S1.29), and at the real
+frame the plate centre is ~844mm out and its far corner ~980mm, while the corner
+itself is only 738mm. That is exactly why the *planar* G-code, which sits near
+the plate's local origin, has no reach problem at all.
+
+### What this settles, and what it deliberately leaves open
+
+**Settled:** the real frame stays. It is a measurement; the demo pose is not
+coming back, and 7.4's exporter is unblocked because it targets the *planar*
+path at the default pose.
+
+**Not settled, and not to be guessed at:** whether the Bambu Lab plate mesh
+describes what physically sits at the User Frame; whether S1.40's plane should
+become finite or optional; and where the curved model actually belongs in the
+real cell. The curved pipeline was **deliberately not re-run** -- re-running it
+before the placement question is answered produces a meaningless result, and it
+would burn the same rebuild the S1.36 reference-axis fix
+(`2026-08-15_orientation_frame_flips_row5.md`) is waiting to share. The two stay
+correctly paired, just later than 7.3 planned.
+
+Full measurements, method and the open questions in priority order:
+`wiki/001_Inbox/2026-08-15_real_user_frame_reachability.md`.

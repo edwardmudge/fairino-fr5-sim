@@ -324,7 +324,46 @@ unaffected. The spec's table does not cover collision, so nothing replaces
 it on the curved path: the self-check catches bad *data*, not bad
 *geometry*.
 
-## §7.3 — Real User Frame
+## §7.3 — Real User Frame ✅ IMPLEMENTED 2026-08-15 (`settled.md` S1.45)
+
+Point 1 landed verbatim. Points 2 and 3 are where reality diverged:
+
+- **Point 2's re-run did not happen, deliberately.** The spec says to re-run
+  every downstream curved step against the new pose. Measured first: at the real
+  frame only **226/2,527 RX** and **186/2,000 TX** feed points are reachable at
+  all. Re-running geodesics → order → orientation → precompute over a workpiece
+  that is 91% outside the envelope produces nothing usable, so it was skipped
+  and the placement question raised instead. This also keeps the S1.36
+  reference-axis fix correctly paired with a single future rebuild rather than
+  paying for a wasted one now.
+- **Point 3's risk materialised, and in an unforeseen second way.** The note
+  anticipated a *reach* problem, and got one on the curved path. It did not
+  anticipate that the **planar** path — which reaches everything, 0/13,952
+  sampled waypoints unreachable — would abort at **waypoint 0** on the *plate
+  check*. The S1.40 plane sits **323.5mm above the base** at the real frame and
+  cuts through the shoulder; arm links are blocked unconditionally, so
+  `allow_tcp_through_plate` cannot rescue it. That is a **modelling** limit, not
+  a robot one, and S1.40's own prescribed fix ("move the plate lower") is
+  unavailable for a *measured* pose.
+- **Nothing else was needed.** No code changed: the rotation convention already
+  matched at `max |ΔT| = 0.0`, every consumer already handled a rotated pose, and
+  the 4x4 cache key invalidates old caches by itself, so
+  `PRECOMPUTE_CACHE_VERSION` stays **6**. `USER_FRAME_ORIGIN_MM` was left at
+  `[-570,-300,-100]` — startup/Reset is the chosen pose, the file is the measured
+  one — which is now load-bearing rather than incidental, since it is the only
+  pose either toolpath still runs at.
+
+**Nothing was deleted.** The 6.8 demo pose survives in the same file under the
+inert `_legacy_stage6_8_demo_pose` key; the loader reads only
+`position_mm`/`rpy_deg`, so it is a record, not the dual slot decision #4 rules
+out.
+
+Full measurements and open questions in priority order:
+`wiki/001_Inbox/2026-08-15_real_user_frame_reachability.md`.
+
+---
+
+### Original spec (below, as written 2026-07-22)
 
 1. Overwrite `assets/buildPlate/saved_position.json`:
    `position_mm: [649.456, 133.762, 322.778]`,
@@ -442,6 +481,12 @@ Headless, conda env `fairino-fr5-sim`
    real values; re-run geodesics/print-order/orientation/precompute and
    record whether they still complete (this is genuinely open — see
    "Known risk" above).
+   **Run 2026-08-15.** Frame identity: exact, `max |ΔT| = 0.0`, and
+   `matrix_to_pose` round-trips to all six input digits. The re-run was
+   **not** performed — a reachability measurement was run first and made it
+   pointless (226/2,527 RX, 186/2,000 TX reachable; planar aborts at
+   waypoint 0 on the plate check). Method for reproducing both measurements
+   is in `wiki/001_Inbox/2026-08-15_real_user_frame_reachability.md`.
 4. §7.4: export a real solved segment, re-parse the written `job.json`/
    segment/ply files, and confirm the re-parsed data matches what was
    exported (round-trip check) — including that the ply's line count

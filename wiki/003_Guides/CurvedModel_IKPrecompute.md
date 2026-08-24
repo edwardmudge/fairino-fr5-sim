@@ -141,6 +141,17 @@ frames, enable `allow_tcp_through_plate`, and run RX precompute. Loading the
 low plate before the model lowers the mockup with it and is invalid. This
 adopted X+30 pose solves all 3,175 RX waypoints.
 
+⚠ **The sentence "load the saved pose `[-570, -300, -200]`" is wrong since Stage
+7.3** (`settled.md` **S1.45**). `saved_position.json` now holds the **real
+calibrated User Frame**, `[649.456, 133.762, 322.778]` / `[-0.369, 0.329,
+-89.080]`, so "Load Saved Position" no longer performs this step — type the pose
+in by hand. And the setup itself no longer produces a solve: at the real frame
+only **226/2,527 RX** and **186/2,000 TX** feed points are reachable, so the
+curved pipeline has *not* been re-run and the 3,175 figure remains pre-7.1
+evidence. The clearance rationale in this section is also historical — 7.2
+removed the plate check from the curved path entirely (S1.44). See
+[`../001_Inbox/2026-08-15_real_user_frame_reachability.md`](../001_Inbox/2026-08-15_real_user_frame_reachability.md).
+
 ## Known limitation
 
 **Full arm-vs-mockup collision beyond the tool tip is not checked.** The

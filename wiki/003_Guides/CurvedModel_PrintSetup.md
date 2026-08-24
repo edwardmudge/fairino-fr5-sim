@@ -155,6 +155,43 @@ waypoint for the orientation frames, so a point-to-surface distance test could
 reuse them. It still needs real tool geometry — which no longer exists on any
 path — and a performance budget. Logged as a Stage 8 candidate, not scheduled.
 
+## Changed in Stage 7.3 — this whole procedure is now unrunnable as written
+
+`assets/buildPlate/saved_position.json` no longer holds `[-570, -300, -200]`. It
+holds the **real calibrated User Frame**, `[649.456, 133.762, 322.778]` /
+`[-0.369, 0.329, -89.080]` (`settled.md` **S1.45**). Step 3 above — *"Load Saved
+Position does it"* — therefore does something completely different now: it moves
+the plate to the opposite quadrant, 322mm up, and yaws it ~89°.
+
+**Measured consequence: the curved model is out of reach at the real frame.**
+Headless, 2026-08-15, every feed point of both layers solved against
+`PHYSICAL_JOINT_LIMITS` with no collision check (7.2 removed it here):
+
+| Layer | Feed points | Solved at the **real** frame | Solved at the 6.8 demo pose | TCP distance from base (real frame) |
+|---|---|---|---|---|
+| RX | 2,527 | **226** (91.1% unreachable) | 2,527 (100%) | median **912mm**, max 945mm |
+| TX | 2,000 | **186** (90.7% unreachable) | 2,000 (100%) | median **916mm**, max 947mm |
+
+Every failure is `"Unreachable: no geometric solution for this pose"` — pure
+geometry, not joint limits, and not collision. The cause is placement, not
+calibration: `load_curved_model()` centres the assembly on the plate
+(`T_placement`), and at the real frame the plate's centre sits ~844mm from the
+base with the far corner ~980mm out, against a shoulder-to-wrist chain of
+`a2 + a3 = 820mm`. At the demo pose the same points sit at a median of 475mm.
+
+This was the "Known risk" §7.3 recorded in advance, and it resolved the way the
+spec said to treat it: **as a finding, not as a reason to restore the demo
+pose.** Full write-up, including what would have to change to print at the real
+frame:
+[`../001_Inbox/2026-08-15_real_user_frame_reachability.md`](../001_Inbox/2026-08-15_real_user_frame_reachability.md).
+
+**Status of this guide:** the *order of operations* (load the model at working
+height, then drop the plate, then rebuild) is still the correct mechanism and
+worth keeping. The *poses* in it are dead — steps 1 and 3 name a pose the file
+no longer contains, and step 3's clearance trick has no meaning at the real
+frame. Rewrite this guide once the placement question in the inbox note is
+answered; it is not simply "re-run with new numbers".
+
 ## Code anchors
 
 - `geometry_backend.py`: `load_build_plate()` (the plate-move invalidation and
@@ -162,7 +199,9 @@ path — and a performance budget. Logged as a Stage 8 candidate, not scheduled.
   pose at load), `_reset_curved_model_state()` /
   `_abort_geodesic_precompute()` (what a plate move does and does not clear),
   `run_curved_toolpath_ik_precompute()`.
-- `assets/buildPlate/saved_position.json`: the `[-570, -300, -200]` pose.
+- `assets/buildPlate/saved_position.json`: the real User Frame since Stage 7.3
+  (the `[-570, -300, -200]` pose this guide is written around survives only as
+  the file's inert `_legacy_stage6_8_demo_pose` record).
 - `settled.md` **S1.40** (posed-plate collision), **S1.37** (nozzle-only
   tangent check), **S1.42** (the reset helpers).
 - [`BuildPlate_UserFrame.md`](BuildPlate_UserFrame.md) — the plate controls

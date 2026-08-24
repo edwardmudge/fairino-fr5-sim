@@ -1,12 +1,25 @@
 {
   "position_mm": [
-    -570.0,
-    -300.0,
-    -200.0
+    649.456,
+    133.762,
+    322.778
   ],
   "rpy_deg": [
-    0.0,
-    0.0,
-    0.0
-  ]
+    -0.369,
+    0.329,
+    -89.08
+  ],
+  "_source": "docs/saved_coords_data_and_usage_EN.md 1.1 -- real User Frame (user_index=1), read from robot 192.168.58.2 on 2026-05-28. Adopted by roadmap 7.3, settled.md S1.45.",
+  "_legacy_stage6_8_demo_pose": {
+    "position_mm": [
+      -570.0,
+      -300.0,
+      -200.0
+    ],
+    "rpy_deg": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
 }

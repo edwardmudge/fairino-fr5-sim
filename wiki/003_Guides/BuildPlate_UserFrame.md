@@ -129,6 +129,36 @@ Module-level constants in `geometry_backend.py`:
 | `PLATE_THICKNESS_MM` | Measured thickness (mm) of `BambuLab_BuildPlate.obj`. Shifts the plate mesh and G-code waypoints up in their local Z before the `T_user_frame` transform, so `position_mm` marks the resting/bottom face and the print lands on the real top surface. |
 | `PLATE_COLOR` | RGB (0-1) color applied to the "Build Plate" mesh via `set_color()` — light cool gray, distinct from `GCODE_COLOR`. |
 
+## Changed in Stage 7.3 — the saved position is now the real calibrated frame
+
+Everything above still describes the mechanism correctly. What changed is the
+**value** in `assets/buildPlate/saved_position.json`, and it is now the only
+place in the project holding a *measured* User Frame:
+
+| | position (mm) | rpy (deg) | provenance |
+|---|---|---|---|
+| `USER_FRAME_ORIGIN_MM` (startup / **Reset**) | `[-570, -300, -100]` | `[0, 0, 0]` | **chosen**, tuned for planar reachability at Stage 7.1 |
+| `saved_position.json` (**Load Saved Position**) | `[649.456, 133.762, 322.778]` | `[-0.369, 0.329, -89.080]` | **measured** — `docs/saved_coords_data_and_usage_EN.md` §1.1, `user_index=1`, read from the physical robot 2026-05-28 |
+
+The previous saved value was the Stage 6.8 *demo* pose `[-570, -300, -200]` /
+`[0, 0, 0]`, retained in the file under the inert `_legacy_stage6_8_demo_pose`
+key (the loader reads only `position_mm` / `rpy_deg`, so it is a record, not a
+selectable second slot).
+
+Three things worth knowing:
+
+- **No conversion was needed.** The doc's §3 `pose_to_matrix` is
+  `R = Rz(rz) @ Ry(ry) @ Rx(rx)` over `[rx, ry, rz]`; step 1 above builds
+  `R = Rz(yaw) @ Ry(pitch) @ Rx(roll)` over `[roll, pitch, yaw]`. Identical —
+  verified to `max |ΔT| = 0.0`. The six numbers go straight into the file.
+- **This is the first saved pose with a real rotation** (a ~89° yaw). Everything
+  downstream already handled it — `create_coordinate_frame`'s `rotation` param,
+  the `bp_target_rpy` field sync, the full-4x4 cache key — so no code changed.
+- **`USER_FRAME_ORIGIN_MM` deliberately did *not* move with it.** It is the
+  startup default that keeps the planar path solving; the real frame is opt-in
+  per session. See `settled.md` **S1.45** for why, and for the reachability
+  finding that makes the distinction matter.
+
 ## Code anchors
 
 - `geometry_backend.py`: `load_build_plate()`, `save_build_plate_position()`,
