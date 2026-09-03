@@ -29,3 +29,8 @@ assets/models/planar/gcode/*.npz
 # dump shows up in git status instead of being silently ignored.
 assets/models/curved/_verify_hardmin/
 assets/models/curved/_verify_interpolation/
+
+# Job export output (roadmap 7.5) -- regenerated on demand via "Export IK
+# Job"/export_active_job(), simple to reproduce, and a full curved export is
+# ~70 files per layer.
+assets/export/

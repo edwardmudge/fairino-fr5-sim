@@ -3,7 +3,9 @@ import re
 import json
 import time
 import heapq
+import shutil
 import hashlib
+from datetime import datetime, timezone
 from collections import namedtuple
 import polyscope as ps
 import numpy as np
@@ -69,6 +71,12 @@ TCP_OFFSET_ROT_TOL_DEG = 0.5
 PER_POINT_FK_TOL_MM = 0.1   # FK(joints) + TCP vs the exported tcp_xyz_base_mm
 JOINT_STEP_MAX_DEG = 30.0   # Max change in any joint between adjacent points
 SINGULARITY_WARN_J5_DEG = 2.0  # |J5| below this warns (does NOT reject)
+
+# --- External IK exchange spec: job export destination (roadmap 7.5) ---
+# Output location was explicitly open in Stage7_README.md/the inbox note;
+# settled during 7.5 implementation.
+EXPORT_DIR = "assets/export"
+EXPORT_GENERATOR = "fairino-fr5-sim stage7 exporter"
 
 TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
@@ -356,6 +364,7 @@ class VisContent:
         self.precompute_ref = None
         self.precompute_joint_path = []
         self.precompute_status = ""
+        self.export_status = ""  # roadmap 7.5 -- validate_job()'s table, plus the written path on success
         self.precompute_cache_meta = None  # Cache key captured at precompute-start, see run_toolpath_ik_precompute()
         self.precompute_cache_path = None  # Which cache file this precompute writes to (per-layer for curved, roadmap 6.5)
         self.precompute_filter_mode = "planar"  # "planar" | "curved" -- selects the candidate
@@ -2545,12 +2554,48 @@ class VisContent:
                     # outward surface (or plate) normal, a unit vector in the base
                     # frame -- exactly the spec's normal_base. Nothing to recompute.
                     # Read-only and 0-strided on the planar path (that R_target is
-                    # a np.broadcast_to view of one constant) -- 7.4's writer must
+                    # a np.broadcast_to view of one constant) -- 7.5's writer must
                     # copy before mutating.
                     normals=np.asarray(self.precompute_R_target[sl])[:, :, 2],
                 ))
                 run_start = None
         return segments
+
+
+    def export_active_job(self):
+        """Roadmap 7.5 -- self-check the active toolpath_source against the
+        exchange spec's Rejection Criteria, then write it. GUI glue: reads
+        build_export_segments()/validate_job() (both source-agnostic already).
+        Writes nothing on REJECT -- the self-check gates the write, not just
+        the display. On REJECT, self.export_status carries the full per-row
+        table (needed to see which row failed and why); on ACCEPTED it's
+        collapsed to one line -- the table added nothing once every row
+        already passed.
+
+        Guards precompute_cache_path against toolpath_source first, the same
+        layer-mixup check _init_toolpath_playback()/_init_curved_toolpath_playback()
+        already use. Without it, switching the Toolpath Source radio after a
+        completed solve (which doesn't itself touch precompute_joint_path --
+        only pressing Run Precompute again does) would export whichever
+        source actually solved, silently mislabeled and mis-surfaced under
+        the newly-selected source's job_name/surface.obj."""
+        expected_cache_path = (GCODE_PRECOMPUTE_CACHE if self.toolpath_source == -1
+                                else curved_precompute_cache_path(self.curved_layer_names[self.toolpath_source]))
+        if self.precompute_cache_path != expected_cache_path:
+            self.export_status = "Run Precompute for the active toolpath source first"
+            return
+        segments = self.build_export_segments()
+        ok, results = validate_job(self, segments)
+        if not ok:
+            self.export_status = format_validation(ok, results)
+            return
+        job_name = ("planar" if self.toolpath_source == -1
+                    else self.curved_layer_names[self.toolpath_source])
+        job_dir = write_job_export(self, segments, f"{EXPORT_DIR}/{job_name}")
+        warned = any(not r.passed for r in results if r.action == "WARN")
+        self.export_status = (
+            f"Passed all checks{' (with warnings)' if warned else ''}, exported "
+            f"{len(segments)} segment(s) to {job_dir}")
 
 
     def _clear_gcode_print_mesh(self):
@@ -4402,6 +4447,81 @@ def format_validation(ok, results):
                  + (" (with warnings)" if ok and any(
                      not r.passed for r in results if r.action == "WARN") else ""))
     return "\n".join(lines)
+
+
+def write_job_export(vis, segments, job_dir):
+    """Write one job.json + segment_N_solution.json + toolpath_TN.ply per
+    ExportSegment, plus surface.obj where one exists, to job_dir --
+    external_ik_exchange_spec_EN.md's folder structure. Roadmap 7.5.
+
+    Assumes the caller already ran validate_job() and got ok=True; this
+    function only writes, it does not re-check. Called from
+    VisContent.export_active_job().
+
+    surface.obj is curved-only: the planar path's "plate" is S1.40's
+    infinite plane, not a mesh asset, so there is nothing to copy for it --
+    a known gap in spec coverage for that source, not an oversight.
+    """
+    os.makedirs(job_dir, exist_ok=True)
+
+    # Prune stale files from a previous, larger export first -- otherwise a
+    # re-export with fewer segments than last time leaves orphaned
+    # higher-numbered files a receiving parser would try to load.
+    keep = len(segments)
+    for fname in os.listdir(job_dir):
+        m = re.match(r"^(?:toolpath_T|segment_)(\d+)(?:_solution)?\.(?:ply|json)$", fname)
+        if m and int(m.group(1)) >= keep:
+            os.remove(os.path.join(job_dir, fname))
+
+    for seg in segments:
+        ply_name = f"toolpath_T{seg.index}.ply"
+        with open(os.path.join(job_dir, ply_name), "w", encoding="utf-8") as f:
+            for pos, normal in zip(seg.positions, seg.normals):
+                f.write(f"{pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f} "
+                        f"{normal[0]:.6f} {normal[1]:.6f} {normal[2]:.6f}\n")
+
+        points = []
+        for angles, normal in zip(seg.joints, seg.normals):
+            tcp_xyz = (vis.compute_fk(angles)[5] @ vis.T_flange_to_tcp)[:3, 3]
+            points.append({
+                "joints_deg": [float(a) for a in angles],
+                "tcp_xyz_base_mm": [float(v) for v in tcp_xyz],
+                "normal_base": [float(v) for v in normal],
+            })
+        solution = {
+            "segment_id": seg.index,
+            "toolpath_file": ply_name,
+            "num_points": len(points),
+            "points": points,
+        }
+        with open(os.path.join(job_dir, f"segment_{seg.index}_solution.json"), "w", encoding="utf-8") as f:
+            json.dump(solution, f, indent=2)
+
+    if vis.toolpath_source != -1:
+        surface_src = os.path.join(CURVED_MODEL_DIR, CURVED_LAYERS[vis.toolpath_source]["surface_file"])
+        shutil.copyfile(surface_src, os.path.join(job_dir, "surface.obj"))
+
+    identity_pose = matrix_to_pose(vis.compute_fk([0] * 6)[5] @ vis.T_flange_to_tcp)
+    job = {
+        "format": "fr5_external_ik_job",
+        "format_version": "2.0",
+        "generator": EXPORT_GENERATOR,
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "tool_index": 1,
+        "tcp_offset_6d": [float(v) for v in TCP_OFFSET_6D_MM_DEG],
+        "identity_check": {
+            "joints_zero_tcp_pose_base": [float(v) for v in identity_pose],
+        },
+        "segments": [
+            {"segment_id": seg.index, "toolpath": f"toolpath_T{seg.index}.ply",
+             "solution": f"segment_{seg.index}_solution.json"}
+            for seg in segments
+        ],
+    }
+    with open(os.path.join(job_dir, "job.json"), "w", encoding="utf-8") as f:
+        json.dump(job, f, indent=2)
+
+    return job_dir
 
 
 # Validation

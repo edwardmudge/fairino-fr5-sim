@@ -3528,3 +3528,119 @@ one -- or the real fixture's geometry becomes known and the offset needs to
 target something other than the origin.
 
 **Verified on:** 2026-09-03.
+
+## S1.49 Job export writer + GUI trigger (roadmap 7.5 + 7.6, done together) -- `write_job_export()`/`export_active_job()` write the exchange spec's package; an "Export IK Job" button triggers it
+
+**Decision:** `write_job_export(vis, segments, job_dir)` (module-level,
+alongside `validate_job`/`format_validation`) writes one solved
+`toolpath_source` to `assets/export/<job_name>/` as `job.json` +
+`segment_N_solution.json` + `toolpath_TN.ply` per segment, plus `surface.obj`
+for curved sources. `VisContent.export_active_job()` is the thin glue: self-check
+via `build_export_segments()`/`validate_job()` first, write only on ACCEPTED.
+`gui_panel.py` gets an "Export IK Job" button (I/O Operations, beside Run/Reset
+Toolpath) calling it. 7.6 (the GUI trigger) was explicitly folded into the same
+pass as 7.5 rather than left for later, per direct user instruction -- the
+roadmap's own sub-stage split was a convenience, not a hard boundary.
+
+**Reason:** 7.2 built `build_export_segments()`/`validate_job()`/`ExportSegment`
+with no caller (S1.44); 7.4 closed the cache-export gap and got both toolpath
+sources to `validate_job` ACCEPTED (S1.47, S1.48). Nothing was left to decide
+about *whether* the job is valid -- only how to write it, and how to trigger
+that from the running app.
+
+### Decisions settled during implementation
+
+- **Output location** (`Stage7_README.md`'s Open Question, previously
+  unanswered): `assets/export/<job_name>/`. `job_name` is `"planar"` for
+  G-code, or `vis.curved_layer_names[vis.toolpath_source]` (`"RX"`/`"TX"`) for
+  curved -- not the spec's own cosmetic `print_job_TX_sensors`-style naming,
+  since nothing reads that string back.
+- **`toolpath_T*.ply` has no PLY header.** `read_ply_polyline()` reads a
+  proper PLY (`ply` / `format ascii 1.0` / `element vertex` / `element edge`
+  header, x/y/z only, no normals) for this project's *own* curve assets
+  (`assets/models/curved/RX_*.ply` etc.) -- a different, unrelated format that
+  happens to share an extension. `external_ik_exchange_spec_EN.md`'s
+  `toolpath_T*.ply` is its own plain format: every line is
+  `x y z nx ny nz`, no header at all, confirmed against the spec text itself
+  (its "toolpath_T*.ply Format" section shows only data lines). Do not
+  "mirror `read_ply_polyline()`'s format" literally -- mirror its *column
+  order* only, per the inbox note's own wording.
+- **`surface.obj` is curved-only.** Planar's "plate" is S1.40/S1.47's modelled
+  plane (infinite, then finite footprint + slab), never a mesh asset -- there
+  is nothing to copy for it. Documented as a known gap in spec coverage for
+  that source, not an oversight (docstring in `write_job_export()`, and now
+  here).
+- **Stale segment files are pruned on re-export.** A re-export with fewer
+  segments than a prior run (e.g. after switching sources, or from a shorter
+  partial precompute) deletes any `toolpath_T*.ply`/`segment_*_solution.json`
+  whose index is `>= len(segments)` before writing -- otherwise a receiving
+  parser would find orphaned higher-numbered files with no `job.json` entry
+  pointing at them.
+- **GUI success message is one line, not the 8-row table.** Direct user
+  request: `format_validation()`'s per-row table is shown on REJECT (needed to
+  see which row failed and why), but collapsed to `"Passed all checks[ (with
+  warnings)], exported N segment(s) to <path>"` on ACCEPTED -- the table adds
+  nothing once every row already passed.
+- **Export button gates on a truthy (possibly partial) `precompute_joint_path`**,
+  not full completion -- same idiom the existing precompute/playback controls
+  use, and matches `build_export_segments()`'s own documented behaviour of
+  exporting a paused precompute's solved prefix.
+
+### Bug found in review, fixed before this entry: toolpath_source/precompute mismatch
+
+`export_active_job()` reads `precompute_joint_path`/`precompute_waypoints` but
+names the job folder and picks `surface.obj` from `self.toolpath_source`.
+Switching the GUI's "Toolpath Source" radio does **not** touch
+`precompute_joint_path` -- only pressing "Run Precompute" again does (via the
+existing layer-mixup guard already inside `run_curved_toolpath_ik_precompute`/
+`run_toolpath_ik_precompute`). So: solve RX, switch the radio to TX *without*
+re-running precompute, click "Export IK Job" -- it was silently writing RX's
+actual solved joints/positions into `assets/export/TX/` together with TX's own
+`surface.obj`, reporting success. `validate_job()`'s rows never catch this --
+they only check a job's internal consistency, never that it's the source the
+button claims it is.
+
+**Fixed** by adding the same `precompute_cache_path` comparison
+`_init_toolpath_playback()`/`_init_curved_toolpath_playback()` already use, as
+the first statement in `export_active_job()`:
+```python
+expected_cache_path = (GCODE_PRECOMPUTE_CACHE if self.toolpath_source == -1
+                        else curved_precompute_cache_path(self.curved_layer_names[self.toolpath_source]))
+if self.precompute_cache_path != expected_cache_path:
+    self.export_status = "Run Precompute for the active toolpath source first"
+    return
+```
+Verified: the exact repro above now reports "Run Precompute for the active
+toolpath source first" and writes nothing; the matching-source case still
+exports normally.
+
+### Verified without the ~20min/layer geodesic rebuild
+
+Both curved layers' full pipeline (geodesics -> print order -> orientation
+frames -> IK precompute) only needs re-running to reach a **fresh** solve;
+`curved_rx/tx.precompute.npz` (S1.48's fresh caches) already hold a valid one.
+Loading a cache directly -- `load_toolpath_precompute_cache(cache_path,
+meta_builder=lambda: json.loads(np.load(cache_path)["meta"].item()))`, i.e. a
+`meta_builder` that trivially matches the cache's own stored meta -- restores
+`precompute_joint_path`/`precompute_waypoints`/`precompute_R_target` without
+rebuilding geodesics/print order/orientation frames at all (those have no
+cache of their own; only the IK precompute does). Used to verify this stage in
+under a minute instead of ~40 (both layers), at the direct cost of skipping
+the cache-key equality check the GUI path always runs -- acceptable for a
+verification run, since the cache's provenance was already established by
+S1.48's own fresh solve.
+
+Results: RX (35 segments, 2,527 points) and TX (35 segments, 2,000 points)
+both exported `ACCEPTED`. Round-trip checked: `segment_0_solution.json`'s
+`tcp_xyz_base_mm`/`normal_base` matched `toolpath_T0.ply`'s row to
+<0.0001mm, `num_points` matched the `.ply` line count, `identity_check`
+matched the spec's published reference pose. Pruning verified by re-exporting
+a 3-segment subset and confirming files 3-34 were removed, then restoring the
+full 35-segment export.
+
+**Non-revertible unless:** the exchange spec's folder structure or field names
+change, or a different export-folder convention is explicitly requested --
+`assets/export/<job_name>/` was a choice made to unblock this stage, not
+derived from anything in the spec itself.
+
+**Verified on:** 2026-09-03.

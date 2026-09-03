@@ -206,6 +206,20 @@ class UI_Menu:
             psim.SameLine()
             psim.TextWrapped(self.content.playback_status)
 
+            # Export IK Job (roadmap 7.5) -- self-checks the active
+            # toolpath_source against the exchange spec's Rejection Criteria
+            # then writes it; gated the same way the precompute/playback
+            # controls above are, on a truthy (possibly partial)
+            # precompute_joint_path rather than full completion, matching
+            # build_export_segments()'s own "partial precompute exports its
+            # solved prefix" behavior.
+            psim.BeginDisabled(self.content.precompute_running or not self.content.precompute_joint_path)
+            if psim.Button("Export IK Job"):
+                self.content.export_active_job()
+            psim.EndDisabled()
+            if self.content.export_status:
+                psim.TextWrapped(self.content.export_status)
+
             if psim.TreeNode("Toolpath Settings"):
                 _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 1.0, 100.0)
 

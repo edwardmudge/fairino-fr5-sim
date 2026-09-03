@@ -1,7 +1,7 @@
 ---
 status: active
 scope: current-truth
-last_verified_against_code: 2026-08-14
+last_verified_against_code: 2026-09-03
 ---
 
 # Agent Boot File — FR5 Simulator (Current State)
@@ -56,7 +56,7 @@ filters and not the arm. See `settled.md` **S1.47**. ✅ **Fixed the same day �
 see the Stage 6.1 row above and S1.48.** With the corrected placement, both
 curved layers now solve completely too: RX 3,175/3,175, TX 2,688/2,688, both
 `validate_job` ACCEPTED |
-| Job export / GUI (Stage 7.5–7.6) | not started | Planned only — see `tutorials/Stage7_README.md` and the inbox note (whose §7.4/§7.5 are the pre-renumber numbers). **Both paths now validate clean** (S1.47 planar, S1.48 curved) — 7.5 can target either, or both; nothing in `build_export_segments()`/`validate_job()` is source-specific, and the cache gap 7.5 was told to fix first was already closed by 7.4 |
+| Job export / GUI (Stage 7.5–7.6) | done | `write_job_export()` + `VisContent.export_active_job()` write `job.json` + `segment_N_solution.json`/`toolpath_TN.ply` per segment + `surface.obj` (curved only) to `assets/export/<job_name>/`; an "Export IK Job" button (`gui_panel.py`) self-checks via `validate_job()` then writes, gated on a truthy (possibly partial) `precompute_joint_path`. Folded 7.6 into the same pass as 7.5 per direct user request. **Exported and round-trip verified on both sources** — planar's `validate_job` result was already established at 7.4 (181,375/181,375, not re-exported to avoid the ~156s solve); curved RX (35 segs/2,527 pts) and TX (35 segs/2,000 pts) were both exported and round-trip checked, loaded straight from `curved_rx/tx.precompute.npz` with no rebuild. ⚠ Review found and fixed a toolpath_source/precompute mismatch bug: switching the Toolpath Source radio doesn't clear `precompute_joint_path`, so exporting after a switch (without re-running precompute) would silently write the *previous* source's data under the *new* source's name/`surface.obj` — fixed with the same `precompute_cache_path` guard the playback init functions use. See `settled.md` **S1.49** |
 
 ### S1.40 current setup amendment
 
@@ -125,4 +125,4 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-See `wiki/002_Architecture/settled.md` (S1.1–S1.47).
+See `wiki/002_Architecture/settled.md` (S1.1–S1.49).
