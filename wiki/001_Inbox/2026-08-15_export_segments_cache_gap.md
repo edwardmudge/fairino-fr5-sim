@@ -1,8 +1,30 @@
 ---
-status: inbox
+status: closed
+closed: 2026-09-03
+closed_by: roadmap 7.4 (settled.md S1.47)
 stage: post-7.2
 scope: geometry_backend.py (load_toolpath_precompute_cache, build_export_segments)
 ---
+
+> ✅ **CLOSED 2026-09-03 by roadmap 7.4**, via exactly the fix sketched at the
+> bottom of this note. `save_toolpath_precompute_cache()` now persists
+> `waypoint_positions` (N,3), `waypoint_is_feed` (N,) and `waypoint_normals`
+> (N,3 — the `R_target` Z column, not the full (N,3,3), for the reason given
+> below), and `load_toolpath_precompute_cache()` rebuilds
+> `precompute_waypoints`/`_R_target` from them.
+>
+> `PRECOMPUTE_CACHE_VERSION` went **6 → 7**, shared with 7.4's own bump as this
+> note anticipated — 7.4 changes every solved path anyway, so the schema change
+> cost nothing extra.
+>
+> Verified: a fresh 1,500-waypoint solve and a reload of its cache produce
+> **identical** segment counts, positions and normals (28 segments); a v6 cache
+> is rejected; and a pre-7.4-shaped cache missing the new arrays is treated as a
+> clean miss rather than raising. `validate_job()` passes on the restored job.
+>
+> The in-house **row 0** ("job is non-empty") added by this note **stays**. It
+> was the safety half, and an empty job must never read as ACCEPTED whatever
+> emptied it.
 
 # A cached precompute exports zero segments — and used to pass validation
 

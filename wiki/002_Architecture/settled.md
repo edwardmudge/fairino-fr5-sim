@@ -2065,6 +2065,26 @@ overlays exist); reload removes both overlay and travel networks.
 
 ## S1.36 Per-waypoint tool orientation (roadmap 6.4) -- TCP Z = outward surface normal, in-plane axes pinned to a fixed world reference, not the path tangent
 
+> ⚠ **Changed in Stage 7.4 (S1.46, built and measured in S1.47).** Both halves
+> of this entry's orientation rule are superseded as the **commanded** pose:
+>
+> - **Z = the outward normal** is now an inequality, not an equality -- the tool
+>   axis need only be perpendicular within **20 deg** (supervisor's instruction).
+> - **The in-plane axes are no longer pinned** by `argmin |a . z|`. That rule's
+>   discrete switching is what produced the row-5 flips (23/35 RX, 15/35 TX
+>   segments with >30 deg steps inside a feed run); the roll is now **searched**
+>   over 60 slots and resolved globally by continuity cost in the candidate DAG.
+>   This is why `2026-08-15_orientation_frame_flips_row5.md`'s option 1 was
+>   deliberately **not** implemented -- do not add it.
+>
+> What this entry still describes correctly, and what the code still does:
+> `_orientation_frames_for_points()` is **unchanged** and still returns exactly
+> the frame below. Its role changed rather than its content -- it is now the
+> **axis of the search cone**, and its Z column is the surface normal that
+> `build_export_segments()` exports as the spec's `normal_base` and that
+> `_build_curved_beads()` stacks beads along. The `argmin` reference-axis flip
+> is therefore now cosmetic: it only orients the 6.4 display triads.
+
 **Supersedes S1.12's single-constant `R_target` for the curved path.** S1.12
 snapshots one TCP orientation (`T_user_frame[:3,:3]`) for a whole G-code path --
 correct then, because the build plate is flat and doesn't tilt mid-print, so the
@@ -2156,6 +2176,29 @@ perpendicular on a steep part of the shell), which needs the GUI window.
 > **Everything below describing the tangent-plane check as live describes 6.5's
 > design, not current behaviour.** The shared-seam reuse, the per-waypoint
 > `(N,3,3)` `R_target`, and the per-layer caching are all unchanged. See **S1.44**.
+
+> ⚠ **Changed again in Stage 7.4 (S1.46, built in S1.47) -- the obstacle mesh
+> this entry declined to build now exists.** The curved path is no longer
+> check-free: **filter 8** tests the arm links against each layer's own print
+> surface (`_build_surface_grid` over `Surface_RX_Offset`/`Surface_TX_Base`),
+> which is the first mesh-vs-mesh collision check in the project.
+>
+> This entry's argument for avoiding it -- that a full-arm obstacle test "would
+> reject every real printing pose" -- held only while ONE orientation was
+> commanded per waypoint. With 540 searched, it does not: where a waypoint is
+> reachable at all, ~95% of it survives the whole nine-filter stack, and filter 8
+> accounts for just 234 (RX) / 237 (TX) candidate rejections.
+>
+> `CURVED_TIP_CLEARANCE_TOLERANCE_MM` is **imported and live again** as filter
+> 8's clearance -- keeping it under a legacy marker rather than deleting it at
+> 7.2 is what made that possible. `_begin_toolpath_precompute`'s discriminator is
+> now `filter_mode` ("planar"/"curved"), not the `check_collision` boolean noted
+> above.
+>
+> Still true, and still not fixed by 7.4: the **nozzle** is unguarded. The tool
+> is a single TCP point that IK pins to the commanded waypoint, so it is
+> deliberately excluded from filters 6-8 -- including it would reject every
+> printing pose, which is the same trap described above.
 
 **Reuses Stage 5's chunked precompute (S1.11/S1.12/S1.21) rather than rewriting
 it.** The chunked solver now loads from either source through one shared seam,
@@ -2415,6 +2458,28 @@ still grow; planar unaffected) needs the Polyscope window on a physical GPU.
 > it entirely via `check_collision=False`. Where this section says "both paths"
 > or layers the S1.37 tangent-plane check on top, read **S1.44** -- that check is
 > deleted and the curved path has no geometric rejection left at all.
+
+> ⚠ **REMOVED in Stage 7.4 (S1.46, built in S1.47). This entry is history, not
+> code.** `_branch_clears_ground()` and the `allow_tcp_through_plate` toggle --
+> field, cache-key entry and GUI checkbox -- are **deleted**. The infinite plane
+> is replaced by **filter 6** (under-plate footprint, 20mm XY margin) plus
+> **filter 7** (plate bounding slab, 3.0mm), and both apply to **both** paths, so
+> 7.2's narrowing above is reversed too.
+>
+> Why it could not simply be layered under: the plate model here is an
+> **infinite** plane, sound only while the plate sits below the whole arm. At the
+> real User Frame (S1.45) it is **323.5mm above the base**, where it cuts through
+> the shoulder and elbow -- links nowhere near the print -- and rejected all 8
+> valid branches at planar waypoint 0 (deepest link signed distance -253.2mm).
+> This entry's own prescribed fix, "move the plate lower", became unavailable
+> once the plate height was a measurement rather than a knob.
+>
+> Measured result of the replacement: planar goes from **aborting at waypoint 0**
+> to solving **181,375 / 181,375** at that same plate pose. A real bed is finite
+> and the arm legitimately reaches around it.
+>
+> `_plate_plane()` and `_meshes_clear_plane()` **survive** -- filter 5 (elbow
+> above the plate plane) still uses the former.
 
 **Roadmap 6.8. `geometry_backend.py` + `gui_panel.py`.** Replaces the crude
 world-`z=0` clearance proxy (`reject_below_ground`, S1.13/S1.38) with a check
@@ -3145,3 +3210,215 @@ measured. The measurement to run is in `Stage7_README.md` §7.4 "Verify".
 Reference: `examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md` --
 external, describing another project's code, with its file paths and its 35 deg
 default. Roadmap: `tutorials/Stage7_README.md` §7.4.
+
+---
+
+## S1.47 Orientation search, the nine filters and the candidate DAG, as built (roadmap 7.4) -- the search works, and it does not close the placement question
+
+**Decision:** S1.46 as specified is implemented. This entry records what was
+built and, more importantly, **what it measured** -- S1.46 ended with a "NOT YET
+MEASURED" block, and this is the answer to it.
+
+**Verified on:** 2026-09-03. Headless, `PHYSICAL_JOINT_LIMITS`, the real
+calibrated User Frame from `saved_position.json`.
+
+### What was built
+
+- `orientation_candidates()` -- 9 tool-axis directions (the exact surface normal
+  plus one 8-azimuth ring at the 20 deg cap) x 60 roll slots = **540 commanded
+  frames** per waypoint, up to 8 IK branches each. S1.46's "~480" was the
+  reference guide's 60x8 with no cone at all; the cone is a separate factor and
+  its density was a choice, taken as one ring at the cap because that is where
+  the reach leverage is.
+- Nine candidate filters in `_candidate_admissible()`, cheapest first, rejecting
+  on first failure, with a per-filter rejection tally reported on abort.
+- `dijkstra_candidate_path()` -- module-level, beside `dijkstra_surface()`.
+- `PRECOMPUTE_CACHE_VERSION` 6 -> **7**, and the cache schema grew
+  `waypoint_positions` / `waypoint_is_feed` / `waypoint_normals`, which closes
+  the export gap deferred from 7.2.
+- `allow_tcp_through_plate` and `_branch_clears_ground()` **removed**, GUI
+  checkbox included.
+
+### The Dijkstra is a layered relaxation, not a heapq frontier
+
+S1.46 said to reuse S1.31's `heapq` primitive. **It is the same algorithm but
+not the same code, deliberately.** This graph is strictly layered -- every edge
+runs from waypoint i to i+1 -- so the topological order IS the waypoint index,
+every node settles exactly once when its layer is reached, and the heap has
+nothing left to decide. Dropping it changes no result, and it lets a whole
+layer's edge block be relaxed as one vectorised numpy operation.
+
+That is not an optimisation, it is the difference between running and not:
+curved RX is ~2,900 waypoints at up to ~4,320 candidates, so a heapq frontier
+would walk ~12.5M nodes and ~5x10^10 edges in interpreted Python.
+
+Verified against exhaustive search on 40 random DAGs, plus a hand-built case
+where the optimum requires an early non-greedy choice to avoid a dead end two
+layers later -- the exact failure mode S1.46 says the superseded greedy ranking
+cannot recover from. It takes the dearer branch.
+
+### E1 applies only between two FEED waypoints
+
+The 30 deg step limit is scoped to pairs where both endpoints extrude, because
+that is what the exchange spec's row 5 measures -- steps *within* a continuous
+extrusion line. Travel moves are legitimately large. Measured on the planar
+path: **57.32 deg** max step overall against **4.58 deg** within a segment. An
+unscoped E1 would abort the planar job at its first G0.
+
+### Three things the reference guide's values had to be corrected on
+
+Each was found by measurement rather than review, and each would otherwise have
+been a filter that rejects everything:
+
+1. **The tool point must be excluded from filters 6, 7 and 8.** Its whole
+   collision body has been the single TCP point since 7.1, and IK pins that
+   point to the commanded waypoint -- which lies ON the print surface during a
+   feed move, and at exactly the plate's top face on the planar first layer.
+   This is the same trap that made S1.37's nozzle check inert (S1.44 measured
+   <1e-12mm over 7,471 evaluations). The reference guide's
+   `nozzle_tip_exclusion_mm` exists for precisely this.
+2. **One OBB per link is unusable; filter 9 needs multi-proxy boxes.** Robot3's
+   single OBB is 502mm long and reported contact with Robot5/Robot6 in **all 8
+   branches** at planar waypoint 0, where the true mesh gap is 20-35mm against a
+   5mm clearance. Links are now covered by rows of 80mm boxes (`_obb_proxies`).
+3. **Filter 9's pairs must be at least THREE apart in the chain, not two.**
+   `(i, i+2)` is separated by one short link, and on the FR5's compact wrist
+   (d4/d5/d6 = 102/102/100mm) those meshes interpenetrate at every pose -- their
+   relative motion is a single joint rotation about a shared axis, so no joint
+   value separates them. Robot4~Robot6 fired on every branch at a true 30mm gap.
+
+### Performance -- three fixes, 33x
+
+The filter stack started at **3.677 ms/candidate** and the curved path at
+**8,748 ms/waypoint**, which is ~13 hours per layer. Final: **0.266
+ms/candidate** and **437 ms/waypoint** (~20 min per layer).
+
+| Fix | Effect |
+|---|---|
+| One FK per candidate (was three: filter 4, the sample transform, filter 9) | part of 3.677 -> 0.742 |
+| Bounding-sphere pre-test before filter 9's SAT | 0.533 -> 0.047 ms |
+| Dense dilated occupancy array screening filter 8's points in one vectorised lookup, replacing a Python loop hashing 27 cells per sample point | ~8.5 -> ~0.2 s/waypoint |
+
+### THE MEASUREMENT -- planar is fixed, curved is improved but not fixed
+
+**Planar, at the real User Frame: completely fixed.**
+
+| | before (S1.45) | now |
+|---|---|---|
+| Planar | **aborts at waypoint 0** of 181,375 | **181,375 / 181,375 solved**, 156s |
+
+20,350 export segments, `validate_job` ACCEPTED on all 8 rows. The plate plane
+still sits 323.5mm above the base; filters 6/7 simply let the arm reach *around*
+a finite bed, which S1.40's infinite plane forbade.
+
+**Curved: 8.5x better, and still not plannable.**
+
+| Layer | Feed points | IK-reachable (any of 540) | Admissible (all 9 filters) | 7.3 baseline (1 orientation) |
+|---|---|---|---|---|
+| RX | 2,527 | 2,033 (80.5%) | **1,922 (76.1%)** | 226 (8.9%) |
+| TX | 2,000 | 1,484 (74.2%) | **1,410 (70.5%)** | 186 (9.3%) |
+
+**S1.46's prediction was half right, and the honest reading matters.** The "91%
+unreachable" figure was indeed largely an artefact of commanding one orientation
+-- reachability rises 8.5x once the pose is searched. But **494 RX and 516 TX
+feed points have no IK solution at ANY of the 540 orientations**, so a complete
+curved job still cannot be planned at the real frame, and the precompute
+correctly aborts rather than relaxing a filter or falling back.
+
+**This sharpens the S1.45 placement question rather than closing it.** The
+residual failure is now known to be *pure geometric reach* -- not the commanded
+pose, not the filter set, and not the plate model. Where a waypoint is reachable
+at all, the filters admit ~95% of them. "Where should the curved model actually
+sit in the real cell?" is now the only remaining explanation, and it is a
+question for the supervisor.
+
+### The control run settles that it IS placement
+
+Same model, same 540-orientation search, same nine filters -- only the plate
+pose changed, from the real calibrated frame to the startup default
+`USER_FRAME_ORIGIN_MM = [-570, -300, -100]`:
+
+| Layer | Real User Frame | **Default plate pose** | 7.3 baseline |
+|---|---|---|---|
+| RX | 1,922 / 2,527 (76.1%) | **2,527 / 2,527 (100.0%)** | 226 (8.9%) |
+| TX | 1,410 / 2,000 (70.5%) | **2,000 / 2,000 (100.0%)** | 186 (9.3%) |
+
+**Every feed point on both layers is admissible at the default pose**, filters
+and all. So the nine filters do not over-reject -- given a sensible placement
+they cost nothing -- and the arm is not short of reach. What fails at the real
+frame is *where the workpiece is put*: `load_curved_model()` centres the assembly
+on the plate (S1.29), and at the real frame that puts the plate centre ~844mm out
+against an `a2 + a3 = 820mm` chain.
+
+This is the cleanest evidence yet for S1.45's placement question, and it is now
+the **only** unexplained thing about the curved path. It is also a warning: do
+not tune the filters to "fix" curved reachability -- they are demonstrably not
+the cause.
+
+### Root cause found the same day: a 105.6mm centring offset from a stand-in asset
+
+`load_curved_model()` centres the workpiece on the **build plate mesh's** bbox
+centre, not on the User Frame. `BambuLab_BuildPlate.obj` is 258 x 276mm with its
+origin at a corner, so the centre sits at plate-local `(129, 128)` -- which
+through the real frame's ~-89 deg yaw puts the workpiece **843.1mm** from the
+base instead of the User Frame origin's **737.5mm**. The FR5's flange reach is
+`a2 + a3 + d5` = **922mm**, and reachability falls off a cliff exactly there:
+100% below 900mm, 94% at 900-920mm, **~50% at 920-950mm**.
+
+Removing only that offset -- same frame, same model, same solver -- gives
+**843/843 RX and 667/667 TX reachable (100%)**, on a *coarser* orientation
+sample than the failing runs.
+
+So the frame is right, the arm's reach is right, and the filters are right. What
+is wrong is this project's assumption about where the workpiece sits relative to
+user frame 1, inherited from an asset that was only ever a stand-in. The question
+to settle is narrow: **is user frame 1 defined at the corner of the print bed or
+at its centre?** The code assumes corner.
+
+Not fixed here -- choosing between the fixes is a data question for the
+supervisor, and guessing would rebuild the whole curved pipeline against an
+assumption. Full measurements, the confirming test and three fix options:
+**`wiki/001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md`**.
+
+**Do not read the filters as the curved blocker.** The RX rejection tally is J5
+26,401 / upper-branch 7,676 / self-collision 3,744 / elbow-plate 2,755 / surface
+234 / under-plate 40 -- but those count *candidates*, not waypoints, and only
+111 RX waypoints (2,033 reachable minus 1,922 admissible) are lost to filters at
+all.
+
+### Filter 2 set at J5 >= 2 deg costs nothing, and subsumes spec row 7
+
+S1.46 left this open, flagging the interaction with row 7. Measured over 8,304
+RX / 8,834 TX sampled branches, the J5 distribution is symmetric with
+essentially nothing in the +/-2 band:
+
+| Threshold | RX admits | TX admits |
+|---|---|---|
+| J5 >= -2 | 50.7% | 51.3% |
+| J5 >= 0 (reference default) | 50.7% | 51.3% |
+| **J5 >= 2 (chosen)** | **50.7%** | **51.2%** |
+
+Choosing 2.0 over the reference's 0.0 costs **0 candidates on RX and 2 of 8,834
+on TX**, and in exchange the exchange spec's row 7 `|J5| < 2deg` singularity WARN
+becomes unreachable by construction. An exported job cannot carry that warning.
+
+### Filter 8 works -- the first mesh-vs-mesh guard this project has had
+
+Found a TX pose (waypoint 518, joints `[-170.75, -47.07, 50.02, -166.37, 155.11,
+12.23]`) whose nearest arm-link sample sits **0.71mm** from the print surface
+against a 1.0mm clearance. It passes filters 2-7, it is a valid IK solution
+inside the physical joint limits, and **the pre-7.4 curved path would have
+accepted it** -- 7.2 set `check_collision=False`, so a curved solve applied no
+geometric test whatsoever (S1.44). The standing warning that "a solved TX run
+drives the arm through the shoulder mockup" is now closed **for the arm**.
+
+**It is NOT closed for the nozzle**, and that must not be overstated: the tool is
+still a single TCP point, deliberately excluded from the collision filters, so
+nothing guards the *nozzle* against the workpiece. Closing that needs a corrected
+tool asset (7.1 found `nozzle.obj` is 163.47mm against tool=1's 196.91mm), not
+another filter.
+
+**Non-revertible unless:** the exchange spec's row 5 threshold changes (E1
+aliases `JOINT_STEP_MAX_DEG` for exactly this reason), the FR5's wrist geometry
+changes (filter 9's three-apart rule), or a real tool body arrives (which would
+put the tool back into filters 6-8).

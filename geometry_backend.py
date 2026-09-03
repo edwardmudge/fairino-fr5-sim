@@ -150,12 +150,15 @@ CURVE_RADIUS_MM = 0.5  # thin vs. TRAJECTORY_RADIUS_MM (2.0) -- 70 pieces should
 from examples.curved_surface_printing.study_config import (
     CURVED_MODEL_DIR, CURVED_MODEL_ROTATE_X_DEG, CURVED_LAYERS,
     CURVED_OBSTACLE_FILE, CURVED_OBSTACLE_STRUCTURE_NAME, CURVED_OBSTACLE_COLOR,
-    CURVED_TRAVEL_HOVER_MM,
+    CURVED_TRAVEL_HOVER_MM, CURVED_TIP_CLEARANCE_TOLERANCE_MM,
     CURVED_BEAD_WIDTH_MM, CURVED_BEAD_HEIGHT_MM,
 )
-# CURVED_TIP_CLEARANCE_TOLERANCE_MM is deliberately no longer imported --
-# roadmap 7.2 removed the tangent-plane check it fed. Left in study_config.py
-# under a legacy marker rather than deleted.
+# CURVED_TIP_CLEARANCE_TOLERANCE_MM is imported again as of roadmap 7.4: it is
+# filter 8's surface-mesh clearance. It went unused between 7.2 (which removed
+# the tangent-plane check it originally fed) and 7.4 -- kept in study_config.py
+# under a legacy marker throughout rather than deleted, which is exactly why it
+# was still there to reuse. settled.md S1.46 directs preferring this tuned
+# 1.0mm over the reference guide's 2.0mm default where the two disagree.
 
 GEODESIC_CHUNK_SOURCES = 1  # whole Dijkstra sources solved per step() call.
 # Measured per source: ~50ms on Surface_RX_Offset (30,284 verts), ~85ms on
@@ -187,13 +190,133 @@ ORIENT_FRAME_SCALE_MM = 6.0
 ORIENT_FRAME_STRIDE = 12
 ORIENT_FRAME_COLORS = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])  # X red, Y green, Z blue
 
+# ===========================================================================
+# Orientation search and candidate filters -- roadmap 7.4, settled.md S1.46.
+#
+# Adapted from examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md, a
+# working implementation of this task in ANOTHER project. Its file paths do not
+# exist here and its 35 deg joint-step default is deliberately not carried
+# across (see EDGE_* below). Values are robot/planner-level, so they live here;
+# study_config.py is reserved for material- and nozzle-dependent job values
+# (S1.41) -- which is why filter 8's clearance is imported from there instead.
+# ===========================================================================
+
+# The commanded tool axis need only be perpendicular to the surface WITHIN this
+# angle, per the supervisor -- superseding S1.36's "Z = the outward surface
+# normal" as a hard equality. Sampled as the nominal normal plus one ring of
+# ORIENT_SEARCH_TILT_RING_AZIMUTHS directions at the full cap: the cap is where
+# the reach leverage is, and intermediate rings multiply IK cost for very little
+# extra coverage. The supervisor phrased the search as "all combinations of Rx,
+# Ry and Rz"; a tilt cone x a full roll sweep is the same set, parameterised so
+# the 20 deg cap constrains only the DOF it should.
+ORIENT_SEARCH_TILT_MAX_DEG = 20.0
+ORIENT_SEARCH_TILT_RING_AZIMUTHS = 8
+
+# Roll about the commanded tool axis, searched rather than pinned. S1.36
+# established this DOF is free (the nozzle is rotationally symmetric) and then
+# spent it on a fixed world reference, which is what produced the row-5 flips
+# (S1.44). 60 slots, 6 deg apart, wrapping. This sweep is also the LARGER reach
+# lever of the two: the flange->TCP offset sits laterally off the flange, so its
+# perpendicular component is swept entirely.
+ORIENT_SEARCH_ROLL_SLOTS = 60
+
+# 1 nominal + 8 ring directions, x 60 roll slots = 540 commanded frames per
+# waypoint, each yielding up to 8 IK branches (<=4,320 raw candidates). The
+# reference guide's 480 is 60 x 8 with no cone at all.
+ORIENT_SEARCH_FRAMES = (1 + ORIENT_SEARCH_TILT_RING_AZIMUTHS) * ORIENT_SEARCH_ROLL_SLOTS
+
+# --- Candidate filters, in the order they run (cheap arithmetic -> FK -> collision) ---
+# Filter 1 is joint limits, already enforced inside solve_ik_tcp_matrix against
+# PHYSICAL_JOINT_LIMITS (S1.44), so it has no constant of its own here.
+
+# Filter 2 -- J5 minimum. The reference's rule is q[4] >= 0 (negative J5 flips
+# the wrist, giving an upside-down tool approach). Set to 2.0 rather than 0.0
+# so it ALSO subsumes the exchange spec's row 7, which WARNs on |J5| < 2 deg as
+# a singular configuration: an exported job then cannot carry that warning.
+# S1.46 left the interaction between the two as an open decision; this is it.
+FILTER_J5_MIN_DEG = 2.0
+
+# Filter 3 -- J4 minimum. Opt-in, default off, as in the reference.
+FILTER_J4_MIN_DEG = -60.0
+FILTER_J4_ENABLED = False
+
+# Filter 4 -- upper-branch configuration. The elbow must stand above the
+# shoulder->wrist chord. Rejects lower-elbow AND near-straight-arm poses, which
+# sit close to singularity with unpredictable velocity and can flip suddenly.
+FILTER_UPPER_BRANCH_TOL_MM = 2.0
+
+# Filter 5 -- elbow above the build-plate plane, with a little slack.
+FILTER_ELBOW_PLATE_TOL_MM = 1.0
+
+# Filters 6/7 -- the finite plate model that replaces S1.40's infinite plane.
+# 6 is the XY shadow under the plate (expanded, to catch near-misses); 7 is the
+# plate's own bounding slab. Together they are why the arm may now legitimately
+# reach *around* a plate mounted high, which the infinite plane forbade.
+FILTER_UNDER_PLATE_MARGIN_MM = 20.0
+FILTER_PLATE_SLAB_CLEARANCE_MM = 3.0
+
+# Filter 8 -- surface-mesh collision. Clearance comes from study_config's
+# CURVED_TIP_CLEARANCE_TOLERANCE_MM (imported above). Broadphase cell size:
+# ~6x the print surfaces' ~1.24mm median edge, so a cell holds a handful of
+# triangles and a query touches 27 of them.
+SURFACE_GRID_CELL_MM = 8.0
+
+# Filter 9 -- robot/tool self-collision, OBB vs OBB.
+FILTER_SELF_COLLISION_CLEARANCE_MM = 5.0
+
+# Length of each oriented-box proxy along a link's principal axis. ONE box per
+# link is unusably loose -- measured, Robot3's single 502mm box reports contact
+# with Robot5/Robot6 in all 8 branches at planar waypoint 0 where the true mesh
+# gap is 20-35mm -- so links are covered by a row of shorter boxes instead
+# (the reference guide's "multi-proxy OBB"). 80mm keeps the FR5's 425/395mm
+# links to 6-7 boxes each while staying tight enough not to invent collisions.
+SELF_COLLISION_PROXY_SEGMENT_MM = 80.0
+
+# Link surface sampling for filters 6-8. The link meshes are far denser than a
+# clearance test needs; one representative point per 25mm voxel keeps the
+# per-candidate point count in the hundreds rather than the tens of thousands.
+LINK_SAMPLE_SPACING_MM = 25.0
+
+# --- Edge (adjacent-waypoint) costs and rejection, inside the graph search ---
+# EDGE_MAX_JOINT_STEP is deliberately JOINT_STEP_MAX_DEG (30.0, defined above
+# from the exchange spec) rather than a fresh constant. The reference guide uses
+# 35, and carrying that across would build a planner whose own edge filter
+# admits jobs the receiving side rejects -- aliasing the spec value here makes
+# that mistake unavailable rather than merely discouraged.
+EDGE_MAX_JOINT_STEP_DEG = JOINT_STEP_MAX_DEG
+
+# Weighted-L1 joint movement. Proximal joints cost more, pushing redundancy
+# resolution out to the wrist where it is cheap and safe.
+EDGE_JOINT_WEIGHTS = np.array([3.0, 3.0, 2.0, 1.0, 1.0, 0.5])
+
+# Switching IK branch family (elbow-up <-> elbow-down) mid-path is legal but
+# should be a last resort, so it carries a flat penalty far above any plausible
+# joint-movement cost. Adjacent roll slots are free; larger roll jumps grow
+# quadratically in the excess.
+EDGE_BRANCH_CHANGE_PENALTY = 150.0
+EDGE_ROLL_QUADRATIC_WEIGHT = 2.0
+
 PRECOMPUTE_CHUNK_SIZE = 25  # waypoints solved per step() call -- keeps each
 # per-frame batch well under a 60fps budget. Measured ~0.5ms/waypoint for
 # solve_ik_tcp_matrix + the ground-clearance filter at benchy scale (see
 # settled.md S1.13's verification), so this is roughly a 12ms slice per frame.
 
+SEARCH_CHUNK_SIZE = 1  # waypoints per step() call on the ORIENTATION-SEARCH
+# path (roadmap 7.4). PRECOMPUTE_CHUNK_SIZE's 25 assumes ~8 IK solves per
+# waypoint; the curved search runs ORIENT_SEARCH_FRAMES (540) of them plus the
+# filter stack, so 25 would be ~13,500 solves in one frame.
+#
+# Even at 1 this is the slowest frame in the app: measured 437ms/waypoint at the
+# real User Frame and 749ms at the default plate pose (more candidates survive
+# there), i.e. ~1.3-2.3 fps while a curved precompute runs. That is deliberate
+# and is not a freeze -- the progress bar advances and Pause responds within a
+# frame -- but it is well short of interactive. Going lower means splitting a
+# single waypoint's search across frames, which would mean carrying the partial
+# candidate set and the half-relaxed layer across callbacks; not worth the
+# complexity for a batch operation that is cached afterwards.
+
 GCODE_PRECOMPUTE_CACHE = os.path.join(GCODE_DIR, "model.precompute.npz")  # roadmap 5.10, settled.md S1.21
-PRECOMPUTE_CACHE_VERSION = 6  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6; 4: allow_tcp_through_plate in key + posed-plate clearance, roadmap 6.8; 5: real tool=1 TCP offset, roadmap 7.1 -- every cached joint path was solved for a different flange->TCP transform, and the offset is a constant rather than a cache-key field; 6: roadmap 7.2 -- curved runs no longer reject on clearance at all, and every run now solves against PHYSICAL_JOINT_LIMITS rather than the narrower slider range, which changes both which branches are valid and which representation wrap_into_limits picks)
+PRECOMPUTE_CACHE_VERSION = 7  # Bump to invalidate all existing caches on a schema change (2: per-waypoint R_target, roadmap 6.5; 3: reject_below_ground in key, roadmap 6.6; 4: allow_tcp_through_plate in key + posed-plate clearance, roadmap 6.8; 5: real tool=1 TCP offset, roadmap 7.1 -- every cached joint path was solved for a different flange->TCP transform, and the offset is a constant rather than a cache-key field; 6: roadmap 7.2 -- curved runs no longer reject on clearance at all, and every run now solves against PHYSICAL_JOINT_LIMITS rather than the narrower slider range, which changes both which branches are valid and which representation wrap_into_limits picks; 7: roadmap 7.4 -- the orientation search + nine-filter set changes every solved branch on both paths, AND the schema itself grew the waypoint positions/is_feed/normals arrays that build_export_segments() needs after a cache hit. settled.md S1.46 pre-authorised sharing this one bump with 7.5's cache-gap fix, since either alone invalidates every cache)
 
 
 def curved_precompute_cache_path(layer_name):
@@ -235,16 +358,32 @@ class VisContent:
         self.precompute_status = ""
         self.precompute_cache_meta = None  # Cache key captured at precompute-start, see run_toolpath_ik_precompute()
         self.precompute_cache_path = None  # Which cache file this precompute writes to (per-layer for curved, roadmap 6.5)
-        self.precompute_check_collision = True  # False -> curved run; skips the posed-plate check entirely (roadmap 7.2)
+        self.precompute_filter_mode = "planar"  # "planar" | "curved" -- selects the candidate
+                                    # filter set AND whether the orientation search runs
+                                    # (roadmap 7.4). Was a check_collision bool at 7.2.
+        self.precompute_filter_ctx = None   # Per-run filter constants, see _filter_context()
+        # Candidate DAG (roadmap 7.4). Per-waypoint lists of the surviving
+        # candidates and the backpointers dijkstra_candidate_path's relaxation
+        # leaves behind; consumed by the backtrack at the end of the sweep.
+        self.precompute_cand_joints = []
+        self.precompute_cand_roll = []
+        self.precompute_cand_branch = []
+        self.precompute_dag_dist = None     # Running shortest-path cost to each live candidate
+        self.precompute_dag_back = []
+        self.precompute_commanded_R = []    # The orientation actually chosen per waypoint --
+                                    # distinct from precompute_R_target, which stays the
+                                    # NOMINAL surface normal frame the export reads.
+        self.precompute_reject_tally = {}   # filter name -> count, for the failure diagnostic
         self.toolpath_source = -1  # -1 = planar G-code; 0..len(CURVED_LAYERS)-1 = that curved layer.
                                     # Single source of truth for what the shared Run/Pause/Cancel/Reset
                                     # precompute+playback controls currently target -- roadmap 6.6.
-        self.allow_tcp_through_plate = False  # Toggle: let the nozzle tip (mesh 6) dip below the
-                                         # posed build-plate plane. Default OFF (nozzle also blocked,
-                                         # the safe default). The arm links (meshes 0-5) are ALWAYS
-                                         # blocked below the plate regardless -- roadmap 6.8. Folded
-                                         # into the precompute cache key (it changes which branch is
-                                         # accepted, so the solved path depends on it).
+        # allow_tcp_through_plate lived here until roadmap 7.4. It gated the tool
+        # point against S1.40's INFINITE plate plane, which filters 6 and 7 have
+        # replaced with a finite footprint plus a bounding slab -- and those
+        # exclude the tool point entirely, since IK pins it to the commanded
+        # waypoint (see _filter_context). With nothing left for the toggle to
+        # gate, settled.md S1.46 supersedes it outright; it is gone from the
+        # cache keys and the GUI too.
 
         # Progressive-reveal playback state -- playback_index persists across
         # pause, only reset_toolpath_playback() zeroes it.
@@ -443,6 +582,15 @@ class VisContent:
         plate_verts_world = transform_points(self.T_user_frame, plate_verts_local)
         plate_handle = ps.register_surface_mesh("Build Plate", plate_verts_world, plate.faces)
         plate_handle.set_color(PLATE_COLOR)
+
+        # The plate's own extent in plate-local coordinates, retained for roadmap
+        # 7.4's filters 6 and 7 -- the finite footprint + bounding slab that
+        # replace S1.40's infinite plane. Taken AFTER the PLATE_THICKNESS_MM
+        # lift, so local z spans [0, PLATE_THICKNESS_MM] with the print face on
+        # top, matching what _plate_plane() reports. Recomputed on every call
+        # because it is cheap and because a future non-uniform plate asset must
+        # not be able to drift from the mesh actually registered above.
+        self.plate_local_bounds = (plate_verts_local.min(axis=0), plate_verts_local.max(axis=0))
 
         self.create_coordinate_frame(scale=USER_FRAME_SCALE_MM, origin=position_mm, rotation=R, name="User Frame")
 
@@ -1726,9 +1874,9 @@ class VisContent:
             "version": PRECOMPUTE_CACHE_VERSION,
             "gcode_sha256": gcode_sha256,
             "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
-            # The TCP-through-plate toggle changes which IK branch is accepted,
-            # so the solved joint path depends on it -- roadmap 6.8.
-            "allow_tcp_through_plate": self.allow_tcp_through_plate,
+            # Which filter set solved this path -- roadmap 7.4. Replaces the
+            # allow_tcp_through_plate entry, whose toggle S1.46 superseded.
+            "filter_mode": "planar",
         }
 
 
@@ -1752,9 +1900,14 @@ class VisContent:
             "layer_name": self.curved_layer_names[layer],
             "curve_sha256": h.hexdigest(),
             "user_frame": np.round(np.asarray(user_frame, dtype=float), 6).tolist(),
-            # The TCP-through-plate toggle changes which IK branch is accepted,
-            # so the solved joint path depends on it -- roadmap 6.8.
-            "allow_tcp_through_plate": self.allow_tcp_through_plate,
+            "filter_mode": "curved",
+            # The orientation search's shape -- roadmap 7.4. Widening the cone,
+            # adding ring azimuths or changing the roll resolution all change
+            # which candidates exist and therefore which path is optimal, so a
+            # cache solved under different search parameters must miss.
+            "orient_search": [ORIENT_SEARCH_TILT_MAX_DEG,
+                              ORIENT_SEARCH_TILT_RING_AZIMUTHS,
+                              ORIENT_SEARCH_ROLL_SLOTS],
         }
 
 
@@ -1766,11 +1919,26 @@ class VisContent:
         step_toolpath_ik_precompute()'s successful-completion branch, never on
         an aborted/cancelled precompute. Wrapped in a bare except: a cache-write
         failure (disk full, permissions) must never surface as a failure of the
-        precompute itself, which already succeeded in memory."""
+        precompute itself, which already succeeded in memory.
+
+        Since roadmap 7.4 the waypoint positions, their is_feed flags and the
+        nominal surface normals are persisted alongside the joint path. Without
+        them build_export_segments() returns [] after every cache hit -- the
+        joint path alone carries no segment boundaries -- which is the gap
+        recorded in wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md. The
+        normals are stored as the (N,3) Z column rather than the full (N,3,3)
+        R_target: it is all the exporter reads, and on the planar path the
+        (N,3,3) is a broadcast_to view of one constant anyway."""
         try:
+            positions = np.array([p for p, _ in self.precompute_waypoints], dtype=np.float32)
+            is_feed = np.array([bool(f) for _, f in self.precompute_waypoints])
+            normals = np.asarray(self.precompute_R_target, dtype=np.float32)[:, :, 2]
             np.savez(
                 cache_path,
                 joint_path=np.asarray(self.precompute_joint_path, dtype=np.float32),
+                waypoint_positions=positions,
+                waypoint_is_feed=is_feed,
+                waypoint_normals=normals,
                 meta=np.array(json.dumps(self.precompute_cache_meta)))
         except Exception:
             pass
@@ -1796,8 +1964,28 @@ class VisContent:
             if cached_meta != meta_builder():
                 return False
             joint_path = cached["joint_path"].astype(float)
+            # Roadmap 7.4: restore what the segment builder needs. A v7 cache
+            # always carries these (save_ writes them unconditionally), so a
+            # KeyError here means a hand-made or truncated file and is correctly
+            # treated as a plain miss by the except below.
+            positions = cached["waypoint_positions"].astype(float)
+            is_feed = cached["waypoint_is_feed"]
+            normals = cached["waypoint_normals"].astype(float)
         except Exception:
             return False
+
+        # Rebuild precompute_waypoints/_R_target rather than leaving them None.
+        # Before 7.4 both runners returned on a cache hit before
+        # _begin_toolpath_precompute ever assigned them, so build_export_segments
+        # tripped its own guard and exported nothing -- silently reporting a
+        # clean job until 7.2's in-house row 0 made it loud. Only the normal (the
+        # R_target Z column) is persisted, so the restored R_target is a normal-
+        # only stand-in: its X/Y columns are not reconstructed, because nothing
+        # downstream of a cache hit reads them.
+        self.precompute_waypoints = list(zip(positions, [bool(f) for f in is_feed]))
+        R_restored = np.zeros((len(normals), 3, 3))
+        R_restored[:, :, 2] = normals
+        self.precompute_R_target = R_restored
 
         self.precompute_joint_path = list(joint_path)
         self.precompute_index = len(joint_path)
@@ -1820,21 +2008,34 @@ class VisContent:
 
     def _begin_toolpath_precompute(self, waypoints, R_target_array, joint_limits,
                                    reference_joint_angles, cache_meta, cache_path,
-                                   check_collision=True):
+                                   filter_mode="planar", layer=None):
         """Load a freshly-built waypoint source into precompute state -- the
         shared seam behind run_toolpath_ik_precompute (planar) and
         run_curved_toolpath_ik_precompute (curved), roadmap 6.5. R_target_array
-        is (N,3,3), one target orientation per waypoint (settled.md S1.12's
-        constant becomes a per-waypoint array). cache_path is where a completed
-        solve is written.
+        is (N,3,3), one NOMINAL orientation per waypoint -- Z is the exact
+        surface (or plate) normal. Since roadmap 7.4 that is the axis of the
+        search cone rather than the pose actually commanded; the chosen frames
+        land in precompute_commanded_R. cache_path is where a completed solve is
+        written.
 
-        check_collision is the whole planar/curved difference (roadmap 7.2):
-        True (planar) keeps Stage 6.8's posed-plate rejection, False (curved)
-        drops it, leaving the external IK exchange spec's Rejection Criteria as
-        the only definition of a bad job -- and those validate data, not
-        geometry. A flag rather than a read of self.toolpath_source because the
-        precompute snapshots its own per-run state here at begin, and a
-        live-mutating source field could change mid-solve."""
+        filter_mode is the planar/curved difference, and since roadmap 7.4 it
+        selects a filter SET rather than toggling one check (it was a
+        check_collision boolean at 7.2, and a tip tolerance before that):
+
+          "planar"  one commanded orientation per waypoint (the plate does not
+                    tilt, settled.md S1.12), so <=8 candidates; filters 2-7 and 9.
+          "curved"  the full ORIENT_SEARCH_FRAMES orientation search, so <=4,320
+                    candidates; filters 2-9, filter 8 against this layer's own
+                    print surface.
+
+        This reverses 7.2's collision narrowing, which had left the curved path
+        with no geometric rejection at all (settled.md S1.44 -> S1.46). S1.44's
+        seven exchange-spec rows are untouched by that -- the narrowing and the
+        table were always separate questions.
+
+        A snapshotted argument rather than a read of self.toolpath_source,
+        because the precompute captures its own per-run state here at begin and
+        a live-mutating source field could change mid-solve."""
         self.precompute_waypoints = waypoints
         self.precompute_R_target = R_target_array
         self.precompute_joint_limits = joint_limits
@@ -1845,7 +2046,22 @@ class VisContent:
             reference_joint_angles if reference_joint_angles is not None else self.current_joint_angles)
         self.precompute_cache_meta = cache_meta
         self.precompute_cache_path = cache_path
-        self.precompute_check_collision = check_collision
+        self.precompute_filter_mode = filter_mode
+
+        # Per-run filter constants (surface grid, plate frame, link pair list),
+        # built once here rather than per candidate -- roadmap 7.4.
+        self.precompute_filter_ctx = self._filter_context(filter_mode, layer)
+
+        # Candidate-DAG accumulators. Only the PREVIOUS layer's joints and dist
+        # stay live during the sweep; the per-layer candidate arrays and
+        # backpointers accumulate for the final backtrack.
+        self.precompute_cand_joints = []
+        self.precompute_cand_roll = []
+        self.precompute_cand_branch = []
+        self.precompute_dag_dist = None
+        self.precompute_dag_back = []
+        self.precompute_commanded_R = []
+        self.precompute_reject_tally = {}
 
 
     def run_toolpath_ik_precompute(self, joint_limits, reference_joint_angles=None):
@@ -1914,7 +2130,7 @@ class VisContent:
             R_target_array = np.broadcast_to(R_target, (len(waypoints), 3, 3))
             self._begin_toolpath_precompute(
                 waypoints, R_target_array, joint_limits, reference_joint_angles,
-                cache_meta, cache_path=GCODE_PRECOMPUTE_CACHE, check_collision=True)
+                cache_meta, cache_path=GCODE_PRECOMPUTE_CACHE, filter_mode="planar")
 
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
@@ -1960,7 +2176,7 @@ class VisContent:
                 return
             self._begin_toolpath_precompute(
                 waypoints, R_target_array, joint_limits, reference_joint_angles,
-                cache_meta, cache_path=cache_path, check_collision=False)
+                cache_meta, cache_path=cache_path, filter_mode="curved", layer=layer)
 
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
@@ -2027,66 +2243,252 @@ class VisContent:
         self.precompute_joint_path = []
         self.precompute_cache_meta = None
         # Clear the curved-run markers too, so cancelling a curved precompute and
-        # starting the planar one can't carry over the wrong cache path or run
-        # the planar path with clearance checking still switched off (roadmap
-        # 6.5/7.2). Resets to the checked default, the safe direction.
+        # starting the planar one can't carry over the wrong cache path or the
+        # wrong filter set (roadmap 6.5/7.2/7.4). Resets to "planar", the
+        # narrower search -- a stale "curved" would run a 540-orientation sweep
+        # over the 181k-waypoint G-code path.
         self.precompute_cache_path = None
-        self.precompute_check_collision = True
+        self.precompute_filter_mode = "planar"
+        self.precompute_filter_ctx = None
+        # Candidate-DAG state (roadmap 7.4). Dropped here rather than left to be
+        # overwritten at the next begin: these are the largest arrays the
+        # precompute holds -- hundreds of MB on a curved layer -- and a cancelled
+        # run should not keep them alive until the next one starts.
+        self.precompute_cand_joints = []
+        self.precompute_cand_roll = []
+        self.precompute_cand_branch = []
+        self.precompute_dag_dist = None
+        self.precompute_dag_back = []
+        self.precompute_commanded_R = []
+        self.precompute_reject_tally = {}
 
+
+    def _waypoint_candidates(self, i):
+        """Every admissible (joints, roll_slot, ik_branch) candidate at waypoint
+        i -- roadmap 7.4 steps 2 and 3. Returns
+        (joints (C,6), roll (C,), branch (C,), frames (C,3,3)), all empty when
+        nothing survives; the per-filter rejection counts land in
+        self.precompute_reject_tally.
+
+        Curved runs search ORIENT_SEARCH_FRAMES commanded orientations about the
+        nominal surface normal; planar runs command the single constant plate
+        frame (S1.12) and so evaluate at most 8 branches. Either way the branches
+        then go through the same filter stack.
+
+        Candidates are deduped on joints rounded to 0.01 deg. Distinct
+        (tilt, roll) frames routinely map to the same arm pose -- most obviously
+        wherever the tool axis is near the wrist axis -- and every duplicate
+        would otherwise cost a full row and column in this layer's edge block.
+        """
+        pos_world_mm, _is_feed = self.precompute_waypoints[i]
+        nominal_R = self.precompute_R_target[i]
+
+        # Per-waypoint, not cumulative. The tally exists to answer "why did THIS
+        # waypoint have nothing admissible", and totals carried over from the
+        # thousands of waypoints that succeeded would drown that out.
+        self.precompute_reject_tally = {}
+
+        if self.precompute_filter_mode == "curved":
+            frames = orientation_candidates(nominal_R)
+        else:
+            frames = np.asarray(nominal_R)[None, :, :]
+
+        ctx = self.precompute_filter_ctx
+        joints, rolls, branches, chosen_frames = [], [], [], []
+        seen = set()
+        for f_idx, R in enumerate(frames):
+            roll_slot = f_idx % ORIENT_SEARCH_ROLL_SLOTS
+            solutions, _status = self.solve_ik_tcp_matrix(
+                pos_world_mm, R, self.precompute_joint_limits,
+                reference_joint_angles=self.precompute_ref)
+            if not solutions:
+                # No geometric solution, or none inside PHYSICAL_JOINT_LIMITS --
+                # filter 1, counted so the diagnostic can distinguish "the arm
+                # cannot reach this point" from "a filter is mistuned".
+                self.precompute_reject_tally["limits/reach"] = (
+                    self.precompute_reject_tally.get("limits/reach", 0) + 1)
+                continue
+            for angles, _singular, branch_idx in solutions:
+                key = tuple(np.round(angles, 2))
+                if key in seen:
+                    continue
+                reason = self._candidate_admissible(angles, ctx)
+                if reason is not None:
+                    self.precompute_reject_tally[reason] = (
+                        self.precompute_reject_tally.get(reason, 0) + 1)
+                    continue
+                seen.add(key)
+                joints.append(angles)
+                rolls.append(roll_slot)
+                branches.append(branch_idx)
+                chosen_frames.append(R)
+
+        if not joints:
+            return (np.empty((0, 6)), np.empty(0, dtype=np.int32),
+                    np.empty(0, dtype=np.int32), np.empty((0, 3, 3)))
+        return (np.asarray(joints, dtype=np.float64),
+                np.asarray(rolls, dtype=np.int32),
+                np.asarray(branches, dtype=np.int32),
+                np.asarray(chosen_frames))
+
+    def _reject_summary(self):
+        """The current waypoint's per-filter rejection counts, commonest first --
+        the diagnostic that distinguishes "the arm genuinely cannot reach this
+        point" (dominated by limits/reach) from "one filter is mistuned"
+        (dominated by a single filter name). Roadmap 7.4."""
+        return ", ".join(f"{k} {v}" for k, v in
+                         sorted(self.precompute_reject_tally.items(), key=lambda kv: -kv[1]))
+
+    def _fail_precompute(self, i, message):
+        """Abort the whole precompute at waypoint i with an explanatory status.
+        No partial motion is kept and no filter is relaxed -- matching the
+        reference implementation, a job that cannot be planned inside the
+        filters fails rather than falling back to a less-safe candidate."""
+        total = self.precompute_total
+        self._abort_toolpath_ik_precompute()
+        self.precompute_status = f"Waypoint {i}/{total}: {message}"
 
     def step_toolpath_ik_precompute(self):
-        """Advance the in-progress precompute by up to PRECOMPUTE_CHUNK_SIZE
-        waypoints -- call every frame from render(). No-ops unless
-        precompute_running. Per waypoint: solve_ik_tcp_matrix ranked against the
-        previous waypoint's chosen pose, then a branch is picked per
-        precompute_check_collision (roadmap 7.2) -- planar takes the first ranked
-        branch that clears the posed plate (settled.md S1.12/S1.13/S1.40), curved
-        filters nothing and takes the closest-to-reference branch outright.
-        Aborts the whole precompute (no partial motion) at the first waypoint
-        with no valid branch, or -- planar only -- no clearing one."""
+        """Advance the in-progress precompute by one chunk of waypoints -- call
+        every frame from render(). No-ops unless precompute_running.
+
+        Since roadmap 7.4 this is a single fused pass rather than a greedy walk:
+        per waypoint it generates the admissible candidate set
+        (_waypoint_candidates) and immediately relaxes the previous layer into it
+        with dijkstra_candidate_path's edge block. Fusing the two is what keeps
+        the search chunkable across frames AND bounded in memory -- only the
+        previous layer's joints stay live, and the layered DAG's topological
+        order is exactly the waypoint order this loop already walks. On the final
+        waypoint it backtracks to fill precompute_joint_path.
+
+        The greedy per-waypoint ranking this replaces (S1.5/S1.11 -- rank
+        branches by wrapped distance to the previous pose, take the first that
+        clears) could not recover from a dead end, nor undo a discontinuity in
+        the commanded frame itself. That is the documented cause of the curved
+        row-5 failures (23/35 RX, 15/35 TX segments with >30deg steps inside a
+        feed run).
+
+        Aborts the whole precompute at the first waypoint with no admissible
+        candidate or no traversable edge into it, reporting the per-filter
+        breakdown."""
         if not self.precompute_running:
             return
 
-        end = min(self.precompute_index + PRECOMPUTE_CHUNK_SIZE, self.precompute_total)
+        chunk = SEARCH_CHUNK_SIZE if self.precompute_filter_mode == "curved" else PRECOMPUTE_CHUNK_SIZE
+        end = min(self.precompute_index + chunk, self.precompute_total)
         for i in range(self.precompute_index, end):
-            pos_world_mm, _is_feed_move = self.precompute_waypoints[i]
-            R_i = self.precompute_R_target[i]
-            solutions, status = self.solve_ik_tcp_matrix(
-                pos_world_mm, R_i, self.precompute_joint_limits,
-                reference_joint_angles=self.precompute_ref)
-            if not solutions:
-                status_msg = f"Waypoint {i}/{self.precompute_total}: {status}"
-                self._abort_toolpath_ik_precompute()
-                self.precompute_status = status_msg
+            joints, rolls, branches, frames = self._waypoint_candidates(i)
+            if len(joints) == 0:
+                n_frames = (ORIENT_SEARCH_FRAMES
+                            if self.precompute_filter_mode == "curved" else 1)
+                self._fail_precompute(
+                    i, f"no admissible candidate over {n_frames} commanded "
+                       f"orientation(s) ({self._reject_summary()})")
                 return
 
-            # Planar runs filter the ranked branches by posed-plate clearance.
-            # Curved runs don't filter at all (roadmap 7.2) and take the
-            # closest-to-reference branch directly -- see _begin_toolpath_precompute.
-            if not self.precompute_check_collision:
-                clear = solutions[0][0]
+            if i == 0:
+                self.precompute_dag_dist = np.zeros(len(joints))
             else:
-                clear = next((angles for angles, *_ in solutions
-                              if self._branch_clears_ground(angles)), None)
-            if clear is None:
-                status_msg = (
-                    f"Waypoint {i}/{self.precompute_total}: all {len(solutions)} valid branch(es) "
-                    f"hit the build plate"
-                    f"{'' if self.allow_tcp_through_plate else ' (arm + nozzle)'}")
-                self._abort_toolpath_ik_precompute()
-                self.precompute_status = status_msg
-                return
+                dist, back = self._relax_candidate_layer(i, joints, rolls, branches)
+                if dist is None:
+                    self._fail_precompute(
+                        i, f"{len(joints)} candidate(s) are admissible here, but every "
+                           f"edge from the previous waypoint moves some joint more than "
+                           f"{EDGE_MAX_JOINT_STEP_DEG:.0f}deg")
+                    return
+                self.precompute_dag_dist = dist
+                self.precompute_dag_back.append(back)
 
-            self.precompute_ref = clear
-            self.precompute_joint_path.append(clear)
+            self.precompute_cand_joints.append(joints.astype(np.float32))
+            self.precompute_cand_roll.append(rolls)
+            self.precompute_cand_branch.append(branches)
+            self.precompute_commanded_R.append(frames)
+            # Rank the NEXT waypoint's IK branches against this waypoint's
+            # cheapest-so-far candidate. Only an ordering hint now -- the graph
+            # search, not this reference, decides what is actually taken -- but
+            # it keeps solve_ik_tcp_matrix's wrap_into_limits picking a
+            # representation near the path being walked.
+            self.precompute_ref = joints[int(np.argmin(self.precompute_dag_dist))]
 
         self.precompute_index = end
         if self.precompute_index >= self.precompute_total:
-            self.precompute_running = False
-            self.precompute_status = f"Solved {self.precompute_total} waypoint(s)"
-            self.save_toolpath_precompute_cache(self.precompute_cache_path)
+            self._finish_candidate_search()
         else:
-            self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
+            self.precompute_status = (
+                f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
+                f"{f' ({len(self.precompute_cand_joints[-1])} candidates)' if self.precompute_filter_mode == 'curved' else ''}")
+
+    def _relax_candidate_layer(self, i, joints, rolls, branches):
+        """One layer of dijkstra_candidate_path's relaxation, applied live during
+        the sweep -- roadmap 7.4. Returns (dist, back), or (None, None) when no
+        edge into this layer is traversable.
+
+        The edge cost and the E1 hard rejection are defined and justified in
+        dijkstra_candidate_path's docstring; this is the same arithmetic applied
+        incrementally so the search can be chunked across frames. The two are
+        kept deliberately in step: dijkstra_candidate_path is the readable,
+        unit-tested statement of the algorithm, this is its streaming form."""
+        q_prev = self.precompute_cand_joints[-1].astype(np.float64)
+        roll_prev, branch_prev = self.precompute_cand_roll[-1], self.precompute_cand_branch[-1]
+
+        D = np.abs(joints[None, :, :] - q_prev[:, None, :])
+        cost = D @ EDGE_JOINT_WEIGHTS
+        cost = cost + EDGE_BRANCH_CHANGE_PENALTY * (branches[None, :] != branch_prev[:, None])
+        roll_d = np.abs(rolls[None, :].astype(float) - roll_prev[:, None].astype(float))
+        roll_d = np.minimum(roll_d, ORIENT_SEARCH_ROLL_SLOTS - roll_d)
+        cost = cost + EDGE_ROLL_QUADRATIC_WEIGHT * np.maximum(0.0, roll_d - 1.0) ** 2
+
+        # E1, and ONLY between two feed waypoints -- the exchange spec's row 5
+        # measures steps within a continuous extrusion line, and travel moves are
+        # legitimately large (planar: 57.32deg overall vs 5.85deg inside a segment).
+        if bool(self.precompute_waypoints[i - 1][1]) and bool(self.precompute_waypoints[i][1]):
+            cost = np.where(D.max(axis=-1) > EDGE_MAX_JOINT_STEP_DEG, np.inf, cost)
+
+        total = self.precompute_dag_dist[:, None] + cost
+        back = np.argmin(total, axis=0)
+        dist = total[back, np.arange(total.shape[1])]
+        if not np.any(np.isfinite(dist)):
+            return None, None
+        return dist, back.astype(np.int32)
+
+    def _finish_candidate_search(self):
+        """Backtrack the candidate DAG into precompute_joint_path and write the
+        cache -- roadmap 7.4, the tail of step_toolpath_ik_precompute.
+
+        Candidates whose running cost is infinite are unreachable through the
+        graph, so the final choice is the cheapest FINITE one; _relax_candidate_layer
+        has already failed the run if a whole layer went infinite."""
+        chosen_last = int(np.argmin(self.precompute_dag_dist))
+        n = len(self.precompute_cand_joints)
+        chosen = [0] * n
+        chosen[-1] = chosen_last
+        for i in range(n - 1, 0, -1):
+            chosen[i - 1] = int(self.precompute_dag_back[i - 1][chosen[i]])
+
+        self.precompute_joint_path = [
+            self.precompute_cand_joints[i][chosen[i]].astype(np.float64) for i in range(n)]
+        # The orientation actually commanded per waypoint, kept separate from
+        # precompute_R_target (still the nominal surface normal, which is what
+        # the exchange spec's normal_base wants and what the beads stack on).
+        self.precompute_commanded_R = np.array(
+            [self.precompute_commanded_R[i][chosen[i]] for i in range(n)])
+
+        self.precompute_running = False
+        cand_counts = [len(c) for c in self.precompute_cand_joints]
+        self.precompute_status = (
+            f"Solved {self.precompute_total} waypoint(s) -- "
+            f"{min(cand_counts)}-{max(cand_counts)} candidates/waypoint, "
+            f"path cost {self.precompute_dag_dist[chosen_last]:.1f}")
+        self.save_toolpath_precompute_cache(self.precompute_cache_path)
+
+        # The per-layer candidate arrays are the precompute's peak memory (a
+        # curved layer can hold hundreds of MB) and nothing downstream reads
+        # them once the path is backtracked. Drop them here rather than at the
+        # next run, so an idle session isn't sitting on them.
+        self.precompute_cand_joints = []
+        self.precompute_cand_roll = []
+        self.precompute_cand_branch = []
+        self.precompute_dag_back = []
 
 
     def build_export_segments(self):
@@ -2107,13 +2509,15 @@ class VisContent:
         Returns a list of ExportSegment. Only the solved prefix is used, so a
         partial (paused) precompute yields the segments solved so far.
 
-        Returns [] when there is no waypoint source to split, which is NOT only
-        "no precompute has completed": a precompute loaded from disk cache also
-        yields [], because load_toolpath_precompute_cache() restores
-        precompute_joint_path but not precompute_waypoints/_R_target. Known gap,
-        deferred to 7.4 (it needs a cache schema change) -- see
-        wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md. validate_job()'s
-        in-house row 0 exists so that empty result can never read as ACCEPTED.
+        Returns [] only when there is genuinely no waypoint source to split.
+        Until roadmap 7.4 that also happened after any cache HIT -- the normal
+        case -- because load_toolpath_precompute_cache() restored the joint path
+        but not the waypoints, so this tripped its own guard and exported
+        nothing. 7.4's cache schema persists the positions, is_feed flags and
+        normals, closing that gap
+        (wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md).
+        validate_job()'s in-house row 0 stays regardless: an empty job must never
+        read as ACCEPTED, whatever emptied it.
         """
         if not self.precompute_joint_path or self.precompute_waypoints is None:
             return []
@@ -2465,6 +2869,23 @@ class VisContent:
         self.moving_geometry_rest_bbox_corners = [
             _bbox_corners(v) for v in self.moving_geometry_rest_verts]
 
+        # Sampled link points and per-link oriented boxes for roadmap 7.4's
+        # filters 6-9. Both are rest-frame data carried by the same rigid
+        # Delta_i as the meshes, so neither is ever re-derived per candidate --
+        # which is what makes a nine-filter stack affordable inside a search
+        # that evaluates thousands of candidates per waypoint.
+        #
+        # Sampling rather than full vertex sets: filters 6-8 are clearance
+        # tests at 1-20mm, and one representative point per LINK_SAMPLE_SPACING_MM
+        # voxel resolves that comfortably while cutting the per-candidate point
+        # count by orders of magnitude. Index 6 is the single TCP point, which
+        # passes through both helpers unchanged.
+        self.moving_geometry_rest_samples = [
+            _voxel_downsample(v, LINK_SAMPLE_SPACING_MM) for v in self.moving_geometry_rest_verts]
+        self.moving_geometry_rest_proxies = [
+            _obb_proxies(v, SELF_COLLISION_PROXY_SEGMENT_MM)
+            for v in self.moving_geometry_rest_verts]
+
         # TCP point, also Delta_6, but a Polyscope point cloud -- update_point_positions,
         # not update_vertex_positions, hence the per-object self.update_fns lookup
         self.rest_verts.append(tcp_point)
@@ -2536,6 +2957,15 @@ class VisContent:
         self.apply_delta_transform(joint_angles_deg)
 
 
+    def _moving_geometry_deltas_from_fk(self, T_current):
+        """_moving_geometry_deltas' body, given an already-computed FK. Split out
+        for roadmap 7.4's filter stack, which needs the same FK for the elbow
+        tests and the two collision tests and must not pay for it three times --
+        compute_fk is six 4x4 multiplies in a Python loop and the stack runs on
+        thousands of candidates per waypoint."""
+        return [T_current[min(i, 5)] @ self.T_zero_inv[min(i, 5)] for i in range(7)]
+
+
     def _moving_geometry_deltas(self, joint_angles_deg):
         """Delta_i for each moving collision body (Robot1..Robot6 + the TCP
         point), reusing Delta_6 for the tool -- same src = min(i, 5) mapping as
@@ -2543,8 +2973,7 @@ class VisContent:
         effects (used by the ground-clearance checks below, not per-frame
         rendering). Indexes moving_geometry_rest_verts, not rest_verts: index 6
         is the TCP point, not the hidden nozzle mesh (roadmap 7.1)."""
-        T_current = self.compute_fk(joint_angles_deg)
-        return [T_current[min(i, 5)] @ self.T_zero_inv[min(i, 5)] for i in range(7)]
+        return self._moving_geometry_deltas_from_fk(self.compute_fk(joint_angles_deg))
 
 
     def _meshes_clear_plane(self, joint_angles_deg, indices, point, normal, tol):
@@ -2599,30 +3028,258 @@ class VisContent:
         return point, normal
 
 
-    def _branch_clears_ground(self, joint_angles_deg):
-        """True if this branch's moving geometry stays clear of the posed build
-        plate (roadmap 6.8). The plate is modelled as the infinite plane through
-        its top/print face (_plate_plane, from self.T_user_frame). The 6 arm-link
-        meshes (0-5) may NEVER dip below it (zero tolerance). The tool (index 6 --
-        the TCP point since roadmap 7.1, not the hidden nozzle mesh) may, only
-        when self.allow_tcp_through_plate is set. Because the plane is infinite
-        the plate must sit below the whole arm -- if the arm reaches below the
-        plate the fix is to move the plate lower (Build Plate controls), not to
-        disable the check. Replaces the old world-z=0 proxy (settled.md
-        S1.13/S1.38); each mesh set uses the cheap-corners / exact-verts bound of
-        _meshes_clear_plane.
+    # _branch_clears_ground() lived here until roadmap 7.4 -- the S1.40 posed-plate
+    # check, which modelled the plate as an INFINITE plane and blocked arm links
+    # 0-5 below it unconditionally, gating only the tool point on the
+    # allow_tcp_through_plate toggle. Both it and the toggle are superseded by
+    # filters 6 and 7 below (finite footprint + bounding slab), per settled.md
+    # S1.46.
+    #
+    # It had to go rather than merely being layered under: S1.45 measured the
+    # real User Frame sitting 323.5mm ABOVE the base, where the infinite plane
+    # cuts through the shoulder and elbow -- links nowhere near the print -- and
+    # rejected all 8 valid branches at planar waypoint 0 (deepest link signed
+    # distance -253.2mm). S1.40's own prescribed fix, "move the plate lower", is
+    # unavailable once the plate height is a measurement rather than a knob. A
+    # real bed is finite and the arm legitimately reaches around it.
+    #
+    # _meshes_clear_plane() and _plate_plane() are both retained: filter 5 uses
+    # the latter, and the former is still the cheap-corners/exact-verts bound.
 
-        **Planar path only since roadmap 7.2.** Curved precomputes no longer call
-        this at all -- see _begin_toolpath_precompute's check_collision. The
-        second, curved-only tangent-plane check that used to layer on top of this
-        went with it (note above _plate_plane)."""
-        point, normal = self._plate_plane()
-        if not self._meshes_clear_plane(joint_angles_deg, range(6), point, normal, 0.0):
+    def _link_sample_points(self, deltas, indices):
+        """World-space sampled surface points for the given moving-geometry
+        indices, given this pose's Delta transforms -- the shared input to
+        filters 6, 7 and 8 (roadmap 7.4). Returns (P,3).
+
+        Computed once per candidate and passed to all three filters, rather than
+        each transforming its own copy: the Delta multiply is the dominant cost
+        of the collision half of the filter stack."""
+        return np.vstack([transform_points(deltas[i], self.moving_geometry_rest_samples[i])
+                          for i in indices])
+
+    def _self_collision(self, deltas, ctx):
+        """True if any non-adjacent link-proxy pair is closer than
+        FILTER_SELF_COLLISION_CLEARANCE_MM -- filter 9 (roadmap 7.4).
+
+        Every proxy box in the arm is transformed in one batch, then the pairs
+        are narrowed by bounding spheres before the full separating-axis test
+        runs on whatever survives. The pair list itself is built in
+        _filter_context and excludes links less than three apart in the chain,
+        which are in permanent contact by construction.
+
+        The sphere pre-test is what makes filter 9 affordable: a box's bounding
+        radius is |half|, so two proxies whose centres are further apart than the
+        sum of their radii plus the clearance cannot possibly touch. It is one
+        vectorised norm over the pair list, and in normal poses it eliminates all
+        or nearly all of them -- measured 0.533ms -> 0.05ms per candidate, on a
+        filter that runs thousands of times per waypoint."""
+        prox_c, prox_a, prox_h, prox_link = ctx["proxies"]
+        R = np.array([deltas[k][:3, :3] for k in range(7)])
+        t = np.array([deltas[k][:3, 3] for k in range(7)])
+        Rp, tp = R[prox_link], t[prox_link]
+        centers = np.einsum('mij,mj->mi', Rp, prox_c) + tp
+
+        ia, ib = ctx["proxy_pairs"]
+        radii = ctx["proxy_radii"]
+        gap = np.linalg.norm(centers[ib] - centers[ia], axis=1)
+        near = gap < radii[ia] + radii[ib] + FILTER_SELF_COLLISION_CLEARANCE_MM
+        if not np.any(near):
             return False
-        if not self.allow_tcp_through_plate:
-            if not self._meshes_clear_plane(joint_angles_deg, (6,), point, normal, 0.0):
-                return False
-        return True
+        ia, ib = ia[near], ib[near]
+
+        axes = np.einsum('maj,mij->mai', prox_a, Rp)  # rows stay unit directions
+        separated = _obbs_separated_batch(
+            centers[ia], axes[ia], prox_h[ia],
+            centers[ib], axes[ib], prox_h[ib],
+            FILTER_SELF_COLLISION_CLEARANCE_MM)
+        return not np.all(separated)
+
+    def _plate_box_frame(self):
+        """(inverse plate transform, local min, local max) for filters 6 and 7 --
+        the finite plate model that replaces S1.40's infinite plane (roadmap
+        7.4). Working in plate-local coordinates means the footprint and slab
+        tests are plain axis-aligned comparisons however the plate is posed."""
+        return np.linalg.inv(self.T_user_frame), self.plate_local_bounds[0], self.plate_local_bounds[1]
+
+    def _candidate_admissible(self, joints, ctx):
+        """The nine candidate filters of roadmap 7.4 / settled.md S1.46, adapted
+        from IK_BRANCH_REJECTION_GUIDE.md. Returns None if the candidate is
+        admissible, otherwise the SHORT NAME of the first filter it failed (for
+        the per-reason tally the precompute reports on failure).
+
+        Filter 1 (joint limits) is not here: solve_ik_tcp_matrix has already
+        enforced PHYSICAL_JOINT_LIMITS before a candidate reaches this point.
+
+        Order is load-bearing and matches the reference: pure arithmetic first,
+        then a single FK, then the collision tests, rejecting on the FIRST
+        failure so the expensive tail rarely runs. ctx carries the per-run
+        constants (surface grid, plate frame) so nothing is rebuilt per
+        candidate.
+        """
+        # --- Filter 2: J5 minimum (arithmetic) ---
+        # Negative J5 flips the wrist, giving an upside-down tool approach. Set
+        # at 2.0 rather than the reference's 0.0 so the exchange spec's row 7
+        # |J5| < 2deg singularity WARN is also unreachable -- see FILTER_J5_MIN_DEG.
+        if joints[4] < FILTER_J5_MIN_DEG:
+            return "J5"
+
+        # --- Filter 3: J4 minimum (arithmetic, opt-in) ---
+        if FILTER_J4_ENABLED and joints[3] < FILTER_J4_MIN_DEG:
+            return "J4"
+
+        # --- The one FK, shared by filters 4-9 ---
+        T = self.compute_fk(joints)
+        deltas = self._moving_geometry_deltas_from_fk(T)
+        shoulder, elbow, wrist = T[0][:3, 3], T[1][:3, 3], T[2][:3, 3]
+
+        # --- Filter 4: upper-branch configuration ---
+        # The elbow must stand above the shoulder->wrist chord. Rejects
+        # lower-elbow poses and, because a straight arm puts the elbow ON the
+        # chord, near-singular ones too -- those have unpredictable velocity and
+        # can flip suddenly.
+        chord = wrist - shoulder
+        chord_len = np.linalg.norm(chord)
+        if chord_len < 1e-9:
+            return "upper-branch"  # shoulder and wrist coincident: degenerate
+        chord_dir = chord / chord_len
+        offset = (elbow - shoulder) - np.dot(elbow - shoulder, chord_dir) * chord_dir
+        if offset[2] < FILTER_UPPER_BRANCH_TOL_MM:
+            return "upper-branch"
+
+        # --- Filter 5: elbow above the build-plate plane ---
+        point, normal = ctx["plate_plane"]
+        if np.dot(elbow - point, normal) < -FILTER_ELBOW_PLATE_TOL_MM:
+            return "elbow-plate"
+
+        # --- Filters 6-8 share one transformed sample set ---
+        samples = self._link_sample_points(deltas, ctx["sample_indices"])
+        T_inv, lo, hi = ctx["plate_box"]
+        local = transform_points(T_inv, samples)
+
+        # --- Filter 6: under-plate footprint ---
+        # No sample may sit inside the plate's XY shadow AND below its print
+        # face. This is the S1.40 fix: unlike an infinite plane it says nothing
+        # about an arm link that is merely lower than the plate but well outside
+        # its footprint, which is the normal situation for a plate mounted high.
+        # The XY margin catches near-misses at the plate edge.
+        m = FILTER_UNDER_PLATE_MARGIN_MM
+        under = ((local[:, 0] >= lo[0] - m) & (local[:, 0] <= hi[0] + m) &
+                 (local[:, 1] >= lo[1] - m) & (local[:, 1] <= hi[1] + m) &
+                 (local[:, 2] < hi[2]))
+        if np.any(under):
+            return "under-plate"
+
+        # --- Filter 7: plate volume slab ---
+        # Catches link-through-plate cases the footprint test misses, e.g. a
+        # wrist passing through the plate edge from the side.
+        c = FILTER_PLATE_SLAB_CLEARANCE_MM
+        inside = np.all((local >= lo - c) & (local <= hi + c), axis=1)
+        if np.any(inside):
+            return "plate-slab"
+
+        # --- Filter 8: surface mesh collision (curved runs only) ---
+        # The FIRST mesh-vs-mesh check in this project. S1.37 declined to build
+        # it, arguing a full-arm obstacle test "would reject every real printing
+        # pose" -- true only while ONE orientation is commanded per waypoint, and
+        # 7.4 searches 540. Until now nothing at all stopped a solved TX run
+        # driving the arm through the shoulder mockup.
+        if ctx["surface_grid"] is not None:
+            if not _points_clear_surface(ctx["surface_grid"], samples,
+                                         CURVED_TIP_CLEARANCE_TOLERANCE_MM):
+                return "surface"
+
+        # --- Filter 9: robot/tool self-collision ---
+        if self._self_collision(deltas, ctx):
+            return "self-collision"
+
+        return None
+
+    def _filter_context(self, filter_mode, layer=None):
+        """Per-RUN constants the filter stack reads -- built once at precompute
+        begin, never per candidate (roadmap 7.4). filter_mode is "planar" or
+        "curved"; the only difference is filter 8, which needs a print surface
+        the planar path does not have.
+
+        The surface grid is the expensive one: Surface_TX_Base is ~90k triangles,
+        trivial to bin once and ruinous to rebin per waypoint."""
+        grid = None
+        if filter_mode == "curved" and layer is not None and self.curved_model_loaded:
+            grid = _build_surface_grid(self.curved_surface_verts_world[layer],
+                                       self.curved_surface_faces[layer],
+                                       SURFACE_GRID_CELL_MM)
+        # Moving-geometry indices sampled for filters 6-8: the six ARM LINKS
+        # only (0-5), deliberately NOT the tool point at index 6.
+        #
+        # The tool's whole collision body has been the single TCP point since
+        # roadmap 7.1, and IK pins that point to the commanded waypoint -- which
+        # lies ON the print surface during a feed move, and at exactly the
+        # plate's top face on the planar path's first layer. Testing it against
+        # either would reject every legitimate printing pose, and against the
+        # plate would additionally turn float noise at z == hi[2] into a
+        # waypoint-0 abort. This is the same trap that made S1.37's nozzle check
+        # incapable of rejecting anything (measured: <1e-12mm signed distance
+        # over all 5,863 cached waypoints, roadmap 7.2), and it is what the
+        # reference guide's nozzle_tip_exclusion_mm exists to avoid.
+        #
+        # Consequence worth stating plainly: nothing here guards the NOZZLE
+        # against the workpiece -- only the arm. Recovering that needs a real
+        # tool body, which no asset currently provides (7.1 found nozzle.obj is
+        # 163.47mm against tool=1's 196.91mm and hid it).
+        sample_indices = tuple(range(6))
+
+        # Filter 9's link pairs: at least THREE apart in the kinematic chain.
+        #
+        # Adjacent links (i, i+1) share a joint and are permanently in contact,
+        # so nobody tests those. Links two apart are the subtle case, and the
+        # answer here is measured rather than assumed: (i, i+2) is separated by
+        # just one short link, and on the FR5's compact wrist (d4/d5/d6 =
+        # 102/102/100mm) their meshes interpenetrate at every pose. Robot4~Robot6
+        # was reported as colliding in ALL 8 branches at planar waypoint 0 with a
+        # true mesh gap of ~30mm, and no joint value separates them -- their
+        # relative motion is one joint rotation about a shared axis. Testing them
+        # rejects every pose the arm can hold, which is a broken filter, not a
+        # safe one.
+        #
+        # Three or more apart is where a link can actually fold back onto another
+        # (the forearm reaching the shoulder, the flange reaching the upper arm),
+        # which is what filter 9 is for. The tool point sits at chain position 6,
+        # so the same rule pairs it with Robot1..Robot4.
+        link_pairs = [(i, j) for i in range(6) for j in range(i + 3, 6)]
+        link_pairs += [(6, k) for k in range(4)]
+
+        # Flatten every link's proxy boxes into one array so a candidate can
+        # transform them all in a single batch, and pre-expand link_pairs into
+        # the proxy-index pairs the batched SAT consumes. Both are fixed for the
+        # whole run -- only the transforms change per candidate.
+        centers, axes, halfs, link_of = [], [], [], []
+        offset = {}
+        for k in range(7):
+            c, a, h = self.moving_geometry_rest_proxies[k]
+            offset[k] = len(centers)
+            centers.extend(c); axes.extend(a); halfs.extend(h)
+            link_of.extend([k] * len(c))
+        proxies = (np.array(centers), np.array(axes), np.array(halfs),
+                   np.array(link_of, dtype=np.int64))
+        # Bounding-sphere radius per proxy box, for _self_collision's pre-test.
+        proxy_radii = np.linalg.norm(np.array(halfs), axis=1)
+
+        ia, ib = [], []
+        for i, j in link_pairs:
+            ni = len(self.moving_geometry_rest_proxies[i][0])
+            nj = len(self.moving_geometry_rest_proxies[j][0])
+            for p in range(ni):
+                for q in range(nj):
+                    ia.append(offset[i] + p); ib.append(offset[j] + q)
+
+        return {
+            "plate_plane": self._plate_plane(),
+            "plate_box": self._plate_box_frame(),
+            "surface_grid": grid,
+            "sample_indices": sample_indices,
+            "proxies": proxies,
+            "proxy_radii": proxy_radii,
+            "proxy_pairs": (np.array(ia, dtype=np.int64), np.array(ib, dtype=np.int64)),
+        }
 
 
     def record_trajectory_point(self):
@@ -2694,6 +3351,355 @@ def transform_points(T, points):
     """Apply a 4x4 homogeneous transform to an Nx3 point array."""
     homo = np.hstack([points, np.ones((len(points), 1))])
     return (T @ homo.T).T[:, :3]
+
+
+# ===========================================================================
+# Collision primitives -- roadmap 7.4, filters 6-9 (settled.md S1.46).
+#
+# All from scratch in numpy: there is no scipy in the fairino-fr5-sim
+# environment (confirmed 2026-09-03: numpy/polyscope/trimesh only), and adding
+# it was considered and rejected for 7.4 -- its one real win here would have
+# been a cKDTree broadphase for filter 8, against a new runtime dependency and
+# ten "no scipy" decisions across the code and wiki. See _build_surface_grid.
+# ===========================================================================
+
+
+def _voxel_downsample(verts, spacing):
+    """One representative vertex per `spacing`-mm cubic cell -- the link sample
+    points filters 6-8 test (roadmap 7.4). Deterministic: cells are visited in
+    np.unique's sorted order and the first vertex falling in each is kept, so
+    the same mesh always yields the same samples and a cached solve stays
+    reproducible.
+
+    Sampling rather than using every vertex is what makes the filters
+    affordable: the FR5 link meshes carry tens of thousands of vertices each,
+    and a clearance test at 1-5mm does not need them. A degenerate input (a
+    single point, e.g. the TCP) passes straight through."""
+    verts = np.asarray(verts, dtype=float)
+    if len(verts) <= 1:
+        return verts.copy()
+    cell = np.floor(verts / spacing).astype(np.int64)
+    _, first = np.unique(cell, axis=0, return_index=True)
+    return verts[np.sort(first)]
+
+
+def _obb_from_points(verts):
+    """Oriented bounding box of a point set, as (center, axes (3,3), half (3,)).
+    Axes are the principal directions (unit rows), half the extents along them.
+
+    Fitted in the points' OWN frame and used that way: filter 9 transforms the
+    box by the link's rigid Delta rather than re-fitting per candidate, which is
+    exact for a rigid motion and is the whole reason this is affordable inside a
+    per-candidate loop. PCA via np.linalg.eigh on the 3x3 covariance -- no scipy
+    needed for a problem this size.
+
+    A degenerate set (<2 points, or a flat/linear cloud) still returns a valid
+    box: eigh gives an orthonormal basis regardless, and zero half-extents are
+    harmless to the SAT test below."""
+    verts = np.asarray(verts, dtype=float)
+    mean = verts.mean(axis=0)
+    if len(verts) < 2:
+        return mean, np.eye(3), np.zeros(3)
+    centered = verts - mean
+    # eigh (not eig) -- the covariance is symmetric, so this returns real,
+    # orthonormal eigenvectors in ascending eigenvalue order.
+    _, vecs = np.linalg.eigh(centered.T @ centered)
+    axes = vecs.T  # rows are the principal directions
+    projected = centered @ axes.T
+    lo, hi = projected.min(axis=0), projected.max(axis=0)
+    # Centre on the box, not on the mean: a lopsided point distribution puts the
+    # mean off-centre, and half-extents taken about the mean would then bound a
+    # larger box than the points actually occupy.
+    return mean + ((lo + hi) / 2.0) @ axes, axes, (hi - lo) / 2.0
+
+
+def _obb_proxies(verts, segment_mm):
+    """A link's collision proxy: several oriented boxes along its length rather
+    than one -- filter 9 (roadmap 7.4). Returns (centers (K,3), axes (K,3,3),
+    halfs (K,3)).
+
+    ONE box per link is far too loose to be usable, and this is measured rather
+    than assumed: Robot3's single OBB is 502mm long, so it reports contact with
+    Robot5 and Robot6 in *every* IK branch at planar waypoint 0, where the true
+    mesh gap is 20-35mm against a 5mm clearance. A whole-arm filter that rejects
+    every pose is worse than no filter, because it looks like a safety result.
+
+    So the points are split into `segment_mm` bands along the link's principal
+    axis and a box is fitted per band, which is what the reference guide means
+    by its "multi-proxy OBB distance". Bands, not a fixed count, so a long link
+    gets more boxes than a short one and the tightness is uniform.
+
+    Empty bands are skipped; a link shorter than one band yields a single box,
+    identical to _obb_from_points."""
+    verts = np.asarray(verts, dtype=float)
+    if len(verts) < 2:
+        c, a, h = _obb_from_points(verts)
+        return c[None, :], a[None, :, :], h[None, :]
+
+    _, axes, half = _obb_from_points(verts)
+    principal = axes[np.argmax(half)]  # split along the link's longest direction
+    t = verts @ principal
+    span = t.max() - t.min()
+    n_bands = max(1, int(np.ceil(span / segment_mm)))
+    edges = np.linspace(t.min(), t.max(), n_bands + 1)
+    edges[-1] += 1e-6  # so the extreme point lands in the last band
+
+    centers, all_axes, halfs = [], [], []
+    for b in range(n_bands):
+        band = verts[(t >= edges[b]) & (t < edges[b + 1])]
+        if len(band) == 0:
+            continue
+        c, a, h = _obb_from_points(band)
+        centers.append(c); all_axes.append(a); halfs.append(h)
+    return np.array(centers), np.array(all_axes), np.array(halfs)
+
+
+def _obbs_separated_batch(ca, aa, ha, cb, ab, hb, clearance):
+    """Vectorised separating-axis test over P box PAIRS at once -- filter 9's
+    hot path (roadmap 7.4). Each argument is stacked per pair: centers (P,3),
+    axes (P,3,3) with unit rows, halfs (P,3). Returns a (P,) bool, True where
+    that pair is separated by more than `clearance`.
+
+    Same 15 axes as _obb_separated (which stays as the readable single-pair
+    statement, and is what the unit tests exercise), but every pair and every
+    axis in one numpy pass. The Python-loop form costs ~0.2ms per pair; filter 9
+    tests ~100 proxy pairs per candidate and there are thousands of candidates
+    per waypoint, so looping would dominate the entire precompute."""
+    P = len(ca)
+    ha = ha + clearance  # inflate one box of each pair; separation is symmetric
+
+    # (P,15,3) candidate axes: 3 faces of A, 3 of B, 9 edge cross-products.
+    axes = np.empty((P, 15, 3))
+    axes[:, 0:3] = aa
+    axes[:, 3:6] = ab
+    k = 6
+    for i in range(3):
+        for j in range(3):
+            axes[:, k] = np.cross(aa[:, i], ab[:, j])
+            k += 1
+
+    norms = np.linalg.norm(axes, axis=2)
+    valid = norms > 1e-9           # near-parallel edges: covered by the face normals
+    axes = axes / np.where(valid[..., None], norms[..., None], 1.0)
+
+    t = (cb - ca)[:, None, :]
+    reach_a = np.einsum('pna,pa->pn', np.abs(np.einsum('pnk,pak->pna', axes, aa)), ha)
+    reach_b = np.einsum('pna,pa->pn', np.abs(np.einsum('pnk,pak->pna', axes, ab)), hb)
+    gap = np.abs(np.einsum('pnk,pnk->pn', t, axes)) - (reach_a + reach_b)
+    return np.any(valid & (gap > 0.0), axis=1)
+
+
+def _obb_separated(box_a, box_b, clearance):
+    """True if two oriented boxes are separated by more than `clearance` mm --
+    filter 9's primitive (roadmap 7.4). Each box is (center, axes (3,3),
+    half (3,)) as returned by _obb_from_points and then rigidly transformed.
+
+    The single-pair reference statement of the test. The filter itself calls
+    _obbs_separated_batch, which does the identical arithmetic for many pairs at
+    once because per-pair Python overhead dominates otherwise; this form is what
+    that one is verified against, and is far easier to read.
+
+    Standard 15-axis separating-axis test: 3 face normals per box plus the 9
+    pairwise edge cross-products. `clearance` inflates A's extents, so boxes
+    that merely come close count as touching -- which is what a proximity check
+    wants. Returns True the moment one axis separates them; only if all 15 fail
+    are they reported as in contact.
+
+    Near-parallel edge pairs give a near-zero cross product, whose normalised
+    direction is numerically meaningless; those axes are skipped (the face
+    normals already cover that configuration, which is the standard treatment)."""
+    ca, axes_a, half_a = box_a
+    cb, axes_b, half_b = box_b
+    half_a = half_a + clearance  # inflate one box; separation is symmetric
+    t = cb - ca
+
+    candidates = [axes_a[0], axes_a[1], axes_a[2], axes_b[0], axes_b[1], axes_b[2]]
+    for i in range(3):
+        for j in range(3):
+            candidates.append(np.cross(axes_a[i], axes_b[j]))
+
+    for axis in candidates:
+        n = np.linalg.norm(axis)
+        if n < 1e-9:
+            continue  # parallel edges -- covered by the face normals
+        axis = axis / n
+        reach_a = np.abs(axes_a @ axis) @ half_a
+        reach_b = np.abs(axes_b @ axis) @ half_b
+        if abs(np.dot(t, axis)) > reach_a + reach_b:
+            return True
+    return False
+
+
+def _build_surface_grid(verts, faces, cell_size):
+    """Uniform-grid broadphase over a triangle mesh -- filter 8 (roadmap 7.4).
+    Returns a dict the query below consumes: triangle vertex arrays plus a
+    {cell -> triangle indices} map, keyed by integer cell coordinate.
+
+    Each triangle is registered in every cell its AABB touches, so a query point
+    only has to look at its own cell and the 26 around it. Built ONCE per
+    precompute run (the print surface does not move mid-solve), not per waypoint
+    -- Surface_TX_Base is 45,430 verts / ~90k triangles, which would be
+    ruinous per candidate and is trivial once.
+
+    A dict-of-lists rather than the flat CSR layout build_surface_graph() uses:
+    that one is walked ~V log V times inside a hot Dijkstra loop where the list
+    indexing measurably won, whereas this is a handful of hash lookups per
+    query point. Different access pattern, different structure.
+
+    Alongside it, a DENSE boolean occupancy array over the surface's own
+    bounding box, dilated by one cell. That is the part the query actually leans
+    on: it turns "is this point anywhere near the surface?" into one vectorised
+    array lookup for all points at once, so the dict -- and the Python loop over
+    it -- is only ever touched for the handful of points that are genuinely
+    close. The array is small (the print surfaces span a few hundred mm, so a
+    few thousand cells at 8mm) and dilation is 27 slice-ORs, no scipy."""
+    verts = np.asarray(verts, dtype=float)
+    faces = np.asarray(faces)
+    tri = verts[faces]  # (F,3,3)
+
+    lo = np.floor(tri.min(axis=1) / cell_size).astype(np.int64)   # (F,3)
+    hi = np.floor(tri.max(axis=1) / cell_size).astype(np.int64)
+
+    grid = {}
+    for f in range(len(faces)):
+        for x in range(lo[f, 0], hi[f, 0] + 1):
+            for y in range(lo[f, 1], hi[f, 1] + 1):
+                for z in range(lo[f, 2], hi[f, 2] + 1):
+                    grid.setdefault((x, y, z), []).append(f)
+
+    # Dense occupancy over the cell bounding box, with a one-cell margin so the
+    # dilation below has somewhere to grow into.
+    origin = lo.min(axis=0) - 1
+    shape = tuple(hi.max(axis=0) - origin + 2)
+    occupied = np.zeros(shape, dtype=bool)
+    keys = np.array(list(grid.keys())) - origin
+    occupied[keys[:, 0], keys[:, 1], keys[:, 2]] = True
+
+    # Dilate by one cell in every direction: a point sitting in a dilated cell is
+    # within one cell of a triangle, and one cell (8mm) comfortably exceeds the
+    # 1mm clearance, so nothing within range can be screened out.
+    dilated = np.zeros_like(occupied)
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                dilated[max(dx, 0):shape[0] + min(dx, 0),
+                        max(dy, 0):shape[1] + min(dy, 0),
+                        max(dz, 0):shape[2] + min(dz, 0)] |= \
+                    occupied[max(-dx, 0):shape[0] + min(-dx, 0),
+                             max(-dy, 0):shape[1] + min(-dy, 0),
+                             max(-dz, 0):shape[2] + min(-dz, 0)]
+
+    return {"tri": tri, "grid": {k: np.array(v) for k, v in grid.items()},
+            "cell_size": cell_size, "origin": origin, "near": dilated}
+
+
+def _segment_distance2(points, p0, p1):
+    """Squared distance from each of P points to each of F segments p0->p1.
+    points (P,3), p0/p1 (F,3); returns (P,F). Helper for
+    _point_triangle_distance2."""
+    d = p1 - p0                                        # (F,3)
+    dd = np.maximum(np.einsum('fk,fk->f', d, d), 1e-20)[None, :]
+    w = points[:, None, :] - p0[None, :, :]            # (P,F,3)
+    u = np.clip(np.einsum('pfk,fk->pf', w, d) / dd, 0.0, 1.0)
+    diff = w - u[..., None] * d[None, :, :]
+    return np.einsum('pfk,pfk->pf', diff, diff)
+
+
+def _point_triangle_distance2(points, tri):
+    """Squared distance from each of P points to each of F triangles --
+    filter 8's narrowphase (roadmap 7.4). points (P,3), tri (F,3,3); returns
+    (P,F).
+
+    Exact, and deliberately structured to be obviously so. The closest point of
+    a triangle is either interior -- in which case it is the perpendicular
+    footpoint, and the barycentric coordinates of that footpoint are all
+    non-negative and sum to <= 1 -- or it lies on the boundary, which is exactly
+    the union of the three edge segments. So: take the perpendicular distance
+    where the footpoint is inside, and the best of the three edges everywhere
+    else. The three edges already cover the vertices, so there is no separate
+    vertex case.
+
+    This is the min-of-four formulation rather than the seven-region case split
+    (Ericson). It does strictly more arithmetic, but every branch is a whole-
+    array np.where instead of a per-region index dance, and getting a region
+    wrong here means silently MISSING a collision -- the unsafe direction for a
+    filter whose whole job is to stop the arm entering the workpiece."""
+    a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]          # (F,3) each
+    ab, ac = b - a, c - a
+    ap = points[:, None, :] - a[None, :, :]            # (P,F,3)
+
+    aa = np.einsum('fk,fk->f', ab, ab)[None, :]
+    bb = np.einsum('fk,fk->f', ac, ac)[None, :]
+    ab_ac = np.einsum('fk,fk->f', ab, ac)[None, :]
+    d1 = np.einsum('pfk,fk->pf', ap, ab)
+    d2 = np.einsum('pfk,fk->pf', ap, ac)
+
+    det = aa * bb - ab_ac ** 2
+    safe_det = np.where(np.abs(det) > 1e-20, det, 1.0)
+    s = (bb * d1 - ab_ac * d2) / safe_det
+    t = (aa * d2 - ab_ac * d1) / safe_det
+
+    # Interior footpoint: distance to the triangle's plane. Degenerate (zero
+    # area) triangles have no interior, so they fall through to the edges.
+    inside = (np.abs(det) > 1e-20) & (s >= 0.0) & (t >= 0.0) & (s + t <= 1.0)
+    foot = a[None, :, :] + s[..., None] * ab[None, :, :] + t[..., None] * ac[None, :, :]
+    diff = points[:, None, :] - foot
+    plane_d2 = np.einsum('pfk,pfk->pf', diff, diff)
+
+    edge_d2 = np.minimum(np.minimum(_segment_distance2(points, a, b),
+                                    _segment_distance2(points, b, c)),
+                         _segment_distance2(points, a, c))
+    return np.where(inside, plane_d2, edge_d2)
+
+
+def _points_clear_surface(surface_grid, points, clearance):
+    """True if every point stays further than `clearance` mm from the meshed
+    surface -- filter 8 (roadmap 7.4). points is (P,3) world mm.
+
+    Two stages, and the split is what makes this affordable. First a single
+    vectorised lookup in the dilated occupancy array screens ALL points at once:
+    anything outside the surface's cell bounding box, or in a cell with no
+    triangle within one cell, is clear and is dropped. Only survivors reach the
+    dict-and-narrowphase loop, and in a normal pose there are none -- the arm
+    links are mostly nowhere near the print surface.
+
+    Doing it the other way round -- looping in Python over every sample point
+    and hashing 27 keys each -- was measured at ~8.5s per WAYPOINT on the curved
+    path, against ~0.9s for everything else combined. Same answer, 100x the cost.
+
+    Correctness of the screen: the occupancy array is dilated by one cell, and
+    one cell (SURFACE_GRID_CELL_MM = 8mm) is far larger than `clearance` (1mm),
+    so no point within range of a triangle can be screened out.
+
+    Fails on the FIRST offending point rather than measuring them all -- this is
+    a reject/accept gate inside a per-candidate loop, not a distance report."""
+    cell_size = surface_grid["cell_size"]
+    grid, tri = surface_grid["grid"], surface_grid["tri"]
+    near, origin = surface_grid["near"], surface_grid["origin"]
+    limit2 = clearance ** 2
+
+    pts = np.atleast_2d(points)
+    cells = np.floor(pts / cell_size).astype(np.int64) - origin
+    inside = np.all((cells >= 0) & (cells < np.array(near.shape)), axis=1)
+    if not np.any(inside):
+        return True
+    candidates = np.zeros(len(pts), dtype=bool)
+    ci = cells[inside]
+    candidates[inside] = near[ci[:, 0], ci[:, 1], ci[:, 2]]
+    if not np.any(candidates):
+        return True
+
+    offsets = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
+    for p, base in zip(pts[candidates], (cells[candidates] + origin)):
+        nearby = [grid[key] for key in
+                  ((base[0] + dx, base[1] + dy, base[2] + dz) for dx, dy, dz in offsets)
+                  if key in grid]
+        if not nearby:
+            continue
+        faces = np.unique(np.concatenate(nearby))
+        if _point_triangle_distance2(p[None, :], tri[faces]).min() < limit2:
+            return False
+    return True
 
 
 def bead_faces(face_template, K, reveal_index, u_valid, width_valid=None):
@@ -2932,6 +3938,163 @@ def geodesic_path_nodes(prev_row, target):
     while prev_row[path[-1]] != path[-1]:
         path.append(int(prev_row[path[-1]]))
     return path[::-1]
+
+
+def orientation_candidates(nominal_R):
+    """The commanded TCP orientations searched at one waypoint -- roadmap 7.4,
+    settled.md S1.46. nominal_R is the (3,3) frame whose Z column is the exact
+    outward surface normal (what _orientation_frames_for_points still returns);
+    returns (ORIENT_SEARCH_FRAMES, 3, 3).
+
+    Two DOF are swept, for two different reasons:
+
+    - **Tool axis**, over a cone of half-angle ORIENT_SEARCH_TILT_MAX_DEG about
+      the nominal normal. This is the supervisor's relaxation: perpendicular
+      *within* 20 deg rather than exactly. It is the only part of 7.4 that
+      loosens anything.
+    - **Roll about that axis**, all ORIENT_SEARCH_ROLL_SLOTS of it. This DOF was
+      always free -- the nozzle is rotationally symmetric, which is S1.36's own
+      reasoning for pinning it -- so sweeping it costs nothing physically and
+      buys both reach (the flange->TCP offset is lateral, so rolling relocates
+      the wrist centre) and continuity (the caller resolves it by graph cost
+      instead of a per-waypoint argmin, which is what caused the row-5 flips).
+
+    Emitted in a fixed order, tilt-major, so a candidate's index decomposes as
+    (frame // ROLL_SLOTS, frame % ROLL_SLOTS) = (tilt_idx, roll_idx). The edge
+    cost reads roll_idx to charge for roll jumps, so the ordering is load-bearing
+    rather than incidental. Index 0 is tilt 0 / roll 0, i.e. the nominal axis --
+    so the pre-7.4 commanded direction is always in the set."""
+    z = np.asarray(nominal_R)[:, 2]
+    z = z / np.linalg.norm(z)
+    x = np.asarray(nominal_R)[:, 0]
+    x = x - np.dot(x, z) * z
+    nx = np.linalg.norm(x)
+    if nx < 1e-9:
+        # nominal_R's X was (numerically) parallel to Z -- pick any perpendicular.
+        x = np.cross(z, np.eye(3)[np.argmin(np.abs(z))])
+        nx = np.linalg.norm(x)
+    x = x / nx
+    y = np.cross(z, x)
+
+    tilt = np.deg2rad(ORIENT_SEARCH_TILT_MAX_DEG)
+    axes = [z]
+    for k in range(ORIENT_SEARCH_TILT_RING_AZIMUTHS):
+        phi = 2.0 * np.pi * k / ORIENT_SEARCH_TILT_RING_AZIMUTHS
+        # Tilt z by `tilt` toward the in-plane direction at azimuth phi.
+        axes.append(np.cos(tilt) * z + np.sin(tilt) * (np.cos(phi) * x + np.sin(phi) * y))
+
+    frames = np.empty((ORIENT_SEARCH_FRAMES, 3, 3))
+    i = 0
+    for axis in axes:
+        axis = axis / np.linalg.norm(axis)
+        # A reference perpendicular for this axis, taken from the nominal X so
+        # roll slot 0 means the same thing across the cone.
+        ref = x - np.dot(x, axis) * axis
+        if np.linalg.norm(ref) < 1e-9:
+            ref = y - np.dot(y, axis) * axis
+        ref = ref / np.linalg.norm(ref)
+        perp = np.cross(axis, ref)
+        for r in range(ORIENT_SEARCH_ROLL_SLOTS):
+            theta = 2.0 * np.pi * r / ORIENT_SEARCH_ROLL_SLOTS
+            cx = np.cos(theta) * ref + np.sin(theta) * perp
+            frames[i] = np.column_stack([cx, np.cross(axis, cx), axis])
+            i += 1
+    return frames
+
+
+def dijkstra_candidate_path(layer_joints, layer_roll, layer_branch, layer_is_feed):
+    """Globally optimal joint trajectory through the candidate DAG -- roadmap
+    7.4 step 4, settled.md S1.46 part 4.
+
+    Nodes are `(waypoint i, candidate c)`; edges run only from layer i to layer
+    i+1. Every argument is a per-waypoint list, all four the same length W, with
+    entry i describing that waypoint's C_i surviving candidates:
+      layer_joints[i]   (C_i, 6) float, joint angles in degrees
+      layer_roll[i]     (C_i,)   int, roll slot index (for the roll-step cost)
+      layer_branch[i]   (C_i,)   int, raw IK branch ordinal (for the family cost)
+      layer_is_feed[i]  bool, whether this waypoint extrudes
+
+    Returns (chosen (W,) int, total_cost float), or (None, dead_layer_index)
+    when no path exists -- either a layer has no admissible candidate at all, or
+    every edge into it is forbidden. There is deliberately NO relaxation and no
+    fallback to a less-safe candidate: matching the reference implementation,
+    a job that cannot be planned within the filters fails loudly.
+
+    ## Why this is a second Dijkstra rather than a call to dijkstra_surface()
+
+    Same primitive, different graph -- settled.md S1.31 built the geodesic one
+    over a *general* CSR mesh graph, where the frontier order is genuinely
+    unknown and a heap is the only way to settle nodes cheaply. This graph is
+    strictly layered: every edge goes from layer i to layer i+1, so the
+    topological order IS the waypoint index, each node settles exactly once when
+    its layer is reached, and the heap has nothing left to decide. Dropping it
+    is not an approximation -- the path returned is identical -- it just lets a
+    whole layer's edge block be relaxed as ONE vectorised numpy operation.
+
+    That difference is the whole reason this runs. Curved RX is ~2,900 waypoints
+    at up to ~4,320 candidates each: a heapq frontier over ~12.5M nodes and
+    ~5x10^10 edges in interpreted Python does not finish, whereas the same
+    arithmetic as ~2,900 numpy block operations does.
+
+    ## The edge cost
+
+    Weighted-L1 joint movement (EDGE_JOINT_WEIGHTS, proximal joints dearest, so
+    redundancy resolves out at the wrist), plus a flat EDGE_BRANCH_CHANGE_PENALTY
+    for switching IK family, plus a quadratic penalty on roll jumps beyond one
+    slot. Continuity is therefore a *cost*, which is what lets an early
+    non-greedy choice be taken to avoid a later dead end -- the failure mode the
+    superseded per-waypoint ranking (S1.5/S1.11) could not recover from.
+
+    ## The one hard rejection, and its scope
+
+    An edge is forbidden (inf) when any joint moves more than
+    EDGE_MAX_JOINT_STEP_DEG -- but ONLY between two feed waypoints. The exchange
+    spec's row 5 measures steps *within* a continuous extrusion line, and travel
+    moves are legitimately large: the planar path's max step is 57.32 deg overall
+    against 5.85 deg inside a segment. Applying this across a G0 boundary would
+    abort a job that the receiving side would happily accept."""
+    n_layers = len(layer_joints)
+    if n_layers == 0:
+        return None, 0
+    if len(layer_joints[0]) == 0:
+        return None, 0
+
+    dist = np.zeros(len(layer_joints[0]))
+    back = []  # back[i-1][c] = chosen candidate index in layer i-1 for layer i's c
+
+    for i in range(1, n_layers):
+        q_prev, q_curr = layer_joints[i - 1], layer_joints[i]
+        if len(q_curr) == 0:
+            return None, i
+
+        # (Ca, Cb, 6) per-joint absolute movement -- the one big allocation.
+        D = np.abs(q_curr[None, :, :] - q_prev[:, None, :])
+        cost = D @ EDGE_JOINT_WEIGHTS
+
+        cost = cost + EDGE_BRANCH_CHANGE_PENALTY * (
+            layer_branch[i][None, :] != layer_branch[i - 1][:, None])
+
+        roll_d = np.abs(layer_roll[i][None, :].astype(float)
+                        - layer_roll[i - 1][:, None].astype(float))
+        roll_d = np.minimum(roll_d, ORIENT_SEARCH_ROLL_SLOTS - roll_d)  # slots wrap
+        cost = cost + EDGE_ROLL_QUADRATIC_WEIGHT * np.maximum(0.0, roll_d - 1.0) ** 2
+
+        if layer_is_feed[i - 1] and layer_is_feed[i]:
+            cost = np.where(D.max(axis=-1) > EDGE_MAX_JOINT_STEP_DEG, np.inf, cost)
+
+        total = dist[:, None] + cost
+        best = np.argmin(total, axis=0)
+        dist = total[best, np.arange(total.shape[1])]
+        back.append(best)
+
+        if not np.any(np.isfinite(dist)):
+            return None, i
+
+    chosen = np.empty(n_layers, dtype=np.int64)
+    chosen[-1] = int(np.argmin(dist))
+    for i in range(n_layers - 1, 0, -1):
+        chosen[i - 1] = back[i - 1][chosen[i]]
+    return chosen, float(dist[chosen[-1]])
 
 
 def compute_vertex_normals(verts, faces):

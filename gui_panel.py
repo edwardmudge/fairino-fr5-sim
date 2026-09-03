@@ -209,17 +209,12 @@ class UI_Menu:
             if psim.TreeNode("Toolpath Settings"):
                 _, self.playback_speed = psim.SliderFloat("Speed", self.playback_speed, 1.0, 100.0)
 
-                # Posed-plate clearance toggle (roadmap 6.8): the arm links are
-                # ALWAYS blocked from passing through the build plate; this only
-                # lets the nozzle TIP dip below it. Applies to both the planar
-                # and curved precompute. Disabled mid-solve so a single run can't
-                # be solved half under each rule. If the arm can't clear the
-                # plate, move the plate lower (Build Plate controls), don't
-                # disable the check.
-                psim.BeginDisabled(self.content.precompute_running)
-                _, self.content.allow_tcp_through_plate = psim.Checkbox(
-                    "Allow TCP through build plate", self.content.allow_tcp_through_plate)
-                psim.EndDisabled()
+                # The "Allow TCP through build plate" checkbox lived here until
+                # roadmap 7.4. It gated the tool point against S1.40's infinite
+                # plate plane; that plane is now a finite footprint plus a
+                # bounding slab (filters 6 and 7), which exclude the tool point
+                # outright, so the toggle had nothing left to gate -- settled.md
+                # S1.46. Clearance is no longer user-configurable from here.
 
                 psim.Spacing()
                 if self.content.precompute_running:

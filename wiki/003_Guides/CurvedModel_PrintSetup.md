@@ -192,6 +192,48 @@ no longer contains, and step 3's clearance trick has no meaning at the real
 frame. Rewrite this guide once the placement question in the inbox note is
 answered; it is not simply "re-run with new numbers".
 
+## Changed in Stage 7.4 — arm-vs-mockup is now guarded; nozzle-vs-mockup is not
+
+The open question this guide has carried since 6.8 — *nothing stops the arm
+driving through the shoulder mockup* — is **closed for the arm** as of
+2026-09-03 (`settled.md` **S1.47**).
+
+**Filter 8** tests the arm links against each layer's own print surface
+(`Surface_RX_Offset` / `Surface_TX_Base`) at **1.0mm** clearance, and **filter 9**
+tests the arm against itself at 5.0mm. These are the first mesh-vs-mesh checks
+in the project — exactly the obstacle-mesh approach S1.37 declined to build, now
+affordable because a rejected pose is no longer a rejected *waypoint*: with 540
+commanded orientations searched, ~95% of reachable waypoints still yield an
+admissible pose.
+
+Demonstrated, not asserted: a TX pose at waypoint 518 places an arm link
+**0.71mm** from the print surface, passes filters 2–7, is a valid IK solution
+within the physical joint limits, and **the pre-7.4 code would have accepted it**
+(7.2 left the curved path with no geometric test at all).
+
+⚠ **The nozzle is still unguarded, and this section must not be read as closing
+that.** The tool's entire collision body is the single TCP point (7.1), and it is
+*deliberately excluded* from filters 6–8 — IK pins it to the commanded waypoint,
+which lies on the print surface, so including it would reject every printing
+pose. So "judge arm-vs-mockup clearance by eye" above is superseded; **judge
+nozzle-vs-mockup clearance by eye still stands**. Closing it needs a corrected
+tool asset (`nozzle.obj` is 163.47mm against tool=1's 196.91mm), not a filter.
+
+⚠ **And the curved path still cannot be run at the real frame** — for an
+unrelated reason, now traced. 7.4 measured 1,922/2,527 RX and 1,410/2,000 TX feed
+points admissible (up 8.5× from 226/186), but ~24% have no IK solution at *any*
+of the 540 orientations, so the precompute aborts.
+
+The cause is **`load_curved_model()` centring the workpiece on the build plate
+MESH's bbox centre rather than on the User Frame** — a **+105.6mm** outward
+offset from `BambuLab_BuildPlate.obj`, which is a stand-in and 258×276mm with its
+origin at a corner. That puts the workpiece 843.1mm out against the FR5's 922mm
+flange reach; removing only the offset gives 100% on both layers at the same
+frame. The narrow question to settle first: *is user frame 1 at the corner of the
+print bed or at its centre?* See
+[`../001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md`](../001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md)
+— which is also where this guide's own rewrite is now blocked.
+
 ## Code anchors
 
 - `geometry_backend.py`: `load_build_plate()` (the plate-move invalidation and
@@ -202,8 +244,13 @@ answered; it is not simply "re-run with new numbers".
 - `assets/buildPlate/saved_position.json`: the real User Frame since Stage 7.3
   (the `[-570, -300, -200]` pose this guide is written around survives only as
   the file's inert `_legacy_stage6_8_demo_pose` record).
-- `settled.md` **S1.40** (posed-plate collision), **S1.37** (nozzle-only
-  tangent check), **S1.42** (the reset helpers).
+- `settled.md` **S1.40** (posed-plate collision — the check itself **deleted** at
+  7.4, replaced by the finite footprint + slab), **S1.37** (nozzle-only tangent
+  check — gone at 7.2; its obstacle-mesh argument overturned at 7.4), **S1.42**
+  (the reset helpers), **S1.47** (the filter set, and the measurements above).
+- `geometry_backend.py`: `_candidate_admissible()` (the nine filters),
+  `_filter_context()` (why the tool point is excluded), `orientation_candidates()`,
+  `dijkstra_candidate_path()`.
 - [`BuildPlate_UserFrame.md`](BuildPlate_UserFrame.md) — the plate controls
   themselves.
 - [`CurvedModel_Loading.md`](CurvedModel_Loading.md) — how the model is placed.

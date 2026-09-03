@@ -41,6 +41,15 @@ CURVED_LAYERS = [
 # per-waypoint tangent-plane check (settled.md S1.37). Roadmap 7.2 then removed
 # that check too, so the curved path has no clearance test at all -- this mesh
 # is still normals-only, and now nothing else guards the workpiece (S1.44).
+#
+# Changed in Stage 7.4 (settled.md S1.46): the curved path DOES have a
+# collision test again -- filter 8 checks the arm links against each layer's own
+# PRINT surface (Surface_RX_Offset / Surface_TX_Base, via _build_surface_grid),
+# which is the mesh-vs-mesh check S1.37 declined to build. This obstacle mesh is
+# still normals-only and is still not an obstacle: it is Surface_Bot, under the
+# print surfaces, and the arm has no reason to approach it that filter 8 does
+# not already catch. The "nothing guards the workpiece" line above is therefore
+# out of date for the ARM; it remains true for the nozzle, which has no body.
 CURVED_OBSTACLE_FILE = "Surface_Bot.obj"
 CURVED_OBSTACLE_STRUCTURE_NAME = "Surface Bot"
 CURVED_OBSTACLE_COLOR = (0.55, 0.55, 0.55)
@@ -55,14 +64,23 @@ CURVED_OBSTACLE_COLOR = (0.55, 0.55, 0.55)
 # instead of scraping them. Used by build_print_order().
 CURVED_TRAVEL_HOVER_MM = 4.0
 
-# LEGACY since roadmap 7.2 -- nothing imports this.
-# Nozzle-tip inward slack against a waypoint's surface tangent plane during the
-# curved precompute clearance check (_nozzle_clears_plane, settled.md S1.37).
-# That check was removed: roadmap 7.1 had already reduced the tool's collision
-# body to the single TCP point, which IK pins to the very plane being tested, so
-# the check could no longer reject anything. Kept here rather than deleted -- it
-# is a tuned material value, and would be needed again if a real tool body and a
-# real surface-collision test ever arrive.
+# LIVE AGAIN since roadmap 7.4 -- this is filter 8's surface-mesh clearance.
+#
+# History, because the round trip is the point: it began as the nozzle-tip
+# inward slack against a waypoint's surface tangent plane (_nozzle_clears_plane,
+# settled.md S1.37). Roadmap 7.2 removed that check -- 7.1 had already reduced
+# the tool's collision body to the single TCP point, which IK pins to the very
+# plane being tested, so it could no longer reject anything -- and marked this
+# LEGACY, kept rather than deleted on the grounds that it is a tuned material
+# value that a real surface-collision test would want back.
+#
+# 7.4 is that test. settled.md S1.46 directs preferring this 1.0mm over the
+# reference guide's 2.0mm default where the two disagree, which they do.
+#
+# Note what it now guards and what it does not: filter 8 tests the ARM LINKS
+# against the print surface, not the nozzle. The tool is still a single point
+# pinned to the commanded waypoint, so including it would reject every printing
+# pose -- the same trap that made the 7.2-era check inert.
 CURVED_TIP_CLEARANCE_TOLERANCE_MM = 1.0
 
 # The PLY toolpath curves carry no extrusion (E) data, and "layer height from Z"

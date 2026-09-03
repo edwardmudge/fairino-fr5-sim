@@ -25,7 +25,7 @@ Task type → required reading. Load only what's relevant, not everything.
 | Posed-plate collision / TCP-through toggle (Stage 6.8) | `settled.md` **S1.40**, `tutorials/Stage6_README.md` (6.8) | `wiki/001_Inbox/2026-07-22_stage6.8_posed_plate_collision.md` (spec), `settled.md` S1.13/S1.38 (the world-z=0 proxy it replaces), S1.37 (the tangent-plane nozzle check it layers with), `wiki/003_Guides/BuildPlate_UserFrame.md` (the plate pose it derives the plane from) | `geometry_backend.py` (`allow_tcp_through_plate` state; `_plate_plane`, `_meshes_clear_plane`, `_branch_clears_ground` (now posed-plate: arm `range(6)` always + nozzle `(6,)` unless the toggle, tangent plane still layered); `_toolpath_cache_meta`/`_curved_toolpath_cache_meta` (key `allow_tcp_through_plate`); `PRECOMPUTE_CACHE_VERSION`=4), `gui_panel.py` ("Allow TCP through build plate" checkbox), `assets/buildPlate/saved_position.json` (adopted plate pose) | Anything describing clearance as a **world-z=0 check** (replaced by the posed-plate plane, S1.40) or `reject_below_ground` as still existing (renamed/reworked to `allow_tcp_through_plate`, an inverted meaning — default OFF blocks the nozzle too); the plate check as testing the **arm and nozzle identically** (arm always blocked, nozzle gated by the toggle); `moving_geometry_bbox_min_z`/`moving_geometry_min_z` as still present (deleted — use `_meshes_clear_plane`); `PRECOMPUTE_CACHE_VERSION` as **3** (now **4**); or the default plate pose as usable for precompute (it rejects early — reposition the plate lower per the print-setup docs, don't disable the check) |
 | Rejection criteria / export segments / joint limits (Stage 7.2 — **built**) | `wiki/002_Architecture/settled.md` **S1.44**, `examples/curved_surface_printing/external_ik_exchange_spec_EN.md` (the seven-row table, implemented verbatim) | `wiki/001_Inbox/2026-08-15_orientation_frame_flips_row5.md` (curved jobs fail row 5 — open), `wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md` (a cached precompute exports zero segments — open, deferred to §7.5), `wiki/001_Inbox/2026-08-14_current_rejection_criteria.md` ("Changed in Stage 7.2" section — the rest is historical), `GLOSSARY.md` §8, `docs/FR5_Joint_Limits.md` (the sliders-only note) | `geometry_backend.py` (`validate_job`, `format_validation`, `ExportSegment`, `CheckResult`, `build_export_segments`, `PHYSICAL_JOINT_LIMITS` + the spec-threshold constants; `check_collision` on `_begin_toolpath_precompute`/`step_toolpath_ik_precompute`; `_branch_clears_ground` now plate-only), `gui_panel.py` (`JOINT_LIMITS` is sliders-only) | The seven rows as **curved-only or shoulder-specific** (they are universal — both sources, any job; only the *collision narrowing* is curved-only). `_nozzle_clears_plane`/`precompute_tip_tolerance_mm`/`CURVED_TIP_CLEARANCE_TOLERANCE_MM` as live (removed/legacy — and the check had been **incapable of rejecting anything since §7.1**, measured 7,471 evaluations with zero rejections, so its removal changed no outcome). `gui_panel.JOINT_LIMITS` as the solver's window (**sliders only** now — every solver call passes `PHYSICAL_JOINT_LIMITS`). `_branch_clears_ground` as taking a `plane` argument or running on the curved path (neither). Anything treating a completed **curved** precompute as plate-clearing (it no longer checks at all) or the curved solved paths as **exportable** (they fail row 5 — 23/35 RX, 15/35 TX segments). `PRECOMPUTE_CACHE_VERSION` as 5 (now **6**). `validate_job` as returning **seven** results (it returns **8** — an in-house "job is non-empty" REJECT row 0 precedes the spec's seven) or `build_export_segments` as working after a **cache hit** (it returns `[]` — the cache restores the joint path but not the waypoints; open, deferred to §7.5). `validate_job`/`build_export_segments` as **wired into the app** (nothing calls them — the writer is §7.5, the GUI §7.6) |
 | Real TCP offset / rejection criteria / job export (Stage 7 — **§7.1–7.3 built, §7.4–7.6 planned**) | `wiki/001_Inbox/2026-07-22_stage7_calibration_and_external_ik.md` (the plan + its 2026-08-08 conformance audit), `docs/saved_coords_data_and_usage_EN.md` (§1.1 the real User Frame and §1.2 the real tool=1 offset — supervisor ground truth; §4.1 how to build the matrices from it), `examples/curved_surface_printing/external_ik_exchange_spec_EN.md` (the seven-row Rejection Criteria table §7.2 implements verbatim) | `wiki/001_Inbox/2026-08-15_real_user_frame_reachability.md` (**§7.3's finding — neither toolpath runs at the real frame; read before planning any curved re-run**), `wiki/001_Inbox/2026-08-14_current_rejection_criteria.md` (what the code rejects **today**, per mode — the baseline §7.2 replaces), `wiki/003_Guides/CurvedModel_PrintSetup.md` (the working curved setup §7.1 invalidates and §7.3 kills outright, and the arm-vs-mockup open question), `settled.md` S1.4 (the `tcp_local` flange→TCP construction §7.1 retires), S1.37/S1.40 (the tangent-plane + posed-plate checks §7.2 **has now narrowed** to planar only — both carry a "Changed in Stage 7.2" marker; see S1.44), `wiki/003_Guides/TCP_Frame.md` (`create_coordinate_frame`'s `rotation` param, reused at §7.1.5 — no new mechanism) | `geometry_backend.py` (`tcp_local`/`T_flange_to_tcp` construction at `:2319`ff — replaced by a `TCP_OFFSET_6D_MM_DEG` constant + `pose_to_matrix` helper; `rest_verts[6]`, the nozzle body §7.1 reduces to the single TCP point; `_branch_clears_ground`/`_meshes_clear_plane` (§7.2 **dropped** both on the curved path); `solve_ik_tcp_matrix`), `assets/buildPlate/saved_position.json` (the real User Frame since §7.3), `assets/printerHead/TCP.txt` (retired by §7.1), `gui_panel.py` (`JOINT_LIMITS`) | Anything treating **§7.1, §7.2 or §7.3 as unbuilt** (§7.1 done 2026-08-14, S1.43 — see the "Tool head / TCP" row; §7.2 done 2026-08-15, S1.44 — see the row above; §7.3 done 2026-08-15, S1.45) or **§7.4–7.6 as built** (they are not; note §7.4 is now Orientation Search — job export renumbered to §7.5, GUI to §7.6). §7.3 as needing **code** (it changed one JSON file and the docs — the rotation convention already matched at `max |ΔT| = 0.0` and no `PRECOMPUTE_CACHE_VERSION` bump was needed, it stays **6**), as having moved **`USER_FRAME_ORIGIN_MM`** (it did not — startup/Reset is still `[-570,-300,-100]`), or as having **re-run the curved pipeline** (deliberately not — placement must be answered first, and that rebuild is shared with the pending S1.36 fix). `nozzle.obj` as the calibrated tool=1 head (163.47mm vs 196.91mm flange-to-tip; the supervisor confirmed on 2026-08-14 that the **offset** is right, so the *asset* is at fault — §7.1 hid the mesh and kept only the TCP point, and no tool-*body* geometry exists on any path). The `CurvedModel_PrintSetup.md` solve results (3,175 RX / 2,688 TX) as still valid — §7.1 moved the TCP **310.97mm**, so they are **stale and unre-validated**; the curved path has not been re-run since. `USER_FRAME_ORIGIN_MM` as `[-600, -300, 0]` (moved to `[-570, -300, -100]` by §7.1 — the old default left 3 of 181,375 planar waypoints outside the arm's envelope) or as having moved again at §7.3 (it did **not**; §7.3 changed only `saved_position.json`, which now holds the real `[649.456, 133.762, 322.778]` / `[-0.369, 0.329, -89.080]` — the two are deliberately different poses, S1.45). `gui_panel.JOINT_LIMITS` as the range §7.2's joint-limit row checks (those are the deliberately conservative *slider* values — the criteria row needs the **physical** limits from `docs/FR5_Joint_Limits.md`, which differ on J2/J4 by a wide margin). Or arm-vs-mockup collision as something Stage 7 closes (explicitly **out of scope** — it stays unguarded, recorded in `wiki/003_Guides/CurvedModel_PrintSetup.md`) |
-| Orientation search / candidate filters (Stage 7.4 — **planned, nothing built**) | `wiki/002_Architecture/settled.md` **S1.46**, `examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md` (the external reference implementation it adapts — **another project's code**, not this one's), `tutorials/Stage7_README.md` (§7.4) | `settled.md` S1.36 (the per-waypoint orientation it supersedes), S1.37 (the obstacle-mesh rationale it overturns), S1.40 (the infinite plate plane it replaces), S1.45 (the reachability diagnosis it corrects), S1.31 (the `heapq` Dijkstra it reuses), `wiki/001_Inbox/2026-08-15_orientation_frame_flips_row5.md` (the row-5 flips it subsumes — do **not** also implement that note's option 1), `wiki/001_Inbox/2026-08-15_real_user_frame_reachability.md` (the measurements, still valid) | Nothing yet. Attaches at `geometry_backend.py` `_orientation_frames_for_points` (the cone x roll generator replaces `argmin |a . z|`), `_begin_toolpath_precompute`'s `check_collision` boolean (becomes a filter-set selector), `_branch_clears_ground`/`_meshes_clear_plane` (the signed-distance primitive filters 5–7 reuse), `solve_ik_tcp_matrix` (called once per candidate orientation) | Any of it as **implemented** (none is — S1.46 is a decision, not a build). The 226/2,527 RX and 186/2,000 TX counts as the **arm's reach** (they measure *one commanded orientation per waypoint*, at most 8 IK candidates; S1.46 searches ~480). "Placement, not calibration" or "genuine reach" from S1.45 as current (superseded — the supervisor confirmed the 7.3 config is correct). The reference guide's **35 deg** joint-step limit as this project's value (**must be 30 deg** — the exchange spec rejects steps >30 deg, so 35 would admit jobs the receiving side rejects). The guide's file paths (`surface_traj_batch.py`, `robot_collision.py`, …) as existing here (they are the *other* project's). This as "making validation less strict" (only the **commanded pose** loosens; filters 4–9 are all additions, including the first mesh-vs-mesh collision this project has ever had). Or the orientation search as **known** to fix curved reachability (it is an unmeasured prediction — see S1.46's "NOT YET MEASURED") |
+| Orientation search / candidate filters / candidate DAG (Stage 7.4 — **built**) | `wiki/002_Architecture/settled.md` **S1.47** (as built + the measurements) and **S1.46** (the decision), `examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md` (the external reference it adapts — **another project's code**, not this one's), `tutorials/Stage7_README.md` (§7.4) | `settled.md` S1.36/S1.37/S1.40 (all three carry a "Changed in Stage 7.4" marker), S1.45 (the reachability diagnosis it corrects), S1.31 (the `heapq` Dijkstra it does **not** reuse verbatim — see below), `wiki/001_Inbox/2026-08-15_orientation_frame_flips_row5.md` and `2026-08-15_export_segments_cache_gap.md` (both **closed** by this stage) | `geometry_backend.py` — module level: `orientation_candidates`, `dijkstra_candidate_path`, `_obb_proxies`/`_obb_separated`/`_obbs_separated_batch`, `_build_surface_grid`/`_points_clear_surface`/`_point_triangle_distance2`/`_segment_distance2`, `_voxel_downsample`, `_obb_from_points`; on `VisContent`: `_candidate_admissible`, `_filter_context`, `_waypoint_candidates`, `_relax_candidate_layer`, `_finish_candidate_search`, `_self_collision`, `_link_sample_points`, `_plate_box_frame`, `_moving_geometry_deltas_from_fk`; the `FILTER_*`/`ORIENT_SEARCH_*`/`EDGE_*` constants; `plate_local_bounds`, `moving_geometry_rest_samples`, `moving_geometry_rest_proxies`. `study_config.py` (`CURVED_TIP_CLEARANCE_TOLERANCE_MM` live again as filter 8's clearance) | §7.4 as **not started** (built 2026-09-03, S1.47). The Dijkstra as a **`heapq` frontier like `dijkstra_surface`** — it is the same algorithm specialised to a layered DAG, relaxed one whole layer at a time in numpy; a heap here would walk ~5×10¹⁰ edges and never finish. `allow_tcp_through_plate`/`_branch_clears_ground` as existing (**deleted**, GUI checkbox too). `_begin_toolpath_precompute`'s `check_collision` **boolean** (now `filter_mode`, "planar"/"curved"). `PRECOMPUTE_CACHE_VERSION` as 6 (now **7**), or `build_export_segments()` as returning `[]` after a cache hit (fixed). The **tool point** as taking part in filters 6–8 (excluded by construction — IK pins it to the commanded waypoint, so including it rejects every printing pose; the nozzle is therefore still unguarded). Filter 9's pairs as **two apart** in the chain (**three** — `(i,i+2)` nest permanently on the FR5 wrist and fired on every branch at a true 30mm gap) or as **one OBB per link** (multi-proxy, 80mm bands — one box per link rejected all 8 branches at planar waypoint 0). E1 as applying to **every** adjacent pair (feed-to-feed **only**; travel steps are legitimately large — 57.32° overall vs 4.58° in-segment on planar). The reference guide's **35°** step limit or **2.0mm** surface clearance as this project's (**30°** via `JOINT_STEP_MAX_DEG`, **1.0mm** via `CURVED_TIP_CLEARANCE_TOLERANCE_MM`). And above all: the orientation search as having **fixed curved reachability** (it did **not** — 76% RX / 70% TX admissible, up 8.5× from 8.9%/9.3%, but ~24% of feed points have no IK solution at any of the 540 orientations, so curved still aborts and the S1.45 **placement question is now the blocker**). Planar, by contrast, *is* fixed: 181,375/181,375 at the real User Frame |
 
 **Current 6.8 amendment:** the adopted setup moves the plate to
 `[-570, -300, 0]` at working height, loads the curved model, then loads the
@@ -49,16 +49,40 @@ Recorded as a finding, not reverted. The curved pipeline was **deliberately not
 re-run**. To reproduce the old setup, type the poses in by hand. See
 **`wiki/001_Inbox/2026-08-15_real_user_frame_reachability.md`**.
 
-⚠ **Read those counts correctly (S1.46, roadmap 7.4).** The supervisor has
-confirmed the **7.3 configuration is correct**, so "91% geometrically
-unreachable" is not a statement about the arm. It measures **one commanded
-orientation per waypoint** — S1.36 pins tool Z to the exact surface normal and
-fixes the roll, giving at most **8** IK candidates before a point is declared
-`"Unreachable"`. §7.4 searches ~**480** per waypoint (20 deg tilt cone x 60 roll
-slots x 8 branches). The planar abort is likewise a *shape* problem, not a pose
-problem: S1.40's infinite plane is valid only while the plate sits below the
-whole arm. Both are addressed in **S1.46**, and until it is run the true
-reachability at the real frame is **unknown in both directions**.
+✅ **Now measured (S1.47, 2026-09-03) — read the counts above as superseded.**
+§7.4 searched **540** commanded orientations per waypoint (9 tool-axis
+directions x 60 roll slots, up to 8 IK branches each) at the real User Frame:
+
+| Path | 7.3 (one orientation) | 7.4 (540 searched) |
+|---|---|---|
+| **Planar** | aborts at waypoint 0 of 181,375 | **181,375 / 181,375 solved** — fixed |
+| Curved RX | 226 / 2,527 (8.9%) | **1,922 / 2,527 admissible (76.1%)** |
+| Curved TX | 186 / 2,000 (9.3%) | **1,410 / 2,000 admissible (70.5%)** |
+
+The planar abort **was** purely a shape problem and the finite plate model fixed
+it outright. The curved counts **were** largely an artefact of one commanded
+orientation — reachability rises 8.5x — **but not entirely**: 494 RX and 516 TX
+feed points have no IK solution at *any* of the 540 orientations, so curved still
+cannot be planned end-to-end and the precompute correctly aborts. Do not describe
+curved reachability as "restored".
+
+**And the root cause is now found — read this before touching curved placement.**
+`load_curved_model()` centres the workpiece on the **build plate mesh's** bbox
+centre, not on the User Frame. `BambuLab_BuildPlate.obj` is 258×276mm with its
+origin at a corner, so the centre sits at plate-local `(129, 128)`, putting the
+workpiece **843.1mm** from the base instead of the User Frame origin's
+**737.5mm** — a **+105.6mm** offset from a stand-in asset. The FR5's flange reach
+is `a2+a3+d5` = **922mm**, and reachability falls off a cliff exactly there (100%
+below 900mm, 94% at 900–920mm, **~50% at 920–950mm**). Remove only that offset
+and both layers are **100% reachable** at the same real frame.
+
+So: **not the frame, not the arm, not the commanded pose, not the filters.** A
+control at the default plate pose gives 2,527/2,527 RX and 2,000/2,000 TX
+admissible with all nine filters live. ⚠ **Do not tune the filters to "fix"
+curved reachability** — they are measured not to be the cause. The open question
+is narrow: *is user frame 1 defined at the corner of the print bed or at its
+centre?* (the code assumes corner). Measurements, the confirming test and three
+fix options: **`wiki/001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md`**.
 
 ⚠ **Those RX/TX counts predate Stage 7.1 and have not been re-validated.**
 S1.43 moved the TCP 310.97mm, which changes every solved branch. The curved
@@ -73,11 +97,20 @@ normals rather than acting as an obstacle. A solved TX run drives the arm
 through the shoulder mockup. Open question, recorded in
 **`wiki/003_Guides/CurvedModel_PrintSetup.md`**.
 
-⚠ **Scheduled to close at 7.4 (S1.46), but not closed yet.** §7.4 adopts
-surface-mesh (2.0mm) and self-collision (5.0mm) filters from
-`examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md` — the first
-mesh-vs-mesh checks this project will have. Nothing is built; the statement
-above is current.
+✅ **Closed for the ARM at 7.4 (S1.47), 2026-09-03 — the paragraph above is
+history.** Filter 8 tests the arm links against each layer's own print surface
+(1.0mm, from `CURVED_TIP_CLEARANCE_TOLERANCE_MM`) and filter 9 tests the arm
+against itself (5.0mm, multi-proxy OBB). Demonstrated on a real TX pose
+(waypoint 518) with an arm link **0.71mm** from the surface, which the pre-7.4
+curved path would have accepted.
+
+⚠ **Still open for the NOZZLE, and do not let the above be read as closing it.**
+The tool's entire collision body is the single TCP point (since 7.1), and it is
+**deliberately excluded** from filters 6–8: IK pins it to the commanded
+waypoint, which lies on the print surface, so including it would reject every
+printing pose — the same trap that made S1.37's check inert. Nothing guards the
+nozzle against the workpiece. That needs a corrected tool asset (`nozzle.obj` is
+163.47mm against tool=1's 196.91mm), not another filter.
 
 ⚠ **Worse since Stage 7.2 (S1.44), and the preceding rows are stale on this.** The
 **curved** path now has *no* geometric rejection at all — it lost the
@@ -89,14 +122,14 @@ unchanged** and keeps Stage 6.8 behaviour exactly. Wherever a row above says the
 tangent-plane or curved-plate check is live, read
 `CurvedModel_PrintSetup.md` "Changed in Stage 7.2" instead.
 
-⚠ **And reversed again at 7.4 (S1.46) — check which way the wind is blowing.**
-S1.44 narrowed this project's own pose rejection to *planar only*; S1.46 gives
-**both** paths a nine-filter set and replaces S1.40's infinite plane with a
-finite footprint + slab. Net effect is **stricter**, not looser: only the
-*commanded pose* relaxes (tool axis perpendicular within 20 deg, roll searched).
-S1.44's **seven spec rows are untouched** by this — the narrowing and the table
-were always two separate questions. Nothing is built, so today the paragraph
-above still describes the code.
+✅ **And reversed again at 7.4 — BUILT 2026-09-03 (S1.47), so the paragraph
+above no longer describes the code.** S1.44 narrowed this project's own pose
+rejection to *planar only*; 7.4 gives **both** paths the nine-filter set and
+replaces S1.40's infinite plane with a finite footprint + slab. Net effect is
+**stricter**, not looser: only the *commanded pose* relaxes (tool axis
+perpendicular within 20 deg, roll searched over 60 slots). S1.44's **seven spec
+rows are untouched** — the narrowing and the table were always two separate
+questions.
 
 **Where job constants live (S1.41, amends S1.33).** The four "assumed, not
 measured" curved-print constants are **material- and nozzle-dependent**, so
@@ -121,6 +154,9 @@ the same shape — it calls `_clear_gcode_print_mesh()`, so it is not
 
 **Stage 7 sub-stage order.** §7.1 real TCP offset → §7.2 rejection criteria →
 §7.3 real User Frame → §7.4 orientation search → §7.5 job export → §7.6 GUI.
+**§7.1–7.4 are built; §7.5–7.6 are not.** §7.5 should target the **planar** path:
+it is the one that validates clean at the real User Frame (S1.47), and the cache
+gap §7.5 was told to fix first was already closed by §7.4's schema bump.
 The order is load-bearing:
 §7.2's identity check compares against a reference TCP 6D pose that only exists
 once §7.1's real offset is wired in, which is why the criteria cannot lead the

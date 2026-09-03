@@ -1,8 +1,27 @@
 ---
-status: inbox
+status: closed
+closed: 2026-09-03
+closed_by: roadmap 7.4 (settled.md S1.47)
 stage: post-7.2
 scope: geometry_backend.py (_orientation_frames_for_points)
 ---
+
+> ✅ **CLOSED 2026-09-03 by roadmap 7.4 — and none of the three options below
+> was implemented.** The roll about the tool axis is now a *searched* variable
+> (60 slots), resolved globally by continuity cost in the candidate DAG, so the
+> discontinuity this note diagnoses is removed by construction rather than
+> patched. `_orientation_frames_for_points()` is **unchanged** — the `argmin`
+> flip described below is still in the code, but it now only orients the 6.4
+> display triads and the search cone's axis, never the commanded pose.
+>
+> Measured after 7.4: the planar path's worst step *within* a segment is
+> **4.58°** against the 30° limit, and `validate_job` passes row 5 on the full
+> 181,375-waypoint job. The curved layers cannot be measured end-to-end at the
+> real User Frame for an unrelated reason — ~24% of feed waypoints are
+> geometrically unreachable there, so the precompute aborts. See **S1.47**.
+>
+> The root-cause analysis below stands and is worth keeping: it is the evidence
+> that pinning a free DOF per-waypoint was the defect.
 
 # Curved jobs fail the exchange spec's joint-step row — the reference-axis flip
 
