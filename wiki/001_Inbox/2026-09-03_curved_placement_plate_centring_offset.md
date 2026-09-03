@@ -1,9 +1,66 @@
 ---
-status: inbox
+status: closed
+closed: 2026-09-03
+closed_by: CURVED_MODEL_XY_OFFSET_MM (study_config.py), settled.md S1.48
 stage: post-7.4
 scope: geometry_backend.py (load_curved_model), assets/buildPlate/BambuLab_BuildPlate.obj
 blocks: re-running the curved pipeline at the real User Frame; roadmap 7.5 for the curved path
 ---
+
+> ✅ **CLOSED 2026-09-03 — fixed the same day it was found, by measurement, per
+> explicit direction not to gate on asking the supervisor a fresh question:**
+> the User Frame and TCP calibration data are already measured and verified, so
+> whichever placement makes the job reachable **is** correct.
+>
+> Fix option 1/3 hybrid, exactly as sketched below: `load_curved_model()` no
+> longer derives XY placement from the build-plate mesh at all. A new
+> `CURVED_MODEL_XY_OFFSET_MM = np.array([0.0, 0.0])` in `study_config.py`
+> centers the workpiece directly on the User Frame origin — the offset
+> confirmed below to work, made an explicit, named, study-level constant rather
+> than a silent side effect of a stand-in asset's bounding box. Two-line diff in
+> `geometry_backend.py`'s `T_placement` (see the fix sketch below, implemented
+> verbatim); the `plate = self.load_mesh(...)` load for bounds is deleted
+> outright, since nothing else in the function used it.
+>
+> **Full rebuild, real User Frame, headless, 2026-09-03:**
+>
+> | Layer | Feed points | Solved | `validate_job` |
+> |---|---|---|---|
+> | RX | 2,527 | **3,175 / 3,175 waypoints (100%)** | **ACCEPTED** |
+> | TX | 2,000 | **2,688 / 2,688 waypoints (100%)** | **ACCEPTED** |
+>
+> Matches the "at the User Frame origin" test below exactly, now run through the
+> *actual* 7.4 pipeline (540-orientation search, all nine filters, the candidate
+> DAG) rather than the coarser IK-only sampling that test used — confirming the
+> earlier result wasn't an artefact of that sampling.
+>
+> Geodesic travel totals matched the S1.35 baseline **exactly** (RX 690mm vs
+> 5157mm file-order, TX 607mm vs 4848mm) as a sanity check that only XY moved —
+> rigid translation, so intrinsic geodesic distances couldn't have changed if
+> the fix were correct, and they didn't.
+>
+> One observation, not a problem: the max joint step **overall** on the solved
+> path is large (81.74° RX, 275.33° TX) — but measured to occur only between two
+> **travel** waypoints, never within a feed segment (worst within-segment step:
+> 29.93° RX / 29.85° TX, both under the 30° limit, which is exactly why
+> `validate_job` accepted). E1's hard rejection is scoped to feed-to-feed edges
+> only (see `settled.md` S1.47), so this is architecturally expected, and travel
+> waypoints are dropped from export regardless. Might read as a visual "jump" in
+> playback; does not affect correctness or export.
+>
+> Fresh `.npz` caches saved to `assets/models/curved/curved_{rx,tx}.precompute.npz`.
+> No `PRECOMPUTE_CACHE_VERSION` bump — the cache key already hashes waypoint
+> positions, so the old caches missed automatically.
+>
+> **Visually confirmed, not just predicted:** a headless screenshot of "Load
+> Curved Model" at the real frame shows the workpiece sitting at the User
+> Frame's origin triad — the plate mesh's corner, since its own local origin is
+> a corner — and extending past the visible plate's edge, rather than centred
+> on it. Exactly the expected consequence, left as-is: the plate mesh's
+> correspondence to the real fixture is a separate open question (see
+> "Secondary" below), and moving it to visually match is not this fix's job.
+>
+> Full record: `settled.md` **S1.48**.
 
 # Curved placement — the workpiece is centred on a stand-in plate mesh, 105.6mm too far out
 

@@ -35,6 +35,28 @@ measured-property writeup this guide's numbers come from.
 
 ## How it's computed
 
+> ⚠ **Read this before step 4 below.** Step 4's centering description used to
+> say the workpiece is centred on the **build-plate mesh's** own bounding box.
+> That was 6.1's original design, and it turned out to be a bug, found and
+> fixed 2026-09-03 (roadmap 7.4 follow-up, `settled.md` **S1.48**):
+> `BambuLab_BuildPlate.obj` is a stand-in asset with its local origin at a
+> corner, not a centre, and centering on it silently shifted the workpiece
+> **+105.6mm** outward — enough to make the curved toolpath unreachable at the
+> real calibrated User Frame (past the FR5's 922mm flange reach).
+>
+> **The workpiece is now centred on the User Frame origin, not on the plate
+> mesh.** Step 4 below has been corrected to describe this directly — read it
+> as current, not historical. **If you are pointing this feature at a
+> different curved-print job (a different `study_config.py`), this is the one
+> placement fact to get right: your workpiece's own XY bounding-box centre
+> lands at `CURVED_MODEL_XY_OFFSET_MM` relative to the User Frame origin, and
+> the default is `(0.0, 0.0)` — i.e. centred exactly ON the origin.** Do not
+> assume it will land on, or relative to, wherever the build-plate mesh is
+> drawn; that mesh has no bearing on placement at all since this fix. Full
+> record, including why this was decided by measurement rather than by asking
+> which convention the User Frame uses:
+> `wiki/001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md`.
+
 `VisContent.load_curved_model()` and its helpers (`geometry_backend.py`):
 
 1. `read_ply_polyline(filepath)` — a hand-rolled ASCII PLY reader. These
@@ -76,9 +98,15 @@ measured-property writeup this guide's numbers come from.
      vs. face-down into the plate (`-90°` put it face-down, unprintable —
      wrong; `+90°` is what's shipped).
    - The **rotated** assembly's combined XY bounding-box center is
-     translated to the build plate mesh's own local XY bbox-center
-     (derived from `plate.bounds` at load time, not a hardcoded number —
-     the plate mesh's local origin is a corner, not its center).
+     translated to `CURVED_MODEL_XY_OFFSET_MM` (`study_config.py`, default
+     `(0.0, 0.0)`) **relative to the User Frame origin** — by default,
+     centred directly on that origin. (Was: centred on the build-plate
+     mesh's own local XY bbox-center, derived from `plate.bounds` at load
+     time. Changed 2026-09-03, `settled.md` **S1.48** — see the callout
+     above. The plate mesh's local origin is a corner, not a centre, so
+     that old placement put the workpiece **+105.6mm** further from the
+     robot base than the User Frame origin itself, at the real calibrated
+     frame — enough to push it past the arm's reach.)
    - Z is translated so the rotated assembly's lowest point lands at
      `PLATE_THICKNESS_MM` in plate-local space — the same
      resting-face/top-face compensation `load_build_plate()`/
@@ -162,6 +190,7 @@ curved-print job):
 | `CURVED_MODEL_DIR` | Path to the curved-model assets — `assets/models/curved/`. |
 | `CURVED_LAYERS` | List of per-layer config dicts (`name`, `curve_files`, `curve_structure_name`, `curve_color`, `surface_file`, `surface_structure_name`, `surface_color`) — one entry per print layer, RX and TX by default. |
 | `CURVED_MODEL_ROTATE_X_DEG` | The fixed placement rotation about local X, degrees — 90° puts the printable surface face-up. |
+| `CURVED_MODEL_XY_OFFSET_MM` | **Where the workpiece's own XY bbox centre lands, relative to the User Frame origin.** `(0.0, 0.0)` — centred directly on the origin — by default. Not derived from the build-plate mesh (see the callout above `load_curved_model()`'s step 4). Change only after a fresh reachability measurement at the real frame matching S1.48's — don't guess a new offset for a different workpiece without measuring. |
 | `CURVED_OBSTACLE_FILE` / `CURVED_OBSTACLE_STRUCTURE_NAME` / `CURVED_OBSTACLE_COLOR` | The optional non-print collision body (`Surface_Bot.obj`) and its display name/color. |
 
 Generic engine tuning, still module-level constants in `geometry_backend.py`:
@@ -177,17 +206,20 @@ Generic engine tuning, still module-level constants in `geometry_backend.py`:
   `transform_points()`, `_register_curve_layer()`, `load_curved_model()` —
   all generic, project-agnostic (settled.md S1.33).
 - `examples/curved_surface_printing/study_config.py`: `CURVED_LAYERS`,
-  `CURVED_MODEL_DIR`, `CURVED_MODEL_ROTATE_X_DEG`, `CURVED_OBSTACLE_*` — the
-  RX/TX-specific config `geometry_backend.py` imports.
+  `CURVED_MODEL_DIR`, `CURVED_MODEL_ROTATE_X_DEG`, `CURVED_MODEL_XY_OFFSET_MM`,
+  `CURVED_OBSTACLE_*` — the RX/TX-specific config `geometry_backend.py` imports.
 - `gui_panel.py`: "Load Curved Model" button, "I/O Operations" section —
   the only caller of `load_curved_model()`.
 - `wiki/002_Architecture/settled.md` S1.29 — the placement decision and its
   same-day rotation amendment (including the +90°/-90° test that settled
-  the rotation sign); S1.1 — why `read_ply_polyline`/`reconstruct_polylines`/
-  `transform_points` are module-level functions, not `VisContent` methods
-  (stateless, no instance data touched); S1.2/S1.3 — why static workpiece
-  geometry skips the Delta transform; S1.33 — the generic-mechanism /
-  study-config split.
+  the rotation sign); **S1.48 — the XY-placement fix (centred on the User
+  Frame origin, not the plate mesh) and why it was necessary**; S1.1 — why
+  `read_ply_polyline`/`reconstruct_polylines`/`transform_points` are
+  module-level functions, not `VisContent` methods (stateless, no instance
+  data touched); S1.2/S1.3 — why static workpiece geometry skips the Delta
+  transform; S1.33 — the generic-mechanism / study-config split.
+- `wiki/001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md` —
+  full measurements behind S1.48 (closed).
 - `tutorials/Stage6_README.md` — sub-stage 6.1 and the Open Questions
   section.
 - `wiki/001_Inbox/2026-07-18_curved_surface_assets.md` — the asset survey

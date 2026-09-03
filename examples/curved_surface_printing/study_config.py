@@ -10,8 +10,23 @@ version of this module and geometry_backend.py's one import would point at it
 instead.
 """
 
+import numpy as np
+
 CURVED_MODEL_DIR = "assets/models/curved"
 CURVED_MODEL_ROTATE_X_DEG = 90.0  # CAD "+z up" assumption was wrong -- see settled.md S1.29
+
+# Where the workpiece's own XY bbox center lands, relative to the User Frame
+# origin -- roadmap 7.4 follow-up. Deliberately NOT derived from the build-plate
+# mesh: that was the bug. BambuLab_BuildPlate.obj is a stand-in asset with its
+# local origin at a corner (258x276mm), and centering the workpiece on ITS bbox
+# center added a measured +105.6mm outward shift -- enough to push the workpiece
+# past the arm's a2+a3+d5 = 922mm flange reach at the real calibrated User Frame.
+# (0.0, 0.0), directly on the origin, is MEASURED to give 100% IK reachability on
+# both RX and TX at that frame (a plate-mesh-centered placement gave only
+# 76%/70% even with the full 7.4 orientation search). Change this only after a
+# fresh measurement matching that one -- don't guess a new offset.
+# See wiki/001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md.
+CURVED_MODEL_XY_OFFSET_MM = np.array([0.0, 0.0])
 
 CURVED_LAYERS = [
     {

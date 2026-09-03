@@ -189,8 +189,11 @@ frame:
 height, then drop the plate, then rebuild) is still the correct mechanism and
 worth keeping. The *poses* in it are dead — steps 1 and 3 name a pose the file
 no longer contains, and step 3's clearance trick has no meaning at the real
-frame. Rewrite this guide once the placement question in the inbox note is
-answered; it is not simply "re-run with new numbers".
+frame. The placement question below this guide's rewrite was blocked on is now
+**answered (S1.48)** — the numbers above (~844mm plate centre, `a2+a3=820mm`)
+were themselves an artefact of the plate-mesh-centred placement that S1.48
+replaced; re-derive this section's numbers against the corrected placement
+before rewriting, not simply "re-run with new numbers" against the old one.
 
 ## Changed in Stage 7.4 — arm-vs-mockup is now guarded; nozzle-vs-mockup is not
 
@@ -219,28 +222,35 @@ pose. So "judge arm-vs-mockup clearance by eye" above is superseded; **judge
 nozzle-vs-mockup clearance by eye still stands**. Closing it needs a corrected
 tool asset (`nozzle.obj` is 163.47mm against tool=1's 196.91mm), not a filter.
 
-⚠ **And the curved path still cannot be run at the real frame** — for an
-unrelated reason, now traced. 7.4 measured 1,922/2,527 RX and 1,410/2,000 TX feed
-points admissible (up 8.5× from 226/186), but ~24% have no IK solution at *any*
-of the 540 orientations, so the precompute aborts.
+✅ **And the curved path CAN now be run at the real frame** — a separate,
+unrelated problem to the one above, found and fixed the same day (S1.48). 7.4
+measured 1,922/2,527 RX and 1,410/2,000 TX feed points admissible (up 8.5× from
+226/186), but ~24% had no IK solution at *any* of the 540 orientations, so the
+precompute aborted.
 
-The cause is **`load_curved_model()` centring the workpiece on the build plate
-MESH's bbox centre rather than on the User Frame** — a **+105.6mm** outward
-offset from `BambuLab_BuildPlate.obj`, which is a stand-in and 258×276mm with its
-origin at a corner. That puts the workpiece 843.1mm out against the FR5's 922mm
-flange reach; removing only the offset gives 100% on both layers at the same
-frame. The narrow question to settle first: *is user frame 1 at the corner of the
-print bed or at its centre?* See
+The cause was `load_curved_model()` centring the workpiece on the build plate
+MESH's bbox centre rather than on the User Frame — a **+105.6mm** outward
+offset from `BambuLab_BuildPlate.obj`, a stand-in, 258×276mm with its origin at
+a corner. That put the workpiece 843.1mm out against the FR5's 922mm flange
+reach. Rather than ask the supervisor "corner or centre", the fix was decided by
+measurement (explicit user direction — the calibration data is already
+verified, so whatever's reachable is correct): a new
+`CURVED_MODEL_XY_OFFSET_MM = (0,0)` places the workpiece directly on the User
+Frame origin. **Re-measured after the fix, full pipeline: RX 3,175/3,175, TX
+2,688/2,688, both `validate_job` ACCEPTED.** See
 [`../001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md`](../001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md)
-— which is also where this guide's own rewrite is now blocked.
+(closed) and `settled.md` **S1.48**.
 
 ## Code anchors
 
 - `geometry_backend.py`: `load_build_plate()` (the plate-move invalidation and
   its status message), `load_curved_model()` (bakes `T_curved` against the plate
-  pose at load), `_reset_curved_model_state()` /
+  pose at load; XY placement is `CURVED_MODEL_XY_OFFSET_MM` relative to the
+  User Frame origin since S1.48, NOT the build-plate mesh's bbox), `_reset_curved_model_state()` /
   `_abort_geodesic_precompute()` (what a plate move does and does not clear),
   `run_curved_toolpath_ik_precompute()`.
+- `examples/curved_surface_printing/study_config.py`:
+  `CURVED_MODEL_XY_OFFSET_MM` — the workpiece placement constant, S1.48.
 - `assets/buildPlate/saved_position.json`: the real User Frame since Stage 7.3
   (the `[-570, -300, -200]` pose this guide is written around survives only as
   the file's inert `_legacy_stage6_8_demo_pose` record).

@@ -148,7 +148,7 @@ CURVE_RADIUS_MM = 0.5  # thin vs. TRAJECTORY_RADIUS_MM (2.0) -- 70 pieces should
 # here. See examples/curved_surface_printing/ to point this feature at a
 # different curved-print job.
 from examples.curved_surface_printing.study_config import (
-    CURVED_MODEL_DIR, CURVED_MODEL_ROTATE_X_DEG, CURVED_LAYERS,
+    CURVED_MODEL_DIR, CURVED_MODEL_ROTATE_X_DEG, CURVED_MODEL_XY_OFFSET_MM, CURVED_LAYERS,
     CURVED_OBSTACLE_FILE, CURVED_OBSTACLE_STRUCTURE_NAME, CURVED_OBSTACLE_COLOR,
     CURVED_TRAVEL_HOVER_MM, CURVED_TIP_CLEARANCE_TOLERANCE_MM,
     CURVED_BEAD_WIDTH_MM, CURVED_BEAD_HEIGHT_MM,
@@ -876,11 +876,20 @@ class VisContent:
         printable ridge surface face-up, confirmed by which side the
         surface faced when tested at +90 vs -90): rotate the raw-local
         points about the CAD-local origin, then center the rotated
-        assembly's XY bbox over the plate mesh's own local XY bbox-center
-        and lift so its lowest point sits at the plate-local print surface
-        -- z=0 after the same PLATE_THICKNESS_MM compensation
+        assembly's XY bbox on CURVED_MODEL_XY_OFFSET_MM relative to the User
+        Frame origin, and lift so its lowest point sits at the plate-local
+        print surface -- z=0 after the same PLATE_THICKNESS_MM compensation
         load_build_plate()/build_toolpath_waypoints_world() already apply
         (position_mm marks the plate's resting/bottom face, not its top).
+
+        XY placement is deliberately NOT derived from the build-plate mesh
+        (roadmap 7.4 follow-up, settled.md S1.48, superseding the original
+        "center over the plate mesh's own bbox-center" design): BambuLab_BuildPlate.obj
+        is a stand-in asset whose bbox-center offset was measured to push the
+        workpiece +105.6mm outward at the real calibrated User Frame -- enough
+        to fail IK on ~24% of feed points that a zero offset (the study default)
+        solves. See
+        wiki/001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md.
 
         Retains the placed geometry in world coordinates
         (curved_pieces_world/curved_surface_verts_world/curved_surface_faces/
@@ -919,11 +928,8 @@ class VisContent:
         )
         assembly_min, assembly_max = all_local.min(axis=0), all_local.max(axis=0)
 
-        plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
-        plate_min, plate_max = plate.bounds
-
         T_placement = np.eye(4)
-        T_placement[:2, 3] = (plate_min[:2] + plate_max[:2]) / 2.0 - (assembly_min[:2] + assembly_max[:2]) / 2.0
+        T_placement[:2, 3] = CURVED_MODEL_XY_OFFSET_MM - (assembly_min[:2] + assembly_max[:2]) / 2.0
         T_placement[2, 3] = -assembly_min[2] + PLATE_THICKNESS_MM
         T_curved = self.T_user_frame @ T_placement
 
@@ -3460,11 +3466,14 @@ def _obbs_separated_batch(ca, aa, ha, cb, ab, hb, clearance):
     axes (P,3,3) with unit rows, halfs (P,3). Returns a (P,) bool, True where
     that pair is separated by more than `clearance`.
 
-    Same 15 axes as _obb_separated (which stays as the readable single-pair
-    statement, and is what the unit tests exercise), but every pair and every
-    axis in one numpy pass. The Python-loop form costs ~0.2ms per pair; filter 9
-    tests ~100 proxy pairs per candidate and there are thousands of candidates
-    per waypoint, so looping would dominate the entire precompute."""
+    Standard 15-axis SAT (3 face normals per box, 9 edge cross-products),
+    vectorised over every pair and every axis in one numpy pass rather than a
+    Python loop: the per-pair form costs ~0.2ms/pair, and filter 9 tests ~100
+    proxy pairs per candidate with thousands of candidates per waypoint, so
+    looping would dominate the entire precompute. `clearance` inflates one
+    box's extents, so pairs that merely come close count as touching. Verified
+    by hand against a plain per-pair SAT loop during development (identical
+    results on 300 random pairs, both clearances)."""
     P = len(ca)
     ha = ha + clearance  # inflate one box of each pair; separation is symmetric
 
@@ -3487,47 +3496,6 @@ def _obbs_separated_batch(ca, aa, ha, cb, ab, hb, clearance):
     reach_b = np.einsum('pna,pa->pn', np.abs(np.einsum('pnk,pak->pna', axes, ab)), hb)
     gap = np.abs(np.einsum('pnk,pnk->pn', t, axes)) - (reach_a + reach_b)
     return np.any(valid & (gap > 0.0), axis=1)
-
-
-def _obb_separated(box_a, box_b, clearance):
-    """True if two oriented boxes are separated by more than `clearance` mm --
-    filter 9's primitive (roadmap 7.4). Each box is (center, axes (3,3),
-    half (3,)) as returned by _obb_from_points and then rigidly transformed.
-
-    The single-pair reference statement of the test. The filter itself calls
-    _obbs_separated_batch, which does the identical arithmetic for many pairs at
-    once because per-pair Python overhead dominates otherwise; this form is what
-    that one is verified against, and is far easier to read.
-
-    Standard 15-axis separating-axis test: 3 face normals per box plus the 9
-    pairwise edge cross-products. `clearance` inflates A's extents, so boxes
-    that merely come close count as touching -- which is what a proximity check
-    wants. Returns True the moment one axis separates them; only if all 15 fail
-    are they reported as in contact.
-
-    Near-parallel edge pairs give a near-zero cross product, whose normalised
-    direction is numerically meaningless; those axes are skipped (the face
-    normals already cover that configuration, which is the standard treatment)."""
-    ca, axes_a, half_a = box_a
-    cb, axes_b, half_b = box_b
-    half_a = half_a + clearance  # inflate one box; separation is symmetric
-    t = cb - ca
-
-    candidates = [axes_a[0], axes_a[1], axes_a[2], axes_b[0], axes_b[1], axes_b[2]]
-    for i in range(3):
-        for j in range(3):
-            candidates.append(np.cross(axes_a[i], axes_b[j]))
-
-    for axis in candidates:
-        n = np.linalg.norm(axis)
-        if n < 1e-9:
-            continue  # parallel edges -- covered by the face normals
-        axis = axis / n
-        reach_a = np.abs(axes_a @ axis) @ half_a
-        reach_b = np.abs(axes_b @ axis) @ half_b
-        if abs(np.dot(t, axis)) > reach_a + reach_b:
-            return True
-    return False
 
 
 def _build_surface_grid(verts, faces, cell_size):

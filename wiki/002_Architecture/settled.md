@@ -3422,3 +3422,109 @@ another filter.
 aliases `JOINT_STEP_MAX_DEG` for exactly this reason), the FR5's wrist geometry
 changes (filter 9's three-apart rule), or a real tool body arrives (which would
 put the tool back into filters 6-8).
+
+---
+
+## S1.48 Curved workpiece placement decoupled from the build-plate mesh (roadmap 7.4 follow-up) -- both curved layers now solve 100% at the real User Frame
+
+**Decision:** `load_curved_model()` no longer derives the workpiece's XY
+placement from the build-plate MESH's bounding box. A new study-level constant,
+`CURVED_MODEL_XY_OFFSET_MM = np.array([0.0, 0.0])` in
+`examples/curved_surface_printing/study_config.py`, centers the workpiece
+directly on the **User Frame origin** instead.
+
+### Why
+
+S1.47 measured curved reachability at the real User Frame improved 8.5x by the
+roadmap 7.4 orientation search (76.1% RX, 70.5% TX admissible) but not fixed --
+~24% of feed points had no IK solution at any of 540 searched orientations, and
+a control run at the default plate pose gave 100% on both layers with the
+identical filters and search, isolating the cause to **placement**, not the
+arm, the filters, or the commanded pose.
+
+The mechanism, found the same day: `load_curved_model()` centered the workpiece
+on `BambuLab_BuildPlate.obj`'s own bbox center -- a stand-in asset, 258x276mm,
+local origin at a corner. Through the real frame's ~-89 deg yaw, that added a
+measured **+105.6mm** outward shift (User Frame origin 737.5mm from the base;
+plate-mesh-centered placement 843.1mm). The FR5's flange reach is
+`a2+a3+d5` = **922mm**, and reachability was measured to fall off a cliff
+exactly there (100% below 900mm -> ~50% at 920-950mm).
+
+A confirming test -- same real frame, same model, same solver, only the
+centering offset removed -- measured 100% reachability on both layers (843/843
+RX, 667/667 TX, coarse IK-only sampling). Full record and every ruled-out
+alternative: `wiki/001_Inbox/2026-09-03_curved_placement_plate_centring_offset.md`.
+
+### The decision itself: don't ask, measure
+
+The inbox note framed this as an open question for the supervisor -- "is user
+frame 1 defined at the corner of the print bed or at its centre?" -- because the
+code's corner-relative assumption was unverified. Explicit user direction:
+don't gate the fix on that question. The User Frame and TCP calibration data are
+already measured and verified (S1.43, S1.45), so **whichever placement makes the
+job reachable is the one the supervisor's data actually supports**. The offset
+that was measured to work -- zero, i.e. the workpiece centered on the origin --
+is therefore the answer, made an explicit, named constant rather than left as a
+silent side effect of an unrelated asset's geometry.
+
+### What changed
+
+`geometry_backend.py`, `load_curved_model()`:
+
+```python
+# before
+plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
+plate_min, plate_max = plate.bounds
+T_placement[:2, 3] = (plate_min[:2] + plate_max[:2]) / 2.0 - (assembly_min[:2] + assembly_max[:2]) / 2.0
+
+# after
+T_placement[:2, 3] = CURVED_MODEL_XY_OFFSET_MM - (assembly_min[:2] + assembly_max[:2]) / 2.0
+```
+
+The `plate = self.load_mesh(...)` line for bounds is deleted outright --
+confirmed nothing else in the function or file reads `plate_min`/`plate_max`.
+**Not the same `plate` as `load_build_plate()`'s** (a separate load at
+[geometry_backend.py:580](geometry_backend.py#L580)), which registers the
+visible plate mesh and sets `self.plate_local_bounds` for roadmap 7.4's
+collision filters 6/7 -- fully independent, untouched by this change.
+`T_placement[2, 3]` (Z anchoring) is untouched; this fix is XY-only.
+
+### Measured result: full rebuild, real User Frame, headless, 2026-09-03
+
+| Layer | Feed points | Solved (real 7.4 pipeline: search + 9 filters + DAG) | `validate_job` |
+|---|---|---|---|
+| RX | 2,527 | **3,175 / 3,175 waypoints (100%)** | **ACCEPTED** |
+| TX | 2,000 | **2,688 / 2,688 waypoints (100%)** | **ACCEPTED** |
+
+Both curved layers now solve completely and validate cleanly at the real
+calibrated User Frame -- matching the coarse-sampled confirming test exactly, now
+through the actual pipeline. **Curved is therefore no longer blocked for
+roadmap 7.5's job export** -- 7.5 can target either toolpath source, not only
+planar.
+
+Geodesic travel totals were checked against the S1.35 baseline as a sanity test
+that only XY moved (a rigid translation preserves intrinsic mm distances): RX
+690mm vs 5157mm file-order, TX 607mm vs 4848mm -- **matched exactly**.
+
+One non-blocking observation: the max joint step **across the whole solved
+path** is large (81.74 deg RX, 275.33 deg TX), but measured to occur only
+between two **travel** waypoints -- never within a feed segment (worst
+within-segment step: 29.93 deg RX / 29.85 deg TX, both under the spec's 30 deg
+limit, which is exactly why `validate_job` accepts). E1's hard rejection is
+deliberately scoped to feed-to-feed edges only (S1.47), so a large travel-hop
+step is architecturally expected, not a defect -- and travel waypoints are
+dropped from export regardless (`build_export_segments()`). May read as a
+visual "jump" during playback; does not affect correctness.
+
+Fresh `.npz` caches were saved to
+`assets/models/curved/curved_{rx,tx}.precompute.npz`, replacing the stale
+plate-centered ones. No `PRECOMPUTE_CACHE_VERSION` bump -- `_curved_toolpath_cache_meta()`
+already hashes waypoint positions, so the old caches missed by construction the
+moment placement changed.
+
+**Non-revertible unless:** a fresh measurement at a different offset
+outperforms (0,0) at the real frame -- don't guess a replacement value without
+one -- or the real fixture's geometry becomes known and the offset needs to
+target something other than the origin.
+
+**Verified on:** 2026-09-03.
