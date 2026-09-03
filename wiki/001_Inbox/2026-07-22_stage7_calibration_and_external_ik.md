@@ -6,6 +6,13 @@ scope: geometry_backend.py, gui_panel.py, assets/buildPlate/saved_position.json,
 
 # Stage 7 — Real calibration + export to the external IK exchange format
 
+> ⚠ **Sub-stage numbering here is pre-renumber.** Roadmap 7.4 is now
+> *Orientation Search & Re-shaped Rejection* (`settled.md` **S1.46**). This
+> note's **§7.4 — Job Export** is now roadmap **7.5**, and its **§7.5 — GUI
+> Wiring** is now roadmap **7.6**. The section numbers below are left as written
+> because this is a dated record; `tutorials/Stage7_README.md` is the current
+> roadmap.
+
 ## Why
 
 Two supervisor docs landed (`docs/saved_coords_data_and_usage_EN.md`,

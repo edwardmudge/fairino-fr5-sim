@@ -2746,7 +2746,7 @@ to "the arm **and the nozzle body** pass through the mockup".
 `CURVED_TIP_CLEARANCE_TOLERANCE_MM` stays in `study_config.py` under a legacy
 marker -- a tuned material value, unimported.
 
-### Part 2 -- segments, pulled forward from 7.4
+### Part 2 -- segments, pulled forward from the export sub-stage (7.4 then, 7.5 now)
 
 Rows 5 and 6 need a segment concept neither path had. **Both sources already
 emit `(pos, is_feed_move)` waypoints**, and on each a segment is exactly a
@@ -2769,8 +2769,8 @@ robot/spec-level, and S1.41 reserves that module for material- and
 nozzle-dependent values.
 
 **Nothing calls `validate_job` or `build_export_segments` yet.** Both are
-module/class-level API with no caller: the export writer is 7.4 and the GUI
-hookup is 7.5. "Implemented" here means "built and verified headless", not
+module/class-level API with no caller: the export writer is 7.5 and the GUI
+hookup is 7.6. "Implemented" here means "built and verified headless", not
 "reachable from the app".
 
 - **Row 2 is circular** for a single-source project -- we *are* the calibration.
@@ -2779,12 +2779,12 @@ hookup is 7.5. "Implemented" here means "built and verified headless", not
   doc, so the pair catches a mistyped digit in either constant.
 - **Row 5 measures within a segment only.** A large jump *between* segments is
   legal -- the receiving side inserts a travel MoveJ there.
-- **Row 6** has no ply to count until 7.4, so it checks the structural invariant
+- **Row 6** has no ply to count until 7.5, so it checks the structural invariant
   the line count will inherit: positions, joints and normals must agree. Note
   this is **tautological for segments `build_export_segments` produced** -- it
   slices all three arrays with the same `sl`, so they cannot disagree. Same
   circularity as row 2, and kept for the same reason: it starts earning its keep
-  the moment 7.4 writes a real line count, or anything hand-builds a segment.
+  the moment 7.5 writes a real line count, or anything hand-builds a segment.
 - **Row 7 is WARN, and must not reject.** It is also a *different* notion from
   `solve_ik`'s `is_singular` (`|sin(theta5)| < 1e-6`, near-exact degeneracy);
   the spec's 2 deg band is far wider.
@@ -2886,9 +2886,9 @@ spec never contemplates exporting nothing. `results` is therefore **8 long**,
 row 0 first, then the seven in table order. A cached job still exports zero
 segments; it now says so loudly instead of passing.
 
-**Deferred to 7.4:** persisting `waypoint_positions`, `waypoint_is_feed` and the
+**Deferred to 7.5:** persisting `waypoint_positions`, `waypoint_is_feed` and the
 `R_target` Z column in the npz. That is a schema change
-(`PRECOMPUTE_CACHE_VERSION` 6 -> 7, every cache invalidated) and 7.4 needs those
+(`PRECOMPUTE_CACHE_VERSION` 6 -> 7, every cache invalidated) and 7.5 needs those
 positions in the exported ply anyway, so it pays for itself there and not here.
 `PRECOMPUTE_CACHE_VERSION` stays at **6** for this stage. Full diagnosis,
 including the cheaper curved-only half:
@@ -2897,6 +2897,24 @@ including the cheaper curved-only half:
 ---
 
 ## S1.45 Real calibrated User Frame adopted (roadmap 7.3) -- `saved_position.json` replaces the 6.8 demo pose; neither toolpath runs there, and that is the finding
+
+> ⚠ **The frame is confirmed correct; the *diagnosis* below is superseded by
+> S1.46 (roadmap 7.4).** The supervisor has confirmed the 7.3 configuration. The
+> measurements here stand -- 226/2,527 RX, 186/2,000 TX, planar aborting at
+> waypoint 0 -- but two conclusions drawn from them do not:
+>
+> - **"Placement, not calibration"** and **"genuine reach"**: these measure a
+>   *single commanded orientation per waypoint* (S1.36 pins tool Z to the exact
+>   normal and fixes the roll), which yields at most 8 IK candidates. They are
+>   not statements about the arm's envelope. S1.46 searches ~480 candidates per
+>   waypoint instead.
+> - **The planar abort as a reason to question the plate's pose**: it is a
+>   *shape* problem. S1.40's infinite plane is sound only while the plate sits
+>   below the whole arm; at +323.5mm it is not. S1.46 makes the model finite.
+>
+> Consequently the "not settled" list at the end of this entry is narrower than
+> it reads: the placement question is no longer blocking, it is a hypothesis
+> S1.46 can now test.
 
 **Decision:** `assets/buildPlate/saved_position.json` holds the **real
 calibrated User Frame**, `user_index=1` from
@@ -2982,7 +3000,7 @@ the plate's local origin, has no reach problem at all.
 ### What this settles, and what it deliberately leaves open
 
 **Settled:** the real frame stays. It is a measurement; the demo pose is not
-coming back, and 7.4's exporter is unblocked because it targets the *planar*
+coming back, and 7.5's exporter is unblocked because it targets the *planar*
 path at the default pose.
 
 **Not settled, and not to be guessed at:** whether the Bambu Lab plate mesh
@@ -2996,3 +3014,134 @@ correctly paired, just later than 7.3 planned.
 
 Full measurements, method and the open questions in priority order:
 `wiki/001_Inbox/2026-08-15_real_user_frame_reachability.md`.
+
+---
+
+## S1.46 Orientation search and a re-shaped filter set (roadmap 7.4) -- a waypoint is judged by whether *any* admissible pose reaches it, not by one commanded frame
+
+**Decision:** the curved planner stops commanding a single `R_target` per
+waypoint. It searches an orientation set, filters candidates with the nine
+checks adapted from a working external implementation
+(`examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md`), and selects
+the trajectory by global graph search rather than greedy per-waypoint ranking.
+
+This supersedes the *interpretation* in S1.45, not its measurements.
+
+### Why -- the failure was never reach
+
+S1.45 measured 226/2,527 RX and 186/2,000 TX feed points solving at the real
+User Frame and concluded "genuine reach ... placement, not calibration". The
+supervisor has since confirmed the 7.3 configuration is **correct**, which makes
+that conclusion untenable, and the mechanism is visible in S1.36: one commanded
+frame per waypoint (tool Z exactly on the outward normal, roll fixed by
+`argmin |a . z|`) yields **at most 8 IK candidates**. When none survives, the
+point reports `"Unreachable: no geometric solution for this pose"` -- which is a
+fact about that pose, not about the arm. The reference implementation searches
+**480 candidates per point** (60 roll slots x 8 branches) and succeeds at the
+same class of task.
+
+### Part 1 -- the relaxation (the only part that is a relaxation)
+
+- **Tool axis perpendicular within 20 deg**, not exactly. Supervisor's
+  instruction. Supersedes S1.36's "Z = the outward surface normal" as a hard
+  equality.
+- **Roll about the tool axis is searched, not pinned.** 60 slots, 6 deg apart,
+  wrapping. S1.36 established this DOF is *free* (the nozzle is rotationally
+  symmetric) and then spent it on a fixed world reference; that choice is what
+  produced the row-5 flips in S1.44. Searching it uses the same premise for a
+  better end.
+- **Parameterisation.** The supervisor phrased the search as "all combinations
+  of Rx, Ry and Rz". A 20 deg tilt cone x full 360 deg roll is the same set,
+  parameterised so the 20 deg cap constrains only the DOF it should and the free
+  DOF is swept entirely. Recorded because the phrasing will resurface.
+
+### Part 2 -- the filter set (this is *stricter*, not looser)
+
+Adopted from the reference guide, cheapest arithmetic first, FK and collision
+last, rejecting on first failure:
+
+| # | Filter | Status here | Value |
+|---|---|---|---|
+| 1 | Joint limits | already have | `PHYSICAL_JOINT_LIMITS` (S1.44) |
+| 2 | J5 non-negative | **open decision** -- interacts with spec row 7's \|J5\|<2deg WARN | -- |
+| 3 | J4 minimum | opt-in, default off | -60 deg |
+| 4 | Upper branch (elbow above shoulder-wrist chord) | adopt, new | 2.0mm |
+| 5 | Elbow above plate plane | adopt, new | 1.0mm |
+| 6 | Under-plate footprint | **adopt -- this is the S1.40 fix** | 20mm XY margin |
+| 7 | Plate volume slab | adopt, new | 3.0mm |
+| 8 | Surface mesh collision | adopt -- **first mesh-vs-mesh in this project** | 2.0mm |
+| 9 | Robot/tool self-collision | adopt, new | 5.0mm |
+| E1 | Max adjacent joint step (edge) | **adopt, retuned to 30 deg** | see below |
+| E2 | Branch-change penalty (edge) | adopt | 150 / 2.0 quadratic |
+
+**E1 must be 30 deg, not the reference's 35 deg.** The exchange spec's row 5
+rejects steps **> 30 deg** (S1.44). Carrying 35 across would build a planner
+whose own edge filter admits jobs the receiving side rejects.
+
+**Filter 8 maps onto `CURVED_TIP_CLEARANCE_TOLERANCE_MM`**, kept as legacy at
+S1.44 precisely because it is a tuned material value rather than junk. Prefer it
+over the reference's 2.0mm default if the two disagree.
+
+### Part 3 -- what this supersedes
+
+- **S1.36** -- the in-plane reference axis. `argmin |a . z|` stops being a
+  per-waypoint choice; the DOF is searched and resolved by continuity cost. This
+  **subsumes** the fix sketched in `2026-08-15_orientation_frame_flips_row5.md`
+  (option 1, propagate the previous frame) -- do not implement both. It also
+  supersedes Z-equals-normal as an equality, per Part 1.
+- **S1.37** -- the tangent-plane rationale. Its argument for avoiding an
+  obstacle mesh, that a full-arm check "would reject every real printing pose",
+  holds only for a single commanded orientation. Filters 8 and 9 are the
+  obstacle-mesh check it declined to build.
+- **S1.40** -- the infinite plate plane. Replaced by filters 6 and 7 (finite
+  footprint plus bounding slab). S1.40's own prescription, "if the arm reaches
+  below the plate the fix is to move the plate lower", is unavailable once the
+  plate height is a measurement (S1.45); a real bed is finite and the arm reaches
+  around it. `allow_tcp_through_plate` is superseded.
+- **S1.44's collision narrowing** -- "this project's own pose rejection narrows
+  to the planar path" is reversed. Both paths get the filter set. **S1.44's seven
+  rows are untouched**; the narrowing and the table were always two different
+  questions (S1.44's own scoping-trap note).
+- **S1.45** -- diagnosis only, per the marker on that entry.
+
+### Part 4 -- selection becomes a graph search
+
+Candidates form a layered DAG over `(waypoint, candidate)` nodes; edges carry
+the joint-movement costs plus E2, with E1 as a hard `inf`. Searched by Dijkstra.
+
+**This is not new machinery.** S1.31 (roadmap 6.2) already built a hand-rolled
+`heapq` Dijkstra over flat CSR lists for the geodesic cost matrices, chosen
+because there is no `scipy` in the `fairino-fr5-sim` environment. Same primitive,
+different graph. Reuse it rather than adding a dependency.
+
+The greedy alternative currently in place -- rank branches by wrapped-angle
+distance to the previous waypoint, take the first that clears (S1.5/S1.11) --
+cannot recover from a dead end and cannot undo a discontinuity in the commanded
+frame itself. That is exactly the failure mode
+`2026-08-15_orientation_frame_flips_row5.md` documents.
+
+### Cache
+
+`PRECOMPUTE_CACHE_VERSION` **6 -> 7**. One bump shared with the export cache-gap
+fix deferred to 7.5, since both invalidate every cache regardless.
+
+### NOT YET MEASURED -- do not report these as results
+
+Nothing in this entry has been run. In particular, **whether the orientation
+search restores curved reachability is a prediction.** The honest arithmetic:
+the flange->TCP offset is **196.91mm** and sits *laterally* off the flange, not
+along its Z, so varying the commanded orientation relocates the wrist centre.
+
+- A +/-20 deg tilt alone buys ~**68mm** (`2 * 196.91 * sin 10deg`).
+- The median shortfall at the real frame is ~**92mm** (912mm TCP distance against
+  the `a2 + a3 = 820mm` chain).
+- The **full 360 deg roll sweep is the larger lever**, since the offset's
+  component perpendicular to the tool axis is swept entirely.
+
+Combined the swing is the same order as the shortfall -- plausibly enough, but
+the placement question (S1.45) must not be declared closed until this is
+measured. The measurement to run is in `Stage7_README.md` §7.4 "Verify".
+
+Reference: `examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md` --
+external, describing another project's code, with its file paths and its 35 deg
+default. Roadmap: `tutorials/Stage7_README.md` §7.4.

@@ -6,6 +6,13 @@ scope: geometry_backend.py (load_toolpath_precompute_cache, build_export_segment
 
 # A cached precompute exports zero segments — and used to pass validation
 
+> ⚠ **"7.4" here is the pre-renumber number — this fix is now roadmap 7.5.**
+> Roadmap 7.4 became *Orientation Search & Re-shaped Rejection* (`settled.md`
+> **S1.46**), which pushed Job Export to **7.5** and GUI Wiring to **7.6**. The
+> `PRECOMPUTE_CACHE_VERSION` 6 -> 7 bump recommended below is now **shared with
+> 7.4**, which invalidates every cache anyway — so it costs nothing extra, and
+> the "one fix at 7.4" reasoning still holds under the new numbering.
+
 ## What happened
 
 Roadmap 7.2 added `build_export_segments()` and `validate_job()`. Found during

@@ -6,6 +6,15 @@ scope: geometry_backend.py (_orientation_frames_for_points)
 
 # Curved jobs fail the exchange spec's joint-step row — the reference-axis flip
 
+> ⚠ **Subsumed by `settled.md` S1.46 (roadmap 7.4) — do not implement the fix
+> sketch below separately.** The root cause diagnosed here is correct and the
+> measurements stand. But 7.4 makes the in-plane roll a **searched** variable (60
+> slots, resolved globally by continuity cost in a Dijkstra pass over a
+> `(waypoint, candidate)` DAG) rather than a per-waypoint choice, which removes
+> the discontinuity by construction. Option 1 ("propagate the previous frame")
+> would be redundant work on the same DOF. The cache bump and the S1.36
+> supersession this note anticipates both happen at 7.4.
+
 ## What happened
 
 Roadmap 7.2 implemented the external IK exchange spec's Rejection Criteria.

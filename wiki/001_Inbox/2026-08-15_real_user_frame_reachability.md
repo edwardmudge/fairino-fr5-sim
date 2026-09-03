@@ -6,6 +6,22 @@ scope: assets/buildPlate/saved_position.json, geometry_backend.py (_plate_plane 
 
 # Neither toolpath runs at the real User Frame — and for two different reasons
 
+> ⚠ **The measurements stand; the diagnosis is superseded by `settled.md`
+> S1.46 (roadmap 7.4).** The supervisor has confirmed the **7.3 configuration is
+> correct**, so "Result 2 — curved is genuinely out of reach" and "the cause is
+> **placement, not calibration**" no longer hold as written. Both results measure
+> a **single commanded orientation per waypoint** (S1.36 pins tool Z to the exact
+> normal and fixes the roll, giving at most 8 IK candidates before a point
+> reports `"Unreachable"`); roadmap 7.4 searches ~480 per waypoint. Result 1 is
+> already identified below as a *modelling* limitation, and 7.4 replaces that
+> infinite plane with a finite footprint + slab.
+>
+> Open question 2 ("should the plate plane become finite?") is therefore
+> **answered: yes**. Open question 3 (where the curved model should sit) is no
+> longer blocking — it becomes a hypothesis 7.4 can test. Open question 4 is
+> answered by subsumption: the S1.36 fix is folded into the orientation search,
+> so its option 1 should **not** be implemented separately.
+
 ## What happened
 
 Roadmap 7.3 replaced `assets/buildPlate/saved_position.json` with the real
