@@ -272,3 +272,32 @@ above).
 - [`CurvedModel_PrintOrder.md`](CurvedModel_PrintOrder.md) — where the
   ordered feed pieces and travel hops this stage interleaves come from.
 - `tutorials/Stage6_README.md` — sub-stage 6.5 and what 6.6 does next.
+
+## Changed in Stage 7.7 (2026-09-04)
+
+**Clicking "Run Precompute" on an already-finished solve no longer crashes.**
+`run_curved_toolpath_ik_precompute()` (and its planar sibling) now has a
+**third** mode alongside "start fresh" and "resume from `precompute_index`":
+when `precompute_index >= precompute_total` it sets the status to
+`"Already solved N waypoint(s)"` and returns, without setting
+`precompute_running`.
+
+Why it was a crash and not a harmless no-op: `precompute_waypoints` is
+deliberately left populated after a solve completes (S1.49's export reads it),
+so "is something loaded?" could not tell *paused* from *finished* and the
+second click took the resume path. `_finish_candidate_search()` has by then
+emptied the per-layer candidate arrays — they are the precompute's peak memory,
+hundreds of MB on a curved layer — so the resumed run stepped a zero-length
+chunk, re-entered `_finish_candidate_search()` with nothing to backtrack, and
+raised `IndexError` inside the per-frame Polyscope callback.
+
+**Practical consequence — a completed solve is not re-checked for staleness.**
+`precompute_cache_meta` is only compared against a freshly-built meta on the
+fresh-start branch, so if you move the build plate after a solve finishes,
+"Run Precompute" will still report "Already solved" rather than re-solving for
+the new pose. **Cancel, then Run** — Cancel discards `precompute_waypoints`, so
+the next Run rebuilds and re-keys. This is recorded rather than fixed: pre-7.7
+the same click raised an exception, so the guard is a strict improvement.
+
+Full rationale: `settled.md` **S1.52**; the run/pause/cancel contract it amends
+is **S1.14**.

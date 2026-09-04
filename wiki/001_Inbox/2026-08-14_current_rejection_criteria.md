@@ -107,6 +107,11 @@ Observed consequence: a completed TX precompute (2,688 waypoints) drives the
 
 - **§7.1** — the tool becomes a single TCP point (the nozzle mesh is hidden as
   it is not the calibrated tool), so no tool-*body* check remains on any path.
+  ⚠ **The "hidden" half is stale as of §7.7** (2026-09-04, `settled.md` S1.51):
+  the mesh is visible again, re-aimed at load time onto the TCP frame's −Z. The
+  load-bearing clause is unaffected — the tool is still a single TCP point and
+  there is still no tool-*body* check on any path, because only the render pose
+  changed, not the asset's uncalibrated shape.
 - **§7.2** — this table is replaced by the exchange spec's seven rows (identity,
   TCP offset, joint limits, per-point FK, joint step, `num_points`, `|J5|<2°`
   warn), and the curved path gets `check_collision=False`: rows 3–5 disappear

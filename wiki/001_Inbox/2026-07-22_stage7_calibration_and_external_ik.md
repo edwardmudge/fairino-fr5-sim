@@ -13,6 +13,15 @@ scope: geometry_backend.py, gui_panel.py, assets/buildPlate/saved_position.json,
 > because this is a dated record; `tutorials/Stage7_README.md` is the current
 > roadmap.
 
+> ⚠ **The "hide the nozzle mesh" plan below was reversed by roadmap 7.7**
+> (2026-09-04, `settled.md` **S1.51**). Everywhere this note says the mesh is
+> hidden or "unhidden-able later if a corrected one arrives" — §7.1's plan, its
+> "Tool Axis stalk at index 9, loop now `range(10)`" note, and the closing
+> asset discussion — the mesh is now **visible**, the stalk is **deleted**, and
+> the loop is `range(9)`. What did *not* change: `TCP.txt` stays retired, and
+> the tool's collision body is still the TCP point alone. Left as written; this
+> is a dated record.
+
 ## Why
 
 Two supervisor docs landed (`docs/saved_coords_data_and_usage_EN.md`,

@@ -582,6 +582,11 @@ instead of a bool.
 
 **Verified on:** 2026-07-16
 
+**Amended by S1.52 (2026-09-04):** item 1's two modes ("start fresh" /
+"resume") became **three** at Stage 7.7 -- `run_` now also early-returns
+when the loaded precompute is already *complete*, rather than resuming a
+finished run into a crash. Pause/resume itself is unchanged.
+
 ## S1.15 Precompute's Run/Pause buttons collapsed into one toggle; progress bar shows a percentage instead of a raw count
 
 **Decision:** A GUI-presentation-only refinement on top of S1.14's
@@ -2647,6 +2652,17 @@ touch) -- needs the Polyscope window.
 
 ## S1.43 Real tool=1 TCP offset (roadmap 7.1) -- supersedes S1.4's derived rotation; nozzle mesh hidden, tool reduced to the TCP point, default plate pose moved to keep planar reachable
 
+> ⚠ **Changed in Stage 7.7 (S1.51).** The **rendering** half of this entry is
+> reversed: the nozzle mesh is visible again, re-aimed at load time onto the TCP
+> frame's -Z, and the "Tool Axis" stalk that stood in for it is deleted, not
+> hidden (`apply_delta_transform`'s loop is `range(9)` again). Everything else
+> here stands unchanged -- the tool=1 offset, the retirement of `TCP.txt`, the
+> moved default plate pose, and above all the **collision** decision: the tool's
+> collision body is still the single TCP point, because the asset's own
+> shape/length is exactly as uncalibrated as it was while hidden. This entry's
+> open item ("needs a corrected tool asset, not another filter") is **not**
+> resolved by 7.7.
+
 **Decision:** `T_flange_to_tcp` is now the real calibrated tool=1 offset,
 `pose_to_matrix(*TCP_OFFSET_6D_MM_DEG)` with
 `[-134.777, 96.448, 106.334, 86.647, -13.136, 60.612]` (mm, deg) from
@@ -3712,3 +3728,170 @@ path cost C"`; it's now just `"Solved N waypoint(s)"`. The candidate-count/
 path-cost detail is no longer computed or shown.
 
 **Verified on:** 2026-09-04.
+
+## S1.51 Nozzle mesh replaces the "Tool Axis" line, aimed along the TCP frame's Z -- the axis the curved pipeline actually commands
+
+**Decision:** `load_data()` no longer hides the "Nozzle" mesh
+(`nozzle_handle.set_enabled(False)`, S1.43), and no longer registers the
+"Tool Axis" stalk that stood in for it while it was hidden. That curve
+network is deleted outright, along with `TOOL_AXIS_COLOR`/
+`TOOL_AXIS_RADIUS_MM`, so `apply_delta_transform`'s loop is `range(9)`, not
+`range(10)`.
+
+The mesh is not rendered as exported. `nozzle.obj`'s native CAD pose was
+modelled against the retired `TCP.txt` point rather than the real tool=1
+offset, so as-authored it points at empty space -- its own tip lands on the
+old `TCP.txt` world point, 310.97mm from where the calibrated TCP actually
+is. It is therefore rigidly re-aimed once, at load time:
+
+- **Direction:** the **shaft's** long axis is rotated onto
+  `-T_zero_tcp[:3, 2]` -- the TCP frame's **-Z**. `-Z` and not `+Z` because Z
+  points *out* of the print surface: the tip goes in along -Z and the body
+  trails behind it along +Z (checked, not assumed: `(centroid - tip) . Z =
+  +67.22`). Unit by construction, being a rotation-matrix column.
+- **Anchor:** the vertex farthest from the flange origin (the asset's own
+  tip) is pinned exactly onto `tcp_point`, and is the rotation pivot.
+- **Roll** about that axis is not pinned -- the nozzle is rotationally
+  symmetric about its own axis, the same reasoning as S1.36's frames.
+
+**Why Z, and not the flange-centre -> TCP line.** The flange->TCP chord was
+tried first and looks better -- it puts the tool body against the flange --
+but it is not an axis the robot has any notion of, and it sits **36.32
+degrees** off the TCP frame's Z. Z *is* the tool axis by this project's own
+convention: `_orientation_frames_for_points` builds every curved `R_target`
+with "Z is the outward surface normal" and S1.36 has the nozzle approaching
+along -Z. So on the chord the render contradicted the commanded orientation
+by 36 degrees, in a study whose whole subject is holding the nozzle
+perpendicular to a curved shell. The rendered tool now shows the orientation
+IK is actually solving for; the nozzle body and the TCP triad's blue axis are
+collinear by construction, which makes the commanded approach direction
+readable straight off the screen.
+
+**Accepted cost: the tool floats.** Closest nozzle-to-`Robot6` approach goes
+from 14.64mm to **98.33mm**, and the shaft centreline now misses the flange
+face centre by 116.6mm. This is an artefact of the placeholder asset rather
+than of the alignment: `nozzle.obj` is 163.47mm flange-to-tip against
+tool=1's measured 196.91mm, and the real head is mounted at a compound angle
+(~87/-13/61 degrees), so no re-aiming makes this asset both faithful and
+attached. A corrected asset would satisfy both at once -- the same open item
+S1.43 records ("needs a corrected tool asset, not another filter"). Judged
+the right trade: a 36-degree orientation error is substantive, a visual gap
+is cosmetic.
+
+**The shaft's axis, not the whole mesh's** (`_nozzle_shaft_mask` +
+`_obb_from_points`, the same PCA helper the 7.4 collision proxies use). This
+distinction is load-bearing and was measured: the mounting bracket is a slab
+alongside the shaft and drags a whole-mesh PCA **6.59 degrees** off the
+shaft's true axis -- which would leave the rendered shaft 6.59 degrees off
+the commanded approach axis, a smaller version of exactly the error the
+alignment exists to remove. Fitting the shaft parts alone lands it at
+**0.0000 degrees**, at every pose.
+
+`nozzle.obj` fuses **7 rigid parts** into one mesh with no OBJ groups, so
+`_nozzle_shaft_mask` labels components with a union-find over the faces
+(`trimesh.split()` needs scipy or networkx, neither of which this environment
+has -- same constraint as S1.47) and keeps the ones whose oriented box is
+slender *and* narrower in cross-section than any bracket component -- the
+signature of a turned part. (The shaft parts are also round in cross-section
+and the bracketry mostly isn't, but that is an observation, not a test: the
+width cut alone separates the two groups, so there is no roundness check in
+the code.) Measured, the split is unambiguous: shaft half-extents
+`[6.25, 6.25, 41.50]`,
+`[11.00, 11.00, 40.75]`, `[5.48, 5.48, 12.71]` against bracketry
+`[8.86, 34.66, 48.84]`, `[7.20, 15.04, 16.04]`, `[15.00, 17.51, 48.69]`, so
+`NOZZLE_SHAFT_MAX_HALF_WIDTH_MM = 12.5` sits in a wide gap rather than on a
+boundary.
+
+**Both degenerate branches fail visibly, not silently** -- neither fires on
+this asset, and both fire the moment a *different* one is dropped in, which is
+the whole open item S1.43 records. If no component looks like a turned part,
+`_nozzle_shaft_mask` returns the whole mesh rather than an empty selection,
+which would hand `_obb_from_points` an empty array (`mean()` of nothing is
+NaN, and the tool would vanish from the render entirely instead of merely
+sitting 6.59 degrees askew). And if the native axis lands *antiparallel* to
+the target, the 180-degree turn is built as a real rotation about an arbitrary
+perpendicular axis, not as `-I`: `-I` aims the axis correctly but has
+determinant -1, so it would point-invert the mesh and reverse every face
+winding. Both were review findings on this stage's own first cut, fixed
+before it landed.
+
+**The flange face centre IS the DH frame-6 origin** -- worth recording,
+because "anchor it to the outer surface rather than the middle of the flange"
+is an intuitive-sounding lever on where the tool sits, and it is a no-op.
+`Robot6` spans **-46.800mm to 0.000mm** along the flange Z axis relative to
+that origin: the body extends *backwards* and the outer face is a flat
+annulus at exactly 0 (bore radius 16.25mm, outer 31.00mm). That is the
+convention that makes `TCP_OFFSET_6D_MM_DEG` a face-relative tool offset.
+Anchoring is not adjustable; the axis choice is the only real lever.
+
+The output is still zero-pose world-frame rest data, so `Delta_6` and
+`apply_delta_transform` carry it unchanged, exactly like every other
+flange-mounted structure. Because both the tool offset and the alignment
+target are fixed in the flange frame, computing the alignment once at load
+is exactly equivalent to recomputing it every frame -- a cache, not an
+approximation.
+
+**Reason:** the tool needed to be visible again, and the stalk was only ever
+a stand-in for it. Aiming the mesh down the tool's own axis is what makes the
+render *mean* something: the nozzle now points where the solver says the tool
+points.
+
+**This does not resolve S1.43's asset mismatch.** The nozzle's own
+shape/length is exactly as uncalibrated as it was while hidden (163.47mm
+flange-to-tip against tool=1's real 196.91mm) -- only its render pose
+changed. It therefore stays excluded from `moving_geometry_rest_verts`/
+collision filtering, unchanged from S1.43: the tool's collision body is still
+the TCP point alone. Nothing about the TCP itself moved --
+`TCP_OFFSET_6D_MM_DEG`, the TCP point, the TCP frame and IK are all
+untouched.
+
+**Verified on:** 2026-09-04. Shaft axis vs the TCP frame's Z **0.0000
+degrees** and tip pinned to `tcp_point` at **0.0000mm** -- both measured
+against the *current* frame at six joint configurations (zero, J6 spin,
+wrist-only and three whole-arm poses), confirming the load-time alignment is
+exact at every pose and not merely at the zero pose it is computed at.
+Closest nozzle-to-`Robot6` approach 98.33mm, as expected. `tcp_world` still
+matches `compute_fk(q)[5] @ T_flange_to_tcp` under a moved pose. Confirmed on
+screen: the shaft renders collinear with the triad's blue axis, which
+foreshortens to almost nothing when viewed down the tool.
+
+## S1.52 `run_*_toolpath_ik_precompute()` gains a third mode -- "already complete" returns a status instead of resuming a finished run into a crash
+
+**Decision:** both precompute runners early-return with
+`"Already solved N waypoint(s)"` when `precompute_index >= precompute_total`,
+after the fresh-start branch and before `precompute_running = True`. S1.14
+item 1 described two modes ("start fresh" when `precompute_waypoints is None`,
+"resume from `precompute_index`" otherwise); *complete* is a third state that
+neither covers, and it was falling into the resume path.
+
+**The crash this prevents.** Clicking "Run Precompute" a second time after a
+solve finished was an unhandled exception, not a no-op:
+`_finish_candidate_search()` empties `precompute_cand_joints` (roadmap 7.4 --
+a curved layer's candidate arrays are hundreds of MB and nothing reads them
+after the backtrack), so a re-run set `precompute_running = True`, stepped a
+zero-length chunk (`end = min(index + chunk, total) == index == total`),
+re-entered `_finish_candidate_search()` with `n = 0` and raised `IndexError`
+on `chosen[-1] = chosen_last` against an empty list -- inside the per-frame
+Polyscope callback. `precompute_waypoints` is deliberately left set after
+completion (S1.49's export path reads it), so "loaded" could not distinguish
+"paused" from "finished" on its own; the index/total comparison can.
+
+**Accepted consequence: a completed solve is not re-checked for staleness.**
+`precompute_cache_meta` is only compared against a freshly-built meta on the
+fresh-start branch, so after a build-plate move the finished solve is stale
+but the guard still reports "Already solved". The escape is **Cancel, then
+Run** -- `cancel_toolpath_ik_precompute()` clears `precompute_waypoints`, so
+the next Run rebuilds waypoints and re-keys the cache. Deliberately not
+closed in code: pre-7.7 that same click raised, so the guard is a strict
+improvement, and folding a staleness re-check into it would widen a crash fix
+into a behaviour change with its own verification burden. Recorded here
+rather than fixed.
+
+**Reason:** a finished precompute is a normal state a user lands in (solve,
+then look at the result, then click Run again out of habit), and it should
+report what happened rather than raise.
+
+**Verified on:** 2026-09-04. Re-running a completed solve reports "Already
+solved N waypoint(s)" with no traceback; Pause mid-run still resumes from
+`precompute_index` and Cancel -> Run still starts fresh, so S1.14's two
+original modes are untouched.

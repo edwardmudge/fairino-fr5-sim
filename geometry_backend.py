@@ -15,13 +15,20 @@ import trimesh
 MESH_DIR = "assets/fr5_meshes"
 MESH_FILES = [f"Robot{i}.obj" for i in range(7)]  # Robot0 (base) .. Robot6
 
-# Tool head, mounted on the flange (Delta_6). The nozzle mesh follows the
-# zero-pose world convention like the link meshes, but is hidden since roadmap
-# 7.1 -- it is not the head tool=1 was calibrated against. The TCP is no longer
-# a zero-pose world point read from TCP.txt (now legacy, kept as a record); it
-# is derived from the flange-local offset below.
+# Tool head, mounted on the flange (Delta_6). The nozzle mesh is not the head
+# tool=1 was calibrated against (roadmap 7.1), so its render pose is rigidly
+# re-aimed at load time rather than used as-authored (see "Changed in Stage
+# 7.7" in docs/FR5_Mesh_Convention.md). The TCP is no longer a zero-pose world
+# point read from TCP.txt (now legacy, kept as a record); it is derived from
+# the flange-local offset below.
 PRINTER_HEAD_DIR = "assets/printerHead"
 NOZZLE_FILE = "nozzle.obj"
+
+# Half-width above which a nozzle.obj component is bracketry rather than a
+# turned part of the shaft -- see _nozzle_shaft_mask. The shaft components
+# measure 5.48/6.25/11.00mm, the bracket ones 15.00mm and up, so this sits in
+# a wide gap rather than on a boundary.
+NOZZLE_SHAFT_MAX_HALF_WIDTH_MM = 12.5
 
 # Real calibrated tool offset, flange frame: [x, y, z, rx, ry, rz] (mm, deg).
 # Source: docs/saved_coords_data_and_usage_EN.md 1.2, tool_index=1 -- the only
@@ -86,11 +93,6 @@ EXPORT_CHUNK_SIZE = 2000  # points written per step() call. FK + string
 TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
 TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
-# Flange->TCP stalk standing in for the hidden nozzle mesh (roadmap 7.1) --
-# yellow, so it reads against the TCP triad's red/green/blue and the orange
-# G-code preview.
-TOOL_AXIS_COLOR = (0.95, 0.85, 0.15)
-TOOL_AXIS_RADIUS_MM = 4.0
 
 PLAYBACK_RENDER_STRIDE = 50  # Push arm/bead updates to Polyscope every Nth
 # solved waypoint, not every frame -- full-buffer re-uploads make coarser
@@ -2166,6 +2168,13 @@ class VisContent:
                 waypoints, R_target_array, joint_limits, reference_joint_angles,
                 cache_meta, cache_path=GCODE_PRECOMPUTE_CACHE, filter_mode="planar")
 
+        if self.precompute_index >= self.precompute_total:
+            # Already solved (precompute_waypoints stays set after completion so
+            # Export can still read it -- see build_export_segments()) -- resuming
+            # here would call _finish_candidate_search() with no candidates left,
+            # crashing on chosen[-1] = chosen_last against an empty list.
+            self.precompute_status = f"Already solved {self.precompute_total} waypoint(s)"
+            return
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
 
@@ -2212,6 +2221,10 @@ class VisContent:
                 waypoints, R_target_array, joint_limits, reference_joint_angles,
                 cache_meta, cache_path=cache_path, filter_mode="curved", layer=layer)
 
+        if self.precompute_index >= self.precompute_total:
+            # Already solved -- see the matching guard in run_toolpath_ik_precompute().
+            self.precompute_status = f"Already solved {self.precompute_total} waypoint(s)"
+            return
         self.precompute_running = True
         self.precompute_status = f"Precomputing {self.precompute_index}/{self.precompute_total} waypoints"
 
@@ -3052,36 +3065,81 @@ class VisContent:
             self.mesh_handles.append(handle)
             self.update_fns.append(handle.update_vertex_positions)
 
-        # Nozzle rides on the flange -- same Delta_6 as Robot6, see docs/FR5_Mesh_Convention.md.
-        # Registered but hidden (roadmap 7.1): the supervisor confirmed the tool=1
-        # calibration is correct, so this asset -- 163.47mm flange-to-tip against
-        # tool=1's 196.91mm -- is simply not the head that was calibrated. Kept
-        # wired into rest_verts/update_fns so a corrected asset only needs the
-        # set_enabled flag flipped back.
-        nozzle = self.load_mesh(os.path.join(PRINTER_HEAD_DIR, NOZZLE_FILE))
-        self.rest_verts.append(nozzle.vertices.copy())
-        nozzle_handle = ps.register_surface_mesh("Nozzle", nozzle.vertices, nozzle.faces)
-        nozzle_handle.set_enabled(False)
-        self.mesh_handles.append(nozzle_handle)
-        self.update_fns.append(nozzle_handle.update_vertex_positions)
-
         # Fixed flange->TCP transform for IK -- the real calibrated tool=1 offset
         # (roadmap 7.1), replacing S1.4's world point + rotation borrowed from
         # inv(T_zero[5]), which could not express a tool with its own orientation.
         self.T_flange_to_tcp = pose_to_matrix(*TCP_OFFSET_6D_MM_DEG)
         T_zero_tcp = self.T_zero[5] @ self.T_flange_to_tcp  # TCP pose at zero joints
         # .copy() so this is rest-pose data in its own right, not a view into
-        # T_zero_tcp -- it is shared by the collision set and rest_verts, same
-        # as every other entry in those lists (which all copy).
+        # T_zero_tcp -- it is shared by the collision set and rest_verts, and
+        # both must outlive the matrix it was sliced from.
         tcp_point = T_zero_tcp[:3, 3].reshape(1, 3).copy()
+
+        # Nozzle rides on the flange -- same Delta_6 as Robot6, see docs/FR5_Mesh_Convention.md.
+        # Its native CAD placement is discarded: it was modelled against the
+        # retired TCP.txt point, not the real tool=1 offset, so as-exported it
+        # points at empty space. Instead it's rigidly re-aimed once here, at
+        # load time, onto the TOOL'S OWN AXIS with its tip pinned to the TCP
+        # point. Roll about that axis is left as-is: the nozzle is rotationally
+        # symmetric about its own axis (see the curved-orientation code below),
+        # so it isn't pinned.
+        nozzle = self.load_mesh(os.path.join(PRINTER_HEAD_DIR, NOZZLE_FILE))
+        flange_origin = self.T_zero[5][:3, 3]
+        # The TCP frame's -Z: the approach axis the whole curved pipeline
+        # commands (_orientation_frames_for_points builds every R_target with
+        # Z on the outward surface normal, S1.36), so the rendered tool shows
+        # the orientation IK is actually solving for. -Z rather than +Z since
+        # Z points OUT of the surface: the tip goes in along -Z and the body
+        # trails behind it along +Z. Unit by construction -- it is a rotation
+        # matrix column, which is what the Rodrigues rotation below needs.
+        nozzle_axis_target = -T_zero_tcp[:3, 2]
+        dist_from_flange = np.linalg.norm(nozzle.vertices - flange_origin, axis=1)
+        tip_vertex = nozzle.vertices[np.argmax(dist_from_flange)]
+        # The axis of the SHAFT, not of the whole asset: the mounting bracket
+        # drags a whole-mesh PCA 6.59 degrees off the shaft, which would leave
+        # the rendered shaft 6.59 degrees off the commanded approach axis.
+        # See _nozzle_shaft_mask for the measurements.
+        shaft = _nozzle_shaft_mask(nozzle.vertices, nozzle.faces)
+        center, axes, _ = _obb_from_points(nozzle.vertices[shaft])
+        native_axis = axes[2]  # longest principal axis (eigh ascending order)
+        if np.dot(tip_vertex - center, native_axis) < 0:
+            native_axis = -native_axis
+        axis = np.cross(native_axis, nozzle_axis_target)
+        sin_a, cos_a = np.linalg.norm(axis), np.dot(native_axis, nozzle_axis_target)
+        if sin_a < 1e-9 and cos_a > 0:
+            R_align = np.eye(3)
+        else:
+            if sin_a < 1e-9:
+                # Antiparallel: the cross product gives no axis, so pick any
+                # perpendicular one and turn 180deg about it. NOT -I, which
+                # aims the axis correctly but has det -1 -- it would point-
+                # invert the mesh, reversing every face winding. Dead for the
+                # current asset, live the moment a corrected one is dropped in.
+                seed = np.array([1.0, 0.0, 0.0])
+                if abs(native_axis[0]) > 0.9:
+                    seed = np.array([0.0, 1.0, 0.0])
+                axis = np.cross(native_axis, seed)
+                sin_a, cos_a = 0.0, -1.0
+            axis = axis / np.linalg.norm(axis)
+            K = np.array([[0, -axis[2], axis[1]],
+                          [axis[2], 0, -axis[0]],
+                          [-axis[1], axis[0], 0]])
+            R_align = np.eye(3) + K * sin_a + K @ K * (1 - cos_a)
+        nozzle_verts = tcp_point + (R_align @ (nozzle.vertices - tip_vertex).T).T
+        self.rest_verts.append(nozzle_verts)
+        nozzle_handle = ps.register_surface_mesh("Nozzle", nozzle_verts, nozzle.faces)
+        self.mesh_handles.append(nozzle_handle)
+        self.update_fns.append(nozzle_handle.update_vertex_positions)
 
         # Zero-pose bbox corners for the moving-geometry set (Robot1..6 + the tool).
         # The tool's collision body is the TCP point alone, NOT the nozzle mesh
-        # (roadmap 7.1): colliding against a hidden asset of the wrong length would
-        # reject poses on geometry the real head doesn't have. Its bbox is therefore
-        # 8 coincident corners -- degenerate but harmless, the corners bound is then
-        # exact. Excludes the TCP frame/axis appended below, which are visualization
-        # markers, not solid geometry. See _meshes_clear_plane (roadmap 6.8).
+        # (roadmap 7.1): the asset's own shape/length still doesn't match the real
+        # calibrated tool (only its render orientation was corrected, "Changed in
+        # Stage 7.7"), so colliding against it would reject poses on geometry the
+        # real head doesn't have. Its bbox is therefore 8 coincident corners --
+        # degenerate but harmless, the corners bound is then exact. Excludes the
+        # TCP frame appended below, which is a visualization marker, not solid
+        # geometry. See _meshes_clear_plane (roadmap 6.8).
         self.moving_geometry_rest_verts = self.rest_verts[:6] + [tcp_point]
         self.moving_geometry_rest_bbox_corners = [
             _bbox_corners(v) for v in self.moving_geometry_rest_verts]
@@ -3123,20 +3181,6 @@ class VisContent:
         self.mesh_handles.append(tcp_frame_handle)
         self.update_fns.append(tcp_frame_handle.update_node_positions)
 
-        # Flange->TCP stalk, also Delta_6 -- the only thing left showing where the
-        # tool sits once the nozzle mesh is hidden (roadmap 7.1). Visual only: it is
-        # deliberately absent from moving_geometry_rest_verts, since the flange->TCP
-        # line was considered and rejected as a collision proxy in favour of the
-        # point alone.
-        tool_axis_nodes = np.array([self.T_zero[5][:3, 3], T_zero_tcp[:3, 3]])
-        tool_axis_handle = ps.register_curve_network(
-            "Tool Axis", tool_axis_nodes, np.array([[0, 1]]))
-        tool_axis_handle.set_color(TOOL_AXIS_COLOR)
-        tool_axis_handle.set_radius(TOOL_AXIS_RADIUS_MM, relative=False)
-        self.rest_verts.append(tool_axis_nodes)
-        self.mesh_handles.append(tool_axis_handle)
-        self.update_fns.append(tool_axis_handle.update_node_positions)
-
         return meshes
 
 
@@ -3145,11 +3189,11 @@ class VisContent:
 
         Delta_i = T_0_i(q) @ inv(T_0_i(0)) -- see docs/FR5_Mesh_Convention.md.
         Robot0 is the fixed base and is never updated. The nozzle (index 6),
-        TCP point (index 7), TCP frame (index 8) and flange->TCP tool axis
-        (index 9) ride on the flange, reusing Delta_6 (index 5).
+        TCP point (index 7) and TCP frame (index 8) ride on the flange,
+        reusing Delta_6 (index 5).
         """
         T_current = self.compute_fk(joint_angles_deg)
-        for i in range(10):
+        for i in range(9):
             src = min(i, 5)
             Delta = T_current[src] @ self.T_zero_inv[src]
 
@@ -3189,7 +3233,7 @@ class VisContent:
         apply_delta_transform, but pure computation with no Polyscope side
         effects (used by the ground-clearance checks below, not per-frame
         rendering). Indexes moving_geometry_rest_verts, not rest_verts: index 6
-        is the TCP point, not the hidden nozzle mesh (roadmap 7.1)."""
+        is the TCP point, not the nozzle mesh (roadmap 7.1)."""
         return self._moving_geometry_deltas_from_fk(self.compute_fk(joint_angles_deg))
 
 
@@ -3628,6 +3672,67 @@ def _obb_from_points(verts):
     # mean off-centre, and half-extents taken about the mean would then bound a
     # larger box than the points actually occupy.
     return mean + ((lo + hi) / 2.0) @ axes, axes, (hi - lo) / 2.0
+
+
+def _nozzle_shaft_mask(verts, faces):
+    """Boolean mask over `verts` selecting nozzle.obj's turned cylindrical
+    parts -- the shaft and its tip cone -- and excluding the mounting
+    bracketry. Used to derive the tool's render axis in load_data().
+
+    Why not just PCA the whole mesh: the bracket is a big slab alongside the
+    shaft, and it drags the whole-mesh principal axis 6.59 degrees off the
+    shaft's true axis. Since load_data() aims that axis at the tool's real
+    approach direction (the TCP frame's -Z), a whole-mesh fit would render
+    the shaft 6.59 degrees off the orientation IK is actually commanding --
+    a smaller version of exactly the error that alignment exists to remove.
+    Fitting the shaft parts alone lands it at 0.0000 degrees.
+
+    The asset fuses 7 rigid parts into one mesh with no OBJ groups, so the
+    components come from a union-find over the faces. `trimesh.split()` is not
+    an option: it needs scipy or networkx for connected_components and this
+    environment has neither (see the section header above).
+
+    Selection rule: a component is shaft if its oriented box is SLENDER and
+    NARROWER in cross-section than any bracket component -- the signature of a
+    turned part. Measured on this asset the three shaft components are
+    [6.25, 6.25, 41.50], [11.00, 11.00, 40.75] and [5.48, 5.48, 12.71]
+    (half-extents, ascending), against bracketry at [8.86, 34.66, 48.84],
+    [7.20, 15.04, 16.04] and [15.00, 17.51, 48.69]. The shaft parts are also
+    round in cross-section and the bracketry mostly isn't, but that is an
+    observation, not a test: the width cut alone separates the two groups by a
+    wide margin (11.00 vs 15.04), so there is no roundness check here.
+    Read off the OBB rather than an axis-aligned bbox so the rule survives the
+    asset being re-exported in a different orientation."""
+    verts = np.asarray(verts, dtype=float)
+    parent = np.arange(len(verts))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # path compression
+            x = parent[x]
+        return x
+
+    for a, b in np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    roots = np.array([find(i) for i in range(len(verts))])
+    shaft = np.zeros(len(verts), dtype=bool)
+    for root in np.unique(roots):
+        member = roots == root
+        _, _, half = _obb_from_points(verts[member])
+        half = np.sort(half)  # ascending, so half[2] is the long axis
+        if half[2] > 1.5 * half[1] and half[1] < NOZZLE_SHAFT_MAX_HALF_WIDTH_MM:
+            shaft |= member
+    if not shaft.any():
+        # No component looks like a turned part -- a different asset, not this
+        # one. Fall back to the whole mesh (the 6.59deg fit above) rather than
+        # returning an empty selection, which would hand _obb_from_points an
+        # empty array: mean() of nothing is NaN, and the tool would silently
+        # vanish from the render instead of merely rendering askew.
+        return np.ones(len(verts), dtype=bool)
+    return shaft
 
 
 def _obb_proxies(verts, segment_mm):

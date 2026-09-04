@@ -155,3 +155,80 @@ index `moving_geometry_rest_verts` = 6 arm links + the TCP point instead. The
 Tool Axis stalk is **visual only** and deliberately absent from that set.
 
 Full rationale and measurements: `settled.md` S1.43.
+
+---
+
+## Changed in Stage 7.7 (2026-09-04)
+
+Everything above still describes the Delta convention correctly, and
+`nozzle.obj -> Same Delta_6 as Robot6` in the mapping summary still holds.
+What changed is that **the nozzle mesh is visible again and the "Tool Axis"
+stalk is gone** -- deleted, not hidden, along with `TOOL_AXIS_COLOR`/
+`TOOL_AXIS_RADIUS_MM`. `apply_delta_transform`'s loop is `range(9)`; index 9
+no longer exists.
+
+**The mesh is re-aimed at load time, not rendered as exported.** Its native
+CAD pose was modelled against the retired `TCP.txt` point, not the real
+tool=1 offset, so as-authored it points at empty space. In `load_data()`,
+after `T_zero_tcp`/`tcp_point` are computed:
+
+```python
+flange_origin = self.T_zero[5][:3, 3]
+
+# The TCP frame's -Z: the approach axis the curved pipeline commands.
+# -Z, not +Z -- Z points OUT of the surface, so the tip goes in along -Z
+# and the body trails along +Z. Unit already (rotation-matrix column).
+nozzle_axis_target = -T_zero_tcp[:3, 2]
+
+# The asset's own tip: pinned onto the TCP, and the rotation pivot.
+dist_from_flange = np.linalg.norm(nozzle.vertices - flange_origin, axis=1)
+tip_vertex = nozzle.vertices[np.argmax(dist_from_flange)]
+
+# The SHAFT's long axis, via the same PCA helper the 7.4 collision proxies
+# use. Not the whole mesh: the bracket drags a whole-mesh PCA 6.59 deg off
+# the shaft, rendering it out of the flange's edge instead of its bore.
+# Roll about the axis is free -- the nozzle is axially symmetric.
+shaft = _nozzle_shaft_mask(nozzle.vertices, nozzle.faces)
+center, axes, _ = _obb_from_points(nozzle.vertices[shaft])
+native_axis = axes[2]
+if np.dot(tip_vertex - center, native_axis) < 0:
+    native_axis = -native_axis
+
+R_align = ...   # Rodrigues: native_axis -> nozzle_axis_target
+nozzle_verts = tcp_point + (R_align @ (nozzle.vertices - tip_vertex).T).T
+```
+
+Two degenerate branches in there matter only when the asset is **swapped** for
+a corrected one, which is the open item S1.43 records — neither fires on this
+asset, and both were review findings on this stage's own first cut. If no
+component looks like a turned part, `_nozzle_shaft_mask` returns the whole mesh
+rather than an empty mask (which would give `_obb_from_points` an empty array,
+NaN vertices, and an invisible tool instead of a merely skewed one). And if
+`native_axis` lands antiparallel to the target, the 180° turn is built as a real
+rotation about an arbitrary perpendicular axis — **not** `-I`, which aims the
+axis correctly but has determinant −1 and would point-invert the mesh, reversing
+every face winding.
+
+`nozzle_verts` -- not `nozzle.vertices.copy()` -- becomes `rest_verts[6]`.
+Everything downstream is unchanged: this is still zero-pose world-frame rest
+data, just re-aimed before it enters the pipeline, so `Delta_6` carries it
+like any other entry in `rest_verts`. Both the tool offset and the alignment
+target are fixed in the flange frame, so doing this once at load is exactly
+equivalent to redoing it every frame.
+
+**Why the TCP frame's Z and not, say, the flange-centre -> TCP chord.** Z is
+the tool axis by this project's convention -- `_orientation_frames_for_points`
+builds every curved `R_target` with Z on the outward surface normal (S1.36).
+The chord was tried and sits 36.32 deg off it, so the render contradicted the
+commanded orientation. The nozzle body is now collinear with the TCP triad's
+blue axis by construction. The cost is that the tool visibly floats (nearest
+approach to `Robot6` 98.33mm): the real head is mounted at a compound angle
+and this asset is the wrong length, so no re-aiming makes it both faithful
+and attached.
+
+**Collision geometry is untouched.** The nozzle's own shape/length is exactly
+as uncalibrated as it was when hidden (163.47mm vs tool=1's real 196.91mm) --
+only its render pose changed. `moving_geometry_rest_verts` still treats the
+tool as the TCP point alone; S1.43's reasoning for that still holds.
+
+Full rationale and measurements: `settled.md` S1.51.

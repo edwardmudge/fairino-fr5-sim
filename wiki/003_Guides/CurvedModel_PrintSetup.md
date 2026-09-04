@@ -12,7 +12,9 @@ construction.
 
 **Stage 7.1 landed on 2026-08-14 and invalidated it** (`settled.md` S1.43). It
 replaced the TCP with the real calibrated tool=1 offset and hid the nozzle
-mesh, moving the TCP **310.97mm** (zero-pose
+mesh (⚠ the nozzle is **visible again since 7.7**, re-aimed at load time onto
+the TCP frame's −Z — `settled.md` S1.51; it is still not a collision body, so
+nothing else in this banner changes), moving the TCP **310.97mm** (zero-pose
 `[-798.137, -228.017, -109.903]` → `[-954.777, -308.334, 146.448]`).
 Reachability is a direct function of where the TCP sits.
 

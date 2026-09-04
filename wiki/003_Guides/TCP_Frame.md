@@ -69,10 +69,12 @@ then appends its rest-pose nodes / handle / `update_node_positions` to
 the same `rest_verts` / `mesh_handles` / `update_fns` lists everything
 else in `apply_delta_transform()` uses.
 
-`apply_delta_transform()`'s loop (`range(10)`) reaches the TCP frame at
+`apply_delta_transform()`'s loop (`range(10)` — **`range(9)` since Stage
+7.7, index 9 is gone**) reaches the TCP frame at
 index 8; `src = min(8, 5)` resolves to `T_current[5]` / `T_zero[5]`
 (Delta_6) — exactly the same delta already applied to the nozzle (index
-6), TCP point (index 7) and Tool Axis stalk (index 9). No special-casing
+6), TCP point (index 7) and Tool Axis stalk (index 9, deleted at 7.7 —
+the frame's own index 8 is unaffected). No special-casing
 needed: the frame's four rest-pose nodes (origin + three axis tips, all
 in the zero-pose world frame) go through
 `Delta_6 = T_0_6(q) @ inv(T_0_6(0))` like any other flange-mounted
@@ -85,15 +87,16 @@ Module-level constants in `geometry_backend.py`:
 | Constant | Effect |
 |---|---|
 | `TCP_FRAME_SCALE_MM` | Axis length, in world units (mm). Larger = easier to see at a distance, but can visually clutter the tool at close range. |
-| `TOOL_AXIS_COLOR` | Colour of the flange→TCP stalk. Chosen to read against the triad's red/green/blue and the orange G-code preview. |
-| `TOOL_AXIS_RADIUS_MM` | Stalk thickness, world units (mm). |
+
+`TOOL_AXIS_COLOR`/`TOOL_AXIS_RADIUS_MM` no longer exist — see "Changed in
+Stage 7.7" below.
 
 ## Code anchors
 
 - `geometry_backend.py`: `create_coordinate_frame()` (generalised),
-  the "TCP Frame" and "Tool Axis" registration blocks in `load_data()`
-  (right after `T_flange_to_tcp` is built), and indices 8 and 9 in
-  `apply_delta_transform()`'s loop.
+  the "TCP Frame" and Nozzle registration blocks in `load_data()` (right
+  after `T_flange_to_tcp` is built), and index 8 in
+  `apply_delta_transform()`'s loop (`range(9)`).
 
 ## Changed in Stage 7.1 (2026-08-14)
 
@@ -121,3 +124,32 @@ TCP point, and the stalk is deliberately excluded from the clearance
 set.
 
 Full rationale and measurements: `settled.md` S1.43.
+
+## Changed in Stage 7.7 (2026-09-04)
+
+**The "Tool Axis" stalk described above is gone -- deleted, not hidden** --
+and the Nozzle mesh takes its place. `nozzle_handle.set_enabled(False)` is
+removed, `TOOL_AXIS_COLOR`/`TOOL_AXIS_RADIUS_MM` no longer exist, and
+`apply_delta_transform()`'s loop is `range(9)` again -- index 9 is gone, not
+merely never-yet-added as it was pre-7.1. The TCP Frame stays at index 8,
+unaffected, and still takes the tool's own rest rotation.
+
+The mesh is re-aimed at load time rather than rendered as exported, since its
+native CAD pose targets the retired `TCP.txt` point rather than the real
+tool=1 offset. Its tip is pinned onto `tcp_point` and its **shaft's** long
+axis (`_nozzle_shaft_mask` + `_obb_from_points()`) laid along **this frame's
+own -Z** -- the approach axis every curved `R_target` is built around (S1.36).
+So the triad sits at the tool's tip and the nozzle body runs back along the
+blue Z axis, collinear with it by construction: what the triad claims and
+what the mesh shows are now the same thing, which is the point. Viewed down
+the tool the blue axis foreshortens to almost nothing, which is the quickest
+visual check that the alignment is intact.
+
+The shaft rather than the whole mesh because the mounting bracket skews a
+whole-mesh fit by 6.59 degrees, which would put the rendered shaft that far
+off the commanded approach axis. Note the tool visibly floats clear of the
+flange (nearest approach 98.33mm) -- an artefact of the placeholder asset's
+wrong length and compound mount angle, accepted deliberately in favour of
+showing the true orientation.
+
+Full rationale and measurements: `settled.md` S1.51.
