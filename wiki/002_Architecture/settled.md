@@ -3644,3 +3644,71 @@ change, or a different export-folder convention is explicitly requested --
 derived from anything in the spec itself.
 
 **Verified on:** 2026-09-03.
+
+## S1.50 Job export chunked across frames + Cancel button (roadmap 7.5 follow-up) -- `write_job_export()` replaced by `step_export_job()`/`_flush_export_segment()`/`_finish_export_job()`
+
+**Decision:** `write_job_export()` (S1.49's single blocking call) is deleted.
+`export_active_job()` now only self-checks (`build_export_segments()` +
+`validate_job()`, unchanged) and, on ACCEPTED, seeds chunked write state
+instead of writing. `VisContent.step_export_job()` -- called every frame from
+`gui_panel.UI_Menu.render()`, mirroring `step_toolpath_ik_precompute()` --
+advances the write `EXPORT_CHUNK_SIZE` (2000, unmeasured default) points at a
+time, flushing each segment's `toolpath_TN.ply`/`segment_N_solution.json` via
+`_flush_export_segment()` as soon as its points are done, then writing
+`job.json` + `surface.obj` via `_finish_export_job()` once every segment is
+flushed. `gui_panel.py` gets a `psim.ProgressBar` (same idiom as
+Precompute/Geodesics) and a "Cancel Export" button
+(`VisContent.cancel_export_job()`, mirroring `cancel_toolpath_ik_precompute()`
+-- prunes whatever segment files were already flushed via
+`_prune_stale_export_files(job_dir, keep=0)`).
+
+**Reason:** the planar job is 181,375 points (S1.47's measured count); writing
+it was one `Button("Export IK Job")` click freezing the GUI for the whole
+duration, with no feedback and no way to tell it apart from a hang.
+
+### Bugs found in review, fixed before this entry
+
+**1. Toolpath-source race.** `_finish_export_job()` read the *live*
+`self.toolpath_source` to pick which layer's `surface.obj` to copy, while
+`export_job_dir`/`export_segments` were captured from the toolpath source at
+`export_active_job()`-start. Because the write now spans many frames instead
+of one call, a user could solve RX, click Export, switch the "Toolpath
+Source" radio to TX before the chunked write finished, and get RX's solved
+path shipped with TX's `surface.obj` in `assets/export/RX/` -- silently
+wrong, reported as success. Same bug *class* S1.49 already found and fixed
+once (see above), but that fix only guards the moment `export_active_job()`
+starts; chunking reopened the window for the whole write's duration.
+**Fixed** by capturing `self.export_toolpath_source = self.toolpath_source`
+alongside the other `export_*` state at export-start and reading that (never
+live `toolpath_source`) inside `_finish_export_job()`; the "Toolpath Source"
+radio's `BeginDisabled` in `gui_panel.py` now also gates on `export_running`,
+belt-and-suspenders so the switch can't even be attempted mid-export.
+Verified: started an RX export, flipped `toolpath_source` to TX mid-write,
+confirmed the finished job's `surface.obj` still matched RX's source file,
+not TX's.
+
+**2. `export_running` stuck `True` on a write failure.** `_finish_export_job()`
+did the `surface.obj` copy and `job.json` write *before* clearing
+`export_running`. A failure in either (e.g. a missing `surface_file`) left
+`export_running` `True`; the next frame's `step_export_job()` saw
+`export_seg_index >= len(export_segments)` and re-entered
+`_finish_export_job()` immediately, failing identically forever -- once per
+frame, nothing surfaced to `export_status`, the Export button stuck
+disabled. `step_toolpath_ik_precompute()`'s equivalent tail avoids this by
+clearing `precompute_running` before its own I/O. **Fixed** by wrapping the
+copy + `job.json` write in `try/except OSError`, the same "fail closed with a
+status message" convention `run_toolpath_ik_precompute()` already uses for
+its G-code file I/O: on exception, `export_running` is cleared and
+`export_status` reports the failure; on success, unchanged. Verified: forced
+the `job.json` write to fail by pointing `export_job_dir` at a nonexistent
+path, confirmed `export_running` became `False` with a failure message and a
+second `step_export_job()` call was a no-op (no retry loop).
+
+### Unrelated, same pass: precompute terminal status shortened
+
+Direct user request, not a bug: `_finish_candidate_search()`'s terminal
+`precompute_status` was `"Solved N waypoint(s) -- A-B candidates/waypoint,
+path cost C"`; it's now just `"Solved N waypoint(s)"`. The candidate-count/
+path-cost detail is no longer computed or shown.
+
+**Verified on:** 2026-09-04.

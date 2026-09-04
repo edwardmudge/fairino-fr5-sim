@@ -78,6 +78,11 @@ SINGULARITY_WARN_J5_DEG = 2.0  # |J5| below this warns (does NOT reject)
 EXPORT_DIR = "assets/export"
 EXPORT_GENERATOR = "fairino-fr5-sim stage7 exporter"
 
+EXPORT_CHUNK_SIZE = 2000  # points written per step() call. FK + string
+# formatting has no equivalent measurement yet (unlike PRECOMPUTE_CHUNK_SIZE's
+# profiled 0.5ms/waypoint) but is far cheaper per-point than a full IK solve
+# with filters, so this starts much larger; tune down if a frame stutters.
+
 TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
 TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
@@ -365,6 +370,20 @@ class VisContent:
         self.precompute_joint_path = []
         self.precompute_status = ""
         self.export_status = ""  # roadmap 7.5 -- validate_job()'s table, plus the written path on success
+
+        # Chunked job-export write state, see step_export_job()
+        self.export_running = False
+        self.export_index = 0
+        self.export_total = 0
+        self.export_segments = []
+        self.export_job_dir = ""
+        self.export_toolpath_source = -1  # captured at export start, see export_active_job()
+        self.export_warned = False
+        self.export_seg_index = 0
+        self.export_point_index = 0
+        self.export_ply_lines = []
+        self.export_points = []
+        self.export_job_meta = []       # accumulated job.json "segments" entries
         self.precompute_cache_meta = None  # Cache key captured at precompute-start, see run_toolpath_ik_precompute()
         self.precompute_cache_path = None  # Which cache file this precompute writes to (per-layer for curved, roadmap 6.5)
         self.precompute_filter_mode = "planar"  # "planar" | "curved" -- selects the candidate
@@ -2489,11 +2508,7 @@ class VisContent:
             [self.precompute_commanded_R[i][chosen[i]] for i in range(n)])
 
         self.precompute_running = False
-        cand_counts = [len(c) for c in self.precompute_cand_joints]
-        self.precompute_status = (
-            f"Solved {self.precompute_total} waypoint(s) -- "
-            f"{min(cand_counts)}-{max(cand_counts)} candidates/waypoint, "
-            f"path cost {self.precompute_dag_dist[chosen_last]:.1f}")
+        self.precompute_status = f"Solved {self.precompute_total} waypoint(s)"
         self.save_toolpath_precompute_cache(self.precompute_cache_path)
 
         # The per-layer candidate arrays are the precompute's peak memory (a
@@ -2589,13 +2604,164 @@ class VisContent:
         if not ok:
             self.export_status = format_validation(ok, results)
             return
+
         job_name = ("planar" if self.toolpath_source == -1
                     else self.curved_layer_names[self.toolpath_source])
-        job_dir = write_job_export(self, segments, f"{EXPORT_DIR}/{job_name}")
-        warned = any(not r.passed for r in results if r.action == "WARN")
+        job_dir = f"{EXPORT_DIR}/{job_name}"
+        os.makedirs(job_dir, exist_ok=True)
+        _prune_stale_export_files(job_dir, len(segments))
+
+        self.export_segments = segments
+        self.export_job_dir = job_dir
+        self.export_toolpath_source = self.toolpath_source
+        self.export_warned = any(not r.passed for r in results if r.action == "WARN")
+        self.export_seg_index = 0
+        self.export_point_index = 0
+        self.export_ply_lines = []
+        self.export_points = []
+        self.export_job_meta = []
+        self.export_index = 0
+        self.export_total = sum(len(s.joints) for s in segments)
+        self.export_running = True
+        self.export_status = f"Exporting 0/{self.export_total} point(s)"
+
+    def step_export_job(self):
+        """Advance the in-progress job export by one chunk of points -- call
+        every frame from render(). No-ops unless export_running. Roadmap 7.5
+        follow-up: write_job_export() used to run the whole job (up to
+        181,375 planar points, BOOT_MATRIX's "Job export" row) inside one
+        Button click, freezing the GUI for however long that took. This
+        walks the same per-segment writer EXPORT_CHUNK_SIZE points at a
+        time, mirroring step_toolpath_ik_precompute()'s chunking, and
+        flushes each segment's files as soon as its points are done."""
+        if not self.export_running:
+            return
+
+        remaining = EXPORT_CHUNK_SIZE
+        while remaining > 0 and self.export_seg_index < len(self.export_segments):
+            seg = self.export_segments[self.export_seg_index]
+            end = min(self.export_point_index + remaining, len(seg.joints))
+            for i in range(self.export_point_index, end):
+                pos, normal = seg.positions[i], seg.normals[i]
+                self.export_ply_lines.append(
+                    f"{pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f} "
+                    f"{normal[0]:.6f} {normal[1]:.6f} {normal[2]:.6f}\n")
+                angles = seg.joints[i]
+                tcp_xyz = (self.compute_fk(angles)[5] @ self.T_flange_to_tcp)[:3, 3]
+                self.export_points.append({
+                    "joints_deg": [float(a) for a in angles],
+                    "tcp_xyz_base_mm": [float(v) for v in tcp_xyz],
+                    "normal_base": [float(v) for v in normal],
+                })
+
+            consumed = end - self.export_point_index
+            remaining -= consumed
+            self.export_index += consumed
+            self.export_point_index = end
+
+            if self.export_point_index >= len(seg.joints):
+                self._flush_export_segment(seg)
+                self.export_seg_index += 1
+                self.export_point_index = 0
+                self.export_ply_lines = []
+                self.export_points = []
+
+        if self.export_seg_index >= len(self.export_segments):
+            self._finish_export_job()
+        else:
+            self.export_status = f"Exporting {self.export_index}/{self.export_total} point(s)"
+
+    def _flush_export_segment(self, seg):
+        """Write one finished segment's toolpath_TN.ply + segment_N_solution.json
+        and record its job.json entry -- the per-segment half of the old
+        write_job_export(), split out so step_export_job() can call it once
+        a segment's points are done."""
+        ply_name = f"toolpath_T{seg.index}.ply"
+        with open(os.path.join(self.export_job_dir, ply_name), "w", encoding="utf-8") as f:
+            f.writelines(self.export_ply_lines)
+
+        solution = {
+            "segment_id": seg.index,
+            "toolpath_file": ply_name,
+            "num_points": len(self.export_points),
+            "points": self.export_points,
+        }
+        with open(os.path.join(self.export_job_dir, f"segment_{seg.index}_solution.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump(solution, f, indent=2)
+
+        self.export_job_meta.append({
+            "segment_id": seg.index, "toolpath": ply_name,
+            "solution": f"segment_{seg.index}_solution.json"})
+
+    def _finish_export_job(self):
+        """Write job.json + copy surface.obj and end the export -- the
+        job-level tail of the old write_job_export(), run once all segments
+        are flushed.
+
+        Reads export_toolpath_source (captured at export_active_job()-start),
+        NOT the live toolpath_source -- switching the GUI's Toolpath Source
+        radio while this chunked write is still in flight must not change
+        which layer's surface.obj lands in this job's folder (a review-found
+        bug, settled.md S1.50).
+
+        Wrapped in try/except so a failure here (e.g. a curved layer's
+        surface_file went missing) clears export_running and reports it via
+        export_status instead of retrying the same failing write every frame
+        forever -- mirrors run_toolpath_ik_precompute()'s "fail closed with a
+        status message" convention for its own file I/O (also S1.50)."""
+        try:
+            if self.export_toolpath_source != -1:
+                surface_src = os.path.join(
+                    CURVED_MODEL_DIR, CURVED_LAYERS[self.export_toolpath_source]["surface_file"])
+                shutil.copyfile(surface_src, os.path.join(self.export_job_dir, "surface.obj"))
+
+            identity_pose = matrix_to_pose(self.compute_fk([0] * 6)[5] @ self.T_flange_to_tcp)
+            job = {
+                "format": "fr5_external_ik_job",
+                "format_version": "2.0",
+                "generator": EXPORT_GENERATOR,
+                "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "tool_index": 1,
+                "tcp_offset_6d": [float(v) for v in TCP_OFFSET_6D_MM_DEG],
+                "identity_check": {
+                    "joints_zero_tcp_pose_base": [float(v) for v in identity_pose],
+                },
+                "segments": self.export_job_meta,
+            }
+            with open(os.path.join(self.export_job_dir, "job.json"), "w", encoding="utf-8") as f:
+                json.dump(job, f, indent=2)
+        except OSError as e:
+            self.export_running = False
+            self.export_segments = []
+            self.export_job_meta = []
+            self.export_status = f"Export failed writing {self.export_job_dir}: {e}"
+            return
+
+        n_segments = len(self.export_segments)
+        job_dir = self.export_job_dir
+        warned = self.export_warned
+        self.export_running = False
+        self.export_segments = []
+        self.export_job_meta = []
         self.export_status = (
             f"Passed all checks{' (with warnings)' if warned else ''}, exported "
-            f"{len(segments)} segment(s) to {job_dir}")
+            f"{n_segments} segment(s) to {job_dir}")
+
+    def cancel_export_job(self):
+        """Stop an in-progress job export and discard partial output --
+        mirrors cancel_toolpath_ik_precompute(). Prunes whatever segment
+        files were already flushed to export_job_dir (keep=0 matches every
+        toolpath_T*.ply/segment_*_solution.json written so far) so a
+        cancelled run doesn't leave orphaned files behind -- job.json itself
+        is only written by _finish_export_job(), so none exists yet to worry
+        a receiving parser."""
+        if self.export_job_dir:
+            _prune_stale_export_files(self.export_job_dir, keep=0)
+        self.export_running = False
+        self.export_segments = []
+        self.export_job_meta = []
+        self.export_status = "Export cancelled"
 
 
     def _clear_gcode_print_mesh(self):
@@ -4449,79 +4615,21 @@ def format_validation(ok, results):
     return "\n".join(lines)
 
 
-def write_job_export(vis, segments, job_dir):
-    """Write one job.json + segment_N_solution.json + toolpath_TN.ply per
-    ExportSegment, plus surface.obj where one exists, to job_dir --
-    external_ik_exchange_spec_EN.md's folder structure. Roadmap 7.5.
+def _prune_stale_export_files(job_dir, keep):
+    """Remove files left over from a previous, larger export -- otherwise a
+    re-export with fewer segments than last time leaves orphaned
+    higher-numbered files a receiving parser would try to load. Split out of
+    the old write_job_export() so VisContent.export_active_job() can run it
+    once, up front, before the chunked write (step_export_job(), roadmap
+    7.5 follow-up) starts.
 
-    Assumes the caller already ran validate_job() and got ok=True; this
-    function only writes, it does not re-check. Called from
-    VisContent.export_active_job().
-
-    surface.obj is curved-only: the planar path's "plate" is S1.40's
-    infinite plane, not a mesh asset, so there is nothing to copy for it --
-    a known gap in spec coverage for that source, not an oversight.
-    """
-    os.makedirs(job_dir, exist_ok=True)
-
-    # Prune stale files from a previous, larger export first -- otherwise a
-    # re-export with fewer segments than last time leaves orphaned
-    # higher-numbered files a receiving parser would try to load.
-    keep = len(segments)
+    surface.obj (curved-only: the planar path's "plate" is S1.40's infinite
+    plane, not a mesh asset) and job.json are overwritten in place by
+    _finish_export_job(), not pruned here."""
     for fname in os.listdir(job_dir):
         m = re.match(r"^(?:toolpath_T|segment_)(\d+)(?:_solution)?\.(?:ply|json)$", fname)
         if m and int(m.group(1)) >= keep:
             os.remove(os.path.join(job_dir, fname))
-
-    for seg in segments:
-        ply_name = f"toolpath_T{seg.index}.ply"
-        with open(os.path.join(job_dir, ply_name), "w", encoding="utf-8") as f:
-            for pos, normal in zip(seg.positions, seg.normals):
-                f.write(f"{pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f} "
-                        f"{normal[0]:.6f} {normal[1]:.6f} {normal[2]:.6f}\n")
-
-        points = []
-        for angles, normal in zip(seg.joints, seg.normals):
-            tcp_xyz = (vis.compute_fk(angles)[5] @ vis.T_flange_to_tcp)[:3, 3]
-            points.append({
-                "joints_deg": [float(a) for a in angles],
-                "tcp_xyz_base_mm": [float(v) for v in tcp_xyz],
-                "normal_base": [float(v) for v in normal],
-            })
-        solution = {
-            "segment_id": seg.index,
-            "toolpath_file": ply_name,
-            "num_points": len(points),
-            "points": points,
-        }
-        with open(os.path.join(job_dir, f"segment_{seg.index}_solution.json"), "w", encoding="utf-8") as f:
-            json.dump(solution, f, indent=2)
-
-    if vis.toolpath_source != -1:
-        surface_src = os.path.join(CURVED_MODEL_DIR, CURVED_LAYERS[vis.toolpath_source]["surface_file"])
-        shutil.copyfile(surface_src, os.path.join(job_dir, "surface.obj"))
-
-    identity_pose = matrix_to_pose(vis.compute_fk([0] * 6)[5] @ vis.T_flange_to_tcp)
-    job = {
-        "format": "fr5_external_ik_job",
-        "format_version": "2.0",
-        "generator": EXPORT_GENERATOR,
-        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "tool_index": 1,
-        "tcp_offset_6d": [float(v) for v in TCP_OFFSET_6D_MM_DEG],
-        "identity_check": {
-            "joints_zero_tcp_pose_base": [float(v) for v in identity_pose],
-        },
-        "segments": [
-            {"segment_id": seg.index, "toolpath": f"toolpath_T{seg.index}.ply",
-             "solution": f"segment_{seg.index}_solution.json"}
-            for seg in segments
-        ],
-    }
-    with open(os.path.join(job_dir, "job.json"), "w", encoding="utf-8") as f:
-        json.dump(job, f, indent=2)
-
-    return job_dir
 
 
 # Validation

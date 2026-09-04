@@ -67,6 +67,7 @@ class UI_Menu:
         self.content.record_trajectory_point()
         self.content.step_toolpath_ik_precompute()
         self.content.step_geodesic_precompute()
+        self.content.step_export_job()
         self.content.advance_toolpath_playback(max(1, int(self.playback_speed)))
         if self.content.playback_waiting:
             # Snap down reactively the moment playback hits precompute's throughput
@@ -128,7 +129,8 @@ class UI_Menu:
             layer_names = self.content.curved_layer_names or []
             tokens = [-1] + list(range(len(layer_names)))
             labels = ["Planar (G-code)"] + layer_names
-            psim.BeginDisabled(self.content.precompute_running or self.content.playback_running)
+            psim.BeginDisabled(self.content.precompute_running or self.content.playback_running
+                                or self.content.export_running)
             for i, (tok, label) in enumerate(zip(tokens, labels)):
                 if i:
                     psim.SameLine()
@@ -213,10 +215,18 @@ class UI_Menu:
             # precompute_joint_path rather than full completion, matching
             # build_export_segments()'s own "partial precompute exports its
             # solved prefix" behavior.
-            psim.BeginDisabled(self.content.precompute_running or not self.content.precompute_joint_path)
+            psim.BeginDisabled(self.content.precompute_running or self.content.export_running
+                                or not self.content.precompute_joint_path)
             if psim.Button("Export IK Job"):
                 self.content.export_active_job()
             psim.EndDisabled()
+            if self.content.export_running:
+                psim.SameLine()
+                if psim.Button("Cancel Export"):
+                    self.content.cancel_export_job()
+                total = self.content.export_total
+                fraction = (self.content.export_index / total) if total else 0.0
+                psim.ProgressBar(fraction, overlay=f"{fraction * 100:.0f}%" if total else "")
             if self.content.export_status:
                 psim.TextWrapped(self.content.export_status)
 
