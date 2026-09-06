@@ -762,6 +762,13 @@ per the roadmap's original framing -- promotion to a GUI-exposed control.
 
 ## S1.18 `PLAYBACK_RENDER_STRIDE` raised from 5 to 50, measured (not assumed) against the real benchy; `planar-printing-prototype` had nothing portable for rendering
 
+> ⚠ **Changed 2026-09-04 (S1.55).** `PLAYBACK_RENDER_STRIDE` no longer exists.
+> The stride is derived per playback from the path's own joint motion
+> (`_derive_playback_render_stride()`), because a fixed *waypoint* stride is
+> only a fixed *visible* step when joint motion per waypoint matches -- it does
+> not across toolpath sources. The planar path still derives exactly 50, so the
+> measurements below stand as recorded for that path; a curved layer derives ~6.
+
 **Decision:** S1.17's `5` was too conservative in practice -- the user
 reported playback still felt laggy after that change. Raised
 `PLAYBACK_RENDER_STRIDE` (`geometry_backend.py`) to `50`.
@@ -908,6 +915,12 @@ against real visual inspection, not just the triangle count.
 **Verified on:** 2026-07-17
 
 ## S1.20 `screenshot_to_buffer()` timing methodology retracted; playback registration right-sized to progress instead of registering the full mesh from frame 1
+
+> ⚠ **Partly changed 2026-09-04 (S1.55).** The *methodology* here is still
+> current and was reused to measure S1.55. What changed is the throttle it
+> describes: `PLAYBACK_RENDER_STRIDE` is gone, replaced by a per-playback
+> derived stride. The `PLAYBACK_LOOKAHEAD_BEADS` registration scheme in item 3
+> is unchanged.
 
 **Decision:** Two related corrections after the user reported playback
 still felt laggy post-S1.19 and asked to compare against
@@ -3895,3 +3908,235 @@ report what happened rather than raise.
 solved N waypoint(s)" with no traceback; Pause mid-run still resumes from
 `precompute_index` and Cancel -> Run still starts fresh, so S1.14's two
 original modes are untouched.
+
+## S1.53 Coordinate-frame triad radius is relative to its own axis length, not a flat absolute constant
+
+**Decision:** `create_coordinate_frame()`'s curve-network radius is
+`scale * FRAME_AXIS_RADIUS_RATIO` (`FRAME_AXIS_RADIUS_RATIO = 0.05`), not a
+flat `set_radius(N_MM, relative=False)`.
+
+**The bug this fixes.** The TCP/User Frame triads originally had no explicit
+radius at all, leaving Polyscope's default *relative* radius in effect --
+`radius_relative * automatic_length_scale`, where `automatic_length_scale` is
+recomputed from the bounding box of every registered structure. During
+toolpath playback the "G-code Print" bead mesh is repeatedly re-registered
+with more geometry (growing the scene bounding box), so the triads visibly
+changed thickness as playback progressed even though their own geometry
+never changed. Pinning an absolute radius (matching `CURVE_RADIUS_MM`,
+`TRAJECTORY_RADIUS_MM`, `CURVED_ORDER_FEED_RADIUS_MM`'s existing pattern)
+fixes that -- but a single flat constant is wrong here, because
+`create_coordinate_frame()` is shared by callers at different `scale`s and a
+radius tuned for one is wrong for the others. A flat 2.5mm (right at 50mm
+axes) renders a 1mm triad as a blob, radius wider than the axes are long.
+
+**Two follow-ons found in review, both the same root cause.** Pinning the
+triads exposed structures still on the scene-scaled default:
+
+1. **The world-origin frame was left invisible.** It used
+   `create_coordinate_frame()`'s bare `scale=1.0` default -- 1mm axes, which
+   are sub-pixel in a ~2400mm scene. It had only ever been visible because
+   the default relative radius inflated it to a 12mm-thick blob; given a
+   proportionate 0.05mm radius it disappeared entirely. Fixed by giving it a
+   real length, `WORLD_FRAME_SCALE_MM = 100.0` -- a 100mm triad at 5mm thick.
+   The 1mm default was never a viewable triad, only an accidental blob.
+2. **The "TCP" point cloud was a 24mm ball.** Registered with no explicit
+   radius, so it drew at the same scene-scaled 12mm -- previously masked by
+   the equally fat default-radius triad sitting on top of it, and left
+   standing proud once the triad thinned. Pinned to
+   `TCP_FRAME_SCALE_MM * FRAME_AXIS_RADIUS_RATIO` (2.5mm), matching the
+   triad's own tube thickness so it reads as the triad's origin. Kept
+   visible and registered: it is the tool's collision body and holds a fixed
+   index in `rest_verts`/`update_fns`/`mesh_handles`.
+
+**Reason:** shared triad infrastructure serving callers at different scales
+needs a scale-relative visual parameter, not a constant tuned for one of
+them -- and every structure's radius wants pinning absolute, since a relative
+one is a function of the whole scene's bounding box and therefore changes as
+the print mesh grows during playback.
+
+**Verified on:** 2026-09-05. `scale * FRAME_AXIS_RADIUS_RATIO` gives 2.5mm at
+the TCP/User frames' `scale=50.0` (unchanged from the value visually tuned
+there) and 5mm at the world-origin frame's `scale=100.0`. Polyscope's default
+was measured at 12mm radius in a 2400mm scene, confirming both the original
+pulsing and why the TCP ball and the world triad behaved as they did.
+
+## S1.54 Job export also writes a dated .zip of the job folder; its failure is reported separately from the folder write
+
+**Decision:** `_finish_export_job()` writes the zip in its own
+try/except OSError, after (not inside) the try/except that guards
+`surface.obj`/`job.json`. GUI adds a free-text "Export Name" field
+(`gui_panel.py`), sanitized and captured into `export_zip_name` at
+`export_active_job()`-start (same reasoning as `export_toolpath_source`'s
+capture, S1.50) -- falling back to the job folder's own name
+(`os.path.basename(job_dir)`) if the field is blank *or* sanitizes down to
+only underscores (i.e. an input made *entirely* of the reserved characters
+`\x00-\x1f&lt;&gt;:"/\|?*` -- ordinary punctuation like `!!!` is not sanitized and is
+kept as typed). Filename:
+`EXPORT_DIR/<YYYYMMDD>-<name>.zip`, UTC date (matching `job.json`'s
+`generated_utc` convention) -- built via `shutil.make_archive(zip_base,
+"zip", root_dir=dirname(job_dir), base_dir=basename(job_dir))` so the job
+folder lands as one top-level directory inside the zip rather than loose files
+at the archive root -- 72 for a curved layer, ~40,000 for the planar job.
+
+**Why the zip's try/except is separate.** A first pass wrapped the zip call
+in the *same* try/except as the `job.json`/`surface.obj` write (both fail
+closed the same way per S1.50's convention). Caught in review: by the time
+the zip step runs, `job_dir` is already a fully complete, valid job --
+zipping it is a convenience, not a second critical write. A zip-only
+failure (disk full, AV lock on the just-written files) doesn't destroy
+anything, so reusing the critical-write's fail-closed handler wrongly
+reported a successful export as "Export failed writing `<job_dir>`" (the
+wrong path, too) and discarded `export_segments`/`export_job_meta` state
+over an artifact that was never lost. The zip's own try/except instead
+folds a failure into `export_status` as a trailing note (e.g. "... exported
+to `<job_dir>` (zip failed: ...)") while still reporting the export itself
+as passed.
+
+**Reason:** a convenience step layered on top of an already-durable write
+must not be able to make that write look like it failed.
+
+**Verified on:** 2026-09-04. `shutil.make_archive` with `root_dir`/`base_dir`
+confirmed (standalone test) to produce a zip containing the job folder as a
+single top-level entry. Sanitize+fallback confirmed against blank,
+whitespace-only, all-invalid-character, and normal inputs.
+
+## S1.55 Playback render stride is derived per playback from the path's own joint motion, superseding S1.18's fixed `PLAYBACK_RENDER_STRIDE = 50`
+
+**Decision:** `PLAYBACK_RENDER_STRIDE` is gone. `advance_toolpath_playback()`
+now throttles on `self.playback_render_stride`, computed once per playback by
+`_derive_playback_render_stride()` from the solved joint path:
+
+```python
+deg_per_waypoint = median(|diff(joint_path)|.max(axis=1))
+stride = clip(round(PLAYBACK_RENDER_DEG_PER_PUSH / deg_per_waypoint), 1, PLAYBACK_RENDER_STRIDE_MAX)
+```
+with `PLAYBACK_RENDER_DEG_PER_PUSH = 5.0` and `PLAYBACK_RENDER_STRIDE_MAX = 50`.
+
+**The bug this fixes.** The user reported curved playback "steps a lot" at 1x
+while planar looks smooth. S1.18's stride is a fixed *waypoint count*, which
+is only a fixed *visible* step if joint motion per waypoint matches. Measured
+against the real cached joint paths, it doesn't:
+
+| | waypoints | deg/waypoint (median) | deg per 50-waypoint push | pushes per print |
+|---|---|---|---|---|
+| planar | 181,375 | 0.095 | 4.75 | 3,628 |
+| curved RX | 3,175 | 0.903 | **45.13** | **64** |
+| curved TX | 2,688 | 0.828 | 41.40 | 54 |
+
+Two compounding causes, both measured: curved has ~57x fewer waypoints, and
+its tool must reorient continuously to stay normal to the surface, so each
+waypoint carries ~10x the joint motion. Per-waypoint *spacing* is nearly
+identical (~1.6mm both), so distance is not the discriminator -- joint motion
+is, which is what the new derivation normalises on. Planar additionally hides
+its stride because the slicer zigzags: 50 points of zigzag is only ~15mm net
+displacement versus ~51mm on a curved monotone sweep.
+
+**Why not simply push every frame.** Benchmarked first (S1.20 methodology --
+real `ps.show()` loop, `perf_counter()` deltas, `ps.unshow()` after 600
+frames, `step_count=1` worst case; explicitly *not* the `screenshot_to_buffer`
+approach S1.20 retracted). Curved layer; each run is 600 frames, of which the
+569 after a 30-frame warm-up are timed. Push counts are over all 600:
+
+| condition | stride | pushes | median | p99 | max |
+|---|---|---|---|---|---|
+| S1.18 fixed | 50 | 13 (2%) | 15.83ms (63.2fps) | 40.5ms | 47.1ms |
+| **derived (adopted)** | **6** | **101 (17%)** | **15.86ms (63.0fps)** | 44.4ms | 75.3ms |
+| every frame | 1 | 600 (100%) | 39.44ms (25.4fps) | 46.0ms | 48.9ms |
+| arm every frame, bead on 50 | -- | 13 | 38.25ms (26.1fps) | 74.6ms | 87.1ms |
+
+Pushing every frame costs ~24ms/frame and halves the framerate to 25fps, so it
+was rejected. The harness was checked against S1.20's ~15.8ms figure on the
+**planar** path it was originally measured on -- the planar run here
+reproduced 15.83ms with its derived stride of 50, i.e. the unchanged
+configuration. The curved stride-50 row landing on the same 15.83ms is a
+coincidence of two different scenes, not the cross-check.
+
+**Accepted consequence: splitting the arm push from the bead push buys
+nothing.** The obvious fallback -- arm every frame (cheap, fixed-size link
+meshes) with the expensive growing bead buffer left on the coarse stride --
+was measured and is *not* cheaper: 38.25ms vs 39.44ms. The arm is ~23ms of
+the ~24ms push cost (241k verts across 9 link meshes, versus only ~25k for
+curved's entire bead buffer). The conditional is therefore left unsplit, and
+the tunable is push *frequency*, not which half pushes.
+
+**Reason:** the throttle's purpose is bounding render cost, but its parameter
+should be the thing the eye actually sees -- motion per push -- not waypoint
+count, which is a proxy that holds only for one toolpath source.
+
+**Verified on:** 2026-09-04. Derived strides against the real caches: planar
+50 (4.75 deg/push -- **bit-for-bit unchanged**, the cap does the work),
+curved RX 6 (5.42 deg/push, was 45.13), curved TX 6 (4.97, was 41.40) -- an
+~8x smoothness gain on curved at an unchanged 63fps median. Degenerate paths
+guarded: empty and single-pose return 1, a never-moving path returns the cap,
+a NaN path returns the cap rather than raising `round(nan)` out of the frame
+callback, and a path that is >half duplicate points still derives from its
+*moving* steps (a plain median would read 0 there and pick the coarsest
+stride -- the worst stepping, exactly backwards). Reviewed 2026-09-05.
+
+## S1.56 Playback resume re-validates the loaded precompute against the active toolpath source
+
+**Decision:** `run_toolpath_playback()` re-initializes, rather than resumes,
+whenever `precompute_cache_path` is not the one the active `toolpath_source`
+solves into. That mapping now lives in one place,
+`_expected_precompute_cache_path(source=None)`, called by the resume guard,
+`_init_curved_toolpath_playback()` and `export_active_job()`.
+
+**The bug this fixes.** `run_toolpath_playback()` only called an initialiser
+when the bead arrays were `None`, but the source guard *and* (since S1.55) the
+render-stride derivation both live inside those initialisers. Reproduction:
+play RX -> Pause -> switch Toolpath Source (the radio is gated on
+`playback_running`, which Pause clears, so this is reachable) -> Run
+Precompute, which loads TX from cache -> switch back to RX -> Run. RX's beads
+already exist, so no initialiser ran and nothing revalidated: the arm followed
+**TX's** 2,688-pose joint path while revealing **RX's** beads, ending ~500
+waypoints early with most of RX's beads still hidden. Pre-existing since 6.6;
+S1.55's per-path stride would have added a second stale value on top.
+
+**Reason:** "the beads exist" answered a different question than "the loaded
+solve belongs to what is selected". Three hand-written copies of the
+source->cache-path expression is how the guard came to be enforced in some
+entry points and not others.
+
+**Verified on:** 2026-09-05. The mapping returns the planar cache for source
+-1 and the per-layer curved caches for 0/1; the stale test is True for
+"RX active, TX loaded" (forces re-init) and False for a matched pair, so an
+ordinary Pause -> Run still resumes from `playback_index`. A `None` cache path
+also reads stale, which is harmless: it only occurs with an empty joint path,
+which the initialisers already refuse with "Run Precompute first".
+
+## S1.57 `playback_waiting` and the frontier-chasing paths removed as unreachable since 7.4
+
+**Decision:** deleted `playback_waiting`, the `waiting` local, the
+`(waiting and moved)` clause in the render conditional, the
+"Waiting for precompute" status branch, and the Speed slider snap-down in
+`gui_panel.render()` (with its now-unused `PRECOMPUTE_CHUNK_SIZE` import).
+`advance_toolpath_playback()`'s docstring is rewritten to match.
+
+**Why they were dead.** S1.14's model -- playback starts against a partially
+solved path and chases a live frontier -- stopped being reachable at 7.4.
+`precompute_joint_path` is only ever assigned whole: `[]` on reset/abort,
+`list(joint_path)` on a cache load, and one atomic comprehension in
+`_finish_candidate_search()`. Nothing appends to it. `_finish_candidate_search()`
+runs only under `precompute_index >= precompute_total`, and a cache load sets
+`index = total = len`; a solve that fails, fails the whole run rather than
+leaving a prefix. So `exhausted` is true whenever the path is non-empty, and
+the initialisers refuse an empty one -- making `waiting = at_frontier and not
+exhausted` permanently `False`, and the GUI snap-down that read it dead too.
+
+**Reason:** unreachable state that looks live is worse than no state. This
+machinery actively misled the S1.55 investigation, which read the
+`(waiting and moved)` clause as a real per-frame path and had to rule it out
+by tracing every writer of `precompute_joint_path`.
+
+**Restoration condition -- read this before reintroducing chunked path
+filling.** If `precompute_joint_path` is ever filled incrementally again (e.g.
+to let playback start against a partial solve, S1.14's original intent), this
+entry must be reverted *and* `playback_render_stride` must be re-derived as
+the path grows -- S1.55 derives it once at playback init, which is only sound
+because the path is complete by then. A note to that effect sits on
+`_derive_playback_render_stride()` itself.
+
+**Verified on:** 2026-09-05. Traced every write to `precompute_joint_path`
+(5 sites, all wholesale) and to `precompute_index` before removing anything.
+Post-removal the curved benchmark is unchanged (stride 6, 63fps median) and
+playback still terminates on the `finished` branch with "Playback complete".

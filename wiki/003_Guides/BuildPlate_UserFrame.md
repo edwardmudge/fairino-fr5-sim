@@ -125,6 +125,7 @@ Module-level constants in `geometry_backend.py`:
 |---|---|
 | `USER_FRAME_ORIGIN_MM` | Default base-frame `[x, y, z]` translation to the plate's corner, used when `load_build_plate()` is called argument-free (startup, Reset). `[-570, -300, -100]` since Stage 7.1. Keep it in the same quadrant as the zero/home-pose TCP direction (see above), and check the **whole toolpath's worst wrist centre** against the 820mm envelope — not the plate corner's own distance from the base. The margin depends on the TCP offset, so it must be re-checked whenever that changes (see "Why this particular placement"). |
 | `USER_FRAME_SCALE_MM` | Length of the fixed axis triad drawn at the corner, world units (mm). |
+| `FRAME_AXIS_RADIUS_RATIO` | Line thickness, as a fraction of the triad's own `scale` (axis length). Shared with the TCP Frame — see `TCP_Frame.md`'s "How to tune it". |
 | `BUILD_PLATE_POSITION_FILE` | Path to the saved-position JSON (`assets/buildPlate/saved_position.json`) read/written by the Save/Load Position buttons. |
 | `PLATE_THICKNESS_MM` | Measured thickness (mm) of `BambuLab_BuildPlate.obj`. Shifts the plate mesh and G-code waypoints up in their local Z before the `T_user_frame` transform, so `position_mm` marks the resting/bottom face and the print lands on the real top surface. |
 | `PLATE_COLOR` | RGB (0-1) color applied to the "Build Plate" mesh via `set_color()` — light cool gray, distinct from `GCODE_COLOR`. |

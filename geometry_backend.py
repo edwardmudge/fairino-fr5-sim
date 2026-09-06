@@ -93,10 +93,28 @@ EXPORT_CHUNK_SIZE = 2000  # points written per step() call. FK + string
 TRAJECTORY_SAMPLE_INTERVAL_S = 0.1  # Minimum seconds between recorded TCP trajectory points
 TRAJECTORY_RADIUS_MM = 2.0  # Trajectory curve line thickness, world units (mm)
 TCP_FRAME_SCALE_MM = 50.0  # TCP coordinate-axes length, world units (mm)
+WORLD_FRAME_SCALE_MM = 100.0  # World-origin triad axis length, world units (mm).
+# Was create_coordinate_frame()'s bare 1.0 default, which is sub-pixel in a
+# ~2400mm scene -- it only ever showed up because Polyscope's default *relative*
+# radius inflated it to a 12mm-thick blob (the very scene-scaling this file now
+# pins away from). Given a real absolute radius, the triad needs a real length.
+FRAME_AXIS_RADIUS_RATIO = 0.05  # TCP/User/world-origin triad line thickness, as a
+# fraction of that triad's own axis length (scale) -- the three callers span a
+# 50x scale range (1mm world-origin frame vs 50mm TCP/User frames), so a single
+# absolute radius would render the 1mm triad as a blob rather than visible axes.
 
-PLAYBACK_RENDER_STRIDE = 50  # Push arm/bead updates to Polyscope every Nth
-# solved waypoint, not every frame -- full-buffer re-uploads make coarser
-# pushes cut real GPU cost, not just Python-side work.
+PLAYBACK_RENDER_DEG_PER_PUSH = 5.0  # Target max-joint motion per visible push,
+# degrees. The stride is derived per playback (playback_render_stride) from the
+# solved joint path rather than fixed, because a fixed *waypoint* stride only
+# means a fixed *visible* step if joint motion per waypoint matches -- measured,
+# it doesn't: 0.095 deg/waypoint planar vs 0.90 curved, so S1.18's stride of 50
+# gave planar a smooth 4.75 deg/push but a curved layer 45 deg/push (visibly
+# stepping, only ~64 poses for a whole print). 5.0 is planar's own measured
+# status quo, so planar still derives 50 (via the cap below) while curved
+# derives ~5.
+PLAYBACK_RENDER_STRIDE_MAX = 50  # Never push less often than S1.18's measured
+# value, whatever the deg/push target derives -- it is the ceiling that
+# benchmark tuned, and it keeps planar's behaviour bit-for-bit unchanged.
 
 TRAJECTORY_CURVE_RENDER_STRIDE = 5  # Re-register the "Trajectory" curve
 # network every Nth recorded sample -- it has no incremental grow API, so
@@ -379,6 +397,7 @@ class VisContent:
         self.export_total = 0
         self.export_segments = []
         self.export_job_dir = ""
+        self.export_zip_name = ""  # sanitized GUI "Export Name" field, captured at export start
         self.export_toolpath_source = -1  # captured at export start, see export_active_job()
         self.export_warned = False
         self.export_seg_index = 0
@@ -422,9 +441,9 @@ class VisContent:
         # from playback_running (which flips off on Pause) so the guide overlays stay hidden through a
         # pause and only reset_toolpath_playback() restores them -- roadmap 6.7.
         self.playback_index = 0
-        self._last_rendered_playback_index = 0  # Throttles the Polyscope push in advance_toolpath_playback, see PLAYBACK_RENDER_STRIDE
+        self._last_rendered_playback_index = 0  # Throttles the Polyscope push in advance_toolpath_playback, see playback_render_stride
+        self.playback_render_stride = 1  # Derived at playback init, see _derive_playback_render_stride()
         self.playback_status = ""
-        self.playback_waiting = False  # True when caught up to precompute's frontier but it isn't exhausted yet, see advance_toolpath_playback()
         self.gcode_bead_verts_full = None       # (K*8,3) world space, real bead positions
         self.gcode_bead_faces = None
         self.gcode_bead_reveal_index = None     # (K,) sorted ascending, see _build_gcode_beads
@@ -447,7 +466,7 @@ class VisContent:
         self._reset_curved_bead_state()
 
         # Initialise the scene
-        self.create_coordinate_frame()
+        self.create_coordinate_frame(scale=WORLD_FRAME_SCALE_MM)
         self.load_build_plate()
         self.mesh_data = self.load_data()
         self.update_arm([0, 0, 0, 0, 0, 0])
@@ -556,6 +575,7 @@ class VisContent:
         edges = np.array([[0,1], [0,2], [0,3]])
 
         ps_net = ps.register_curve_network(name, nodes, edges)
+        ps_net.set_radius(scale * FRAME_AXIS_RADIUS_RATIO, relative=False)
 
         # X=red, Y=green, Z=blue
         colors = np.array([[1,0,0], [0,1,0], [0,0,1]])
@@ -1577,7 +1597,7 @@ class VisContent:
             self.curved_bead_registered_capacity = [None] * n
 
         if (not self.precompute_joint_path
-                or self.precompute_cache_path != curved_precompute_cache_path(self.curved_layer_names[layer])):
+                or self.precompute_cache_path != self._expected_precompute_cache_path(layer)):
             self.playback_status = "Run Precompute for this layer first"
             return False
 
@@ -1607,6 +1627,7 @@ class VisContent:
 
         self.playback_index = 0
         self._last_rendered_playback_index = 0
+        self.playback_render_stride = self._derive_playback_render_stride()
         self.update_arm(self.precompute_joint_path[0])
         return True
 
@@ -2241,7 +2262,7 @@ class VisContent:
 
 
     def pause_toolpath_ik_precompute(self):
-        """Mirrors the GUI's playback Pause button: stop advancing the
+        """Mirrors the GUI's "Pause Toolpath" button: stop advancing the
         precompute without discarding progress. A following
         run_toolpath_ik_precompute() call continues from precompute_index."""
         self.precompute_running = False
@@ -2278,7 +2299,6 @@ class VisContent:
         was_gcode = self.precompute_cache_path in (None, GCODE_PRECOMPUTE_CACHE)
         self.playback_running = False
         self.playback_index = 0
-        self.playback_waiting = False
         self.playback_status = ""
         if was_gcode:
             self._clear_gcode_print_mesh()
@@ -2590,7 +2610,7 @@ class VisContent:
         return segments
 
 
-    def export_active_job(self):
+    def export_active_job(self, export_name=""):
         """Roadmap 7.5 -- self-check the active toolpath_source against the
         exchange spec's Rejection Criteria, then write it. GUI glue: reads
         build_export_segments()/validate_job() (both source-agnostic already).
@@ -2606,10 +2626,14 @@ class VisContent:
         completed solve (which doesn't itself touch precompute_joint_path --
         only pressing Run Precompute again does) would export whichever
         source actually solved, silently mislabeled and mis-surfaced under
-        the newly-selected source's job_name/surface.obj."""
-        expected_cache_path = (GCODE_PRECOMPUTE_CACHE if self.toolpath_source == -1
-                                else curved_precompute_cache_path(self.curved_layer_names[self.toolpath_source]))
-        if self.precompute_cache_path != expected_cache_path:
+        the newly-selected source's job_name/surface.obj.
+
+        export_name is the GUI's free-text "Export Name" field, used only
+        for the dated .zip _finish_export_job() writes alongside the job
+        folder -- sanitized and captured into export_zip_name here (not
+        read live later) for the same reason export_toolpath_source is
+        captured below: the GUI must not be able to change it mid-export."""
+        if self.precompute_cache_path != self._expected_precompute_cache_path():
             self.export_status = "Run Precompute for the active toolpath source first"
             return
         segments = self.build_export_segments()
@@ -2626,6 +2650,10 @@ class VisContent:
 
         self.export_segments = segments
         self.export_job_dir = job_dir
+        # Control chars included: a NUL would reach shutil.make_archive as a
+        # ValueError ("embedded null byte"), which the zip step's except OSError
+        # does not catch and which would escape the per-frame callback.
+        self.export_zip_name = re.sub(r'[\x00-\x1f<>:"/\\|?*]', '_', export_name.strip())
         self.export_toolpath_source = self.toolpath_source
         self.export_warned = any(not r.passed for r in results if r.action == "WARN")
         self.export_seg_index = 0
@@ -2757,9 +2785,28 @@ class VisContent:
         self.export_running = False
         self.export_segments = []
         self.export_job_meta = []
+
+        # Zipping is a convenience on top of the already-complete job_dir
+        # above, not a second critical write -- a failure here (disk full,
+        # AV lock on the files just written) must not be reported as a
+        # failed export, since job_dir is already fully valid on disk. Own
+        # try/except, separate from the one above, so it can't clobber
+        # export_status/export_segments over something that isn't lost.
+        zip_note = ""
+        try:
+            date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+            zip_name = self.export_zip_name if self.export_zip_name.strip('_') else os.path.basename(job_dir)
+            zip_base = os.path.join(EXPORT_DIR, f"{date_str}-{zip_name}")
+            archive_path = shutil.make_archive(zip_base, "zip",
+                                                root_dir=os.path.dirname(job_dir),
+                                                base_dir=os.path.basename(job_dir))
+            zip_note = f" (zipped: {archive_path})"
+        except OSError as e:
+            zip_note = f" (zip failed: {e})"
+
         self.export_status = (
             f"Passed all checks{' (with warnings)' if warned else ''}, exported "
-            f"{n_segments} segment(s) to {job_dir}")
+            f"{n_segments} segment(s) to {job_dir}{zip_note}")
 
     def cancel_export_job(self):
         """Stop an in-progress job export and discard partial output --
@@ -2799,7 +2846,6 @@ class VisContent:
         since the Clear button's whole point is "wipe G-code now"."""
         self.playback_running = False
         self.playback_index = 0
-        self.playback_waiting = False
         self.playback_status = ""
         self._clear_gcode_print_mesh()
 
@@ -2867,6 +2913,7 @@ class VisContent:
 
         self.playback_index = 0
         self._last_rendered_playback_index = 0
+        self.playback_render_stride = self._derive_playback_render_stride()
         self.update_arm(self.precompute_joint_path[0])
         return True
 
@@ -2887,20 +2934,40 @@ class VisContent:
         self.apply_live_layer_visibility(self.toolpath_source)  # restore overlays (curved; planar no-op)
 
 
+    def _expected_precompute_cache_path(self, source=None):
+        """Which cache file `source` (default: the active toolpath_source)
+        solves into. Single home for that mapping -- the playback initialisers,
+        the resume guard in run_toolpath_playback() and export_active_job() all
+        need it, and three hand-written copies is how they drifted apart."""
+        source = self.toolpath_source if source is None else source
+        return (GCODE_PRECOMPUTE_CACHE if source == -1
+                else curved_precompute_cache_path(self.curved_layer_names[source]))
+
+
     def run_toolpath_playback(self):
         """Mirrors the GUI's playback Run button: start or resume. If
         playback was never initialized this session (or was reset),
         initializes fresh; otherwise resumes from wherever playback_index
         already is (a paused run continues, not restarts). Dispatches on
         toolpath_source (roadmap 6.6) -- the planar path or a specific
-        curved layer, without duplicating this Run/Pause/Reset control set."""
+        curved layer, without duplicating this Run/Pause/Reset control set.
+
+        Re-initializes rather than resumes when the loaded precompute is no
+        longer the active source's (S1.56). The source guards AND the
+        render-stride derivation both live inside the initialisers, and the
+        existing "beads already built" test skips both -- so resuming after a
+        different layer's precompute loaded would drive one source's beads
+        along another's joint path. Safe against a None cache path: that only
+        happens with an empty joint path, which the initialisers reject
+        anyway."""
+        stale = self.precompute_cache_path != self._expected_precompute_cache_path()
         if self.toolpath_source == -1:
-            if self.gcode_bead_verts_full is None:
+            if stale or self.gcode_bead_verts_full is None:
                 if not self._init_toolpath_playback():
                     return
         else:
             layer = self.toolpath_source
-            if self.curved_bead_verts_full is None or self.curved_bead_verts_full[layer] is None:
+            if stale or self.curved_bead_verts_full is None or self.curved_bead_verts_full[layer] is None:
                 if not self._init_curved_toolpath_playback(layer):
                     return
         self.playback_running = True
@@ -2911,32 +2978,67 @@ class VisContent:
 
 
     def pause_toolpath_playback(self):
-        """Mirrors the GUI's playback Pause button: stop advancing without
+        """Mirrors the GUI's "Pause Toolpath" button: stop advancing without
         discarding progress. A following run_toolpath_playback() call
         continues from playback_index."""
         self.playback_running = False
+
+
+    def _derive_playback_render_stride(self):
+        """Waypoints per visible Polyscope push, sized so each push moves the
+        arm about PLAYBACK_RENDER_DEG_PER_PUSH -- called by both playback
+        initialisers once precompute_joint_path is populated.
+
+        Normalises on joint motion, not waypoint count: the two toolpath
+        sources differ ~10x in degrees per waypoint (0.095 planar vs 0.90
+        curved -- the curved tool must also reorient continuously to stay
+        normal to the surface), so one fixed stride cannot serve both. Median,
+        not mean, so a single travel hop can't coarsen the whole print.
+
+        Assumes precompute_joint_path is assigned atomically and complete
+        (S1.57): the stride is derived once, here, so a path that grew after
+        this call would keep a stride sized for its prefix. If incremental
+        filling is ever reintroduced, this must be re-derived as it grows."""
+        jp = np.asarray(self.precompute_joint_path, dtype=float)
+        if len(jp) < 2:
+            return 1
+        step = np.abs(np.diff(jp, axis=0)).max(axis=1)
+        if step.max() <= 0:  # a path that never moves: nothing to smooth
+            return PLAYBACK_RENDER_STRIDE_MAX
+        # Median over the MOVING steps only. A plain median goes to zero as soon
+        # as over half the pairs are duplicates (repeated points, zero-length
+        # segments, retract/dwell pairs), which would then read as "never moves"
+        # and pick the coarsest stride -- the worst stepping, exactly backwards.
+        deg_per_waypoint = float(np.median(step[step > 0]))
+        if not np.isfinite(deg_per_waypoint) or deg_per_waypoint <= 0:
+            # NaN in the solved path: fail safe rather than raise out of the
+            # per-frame callback (round(nan) is a ValueError).
+            return PLAYBACK_RENDER_STRIDE_MAX
+        stride = round(PLAYBACK_RENDER_DEG_PER_PUSH / deg_per_waypoint)
+        return int(np.clip(stride, 1, PLAYBACK_RENDER_STRIDE_MAX))
 
 
     def advance_toolpath_playback(self, step_count):
         """Advance playback by up to step_count waypoints -- call every
         frame from render(). No-ops unless playback_running. The index
         always advances every call; the Polyscope push (arm pose + bead
-        reveal) is throttled to every PLAYBACK_RENDER_STRIDE waypoints,
-        forced on the final one so playback never ends on a stale
-        mid-stride pose. Beads reveal via a sorted cutoff over
+        reveal) is throttled to every playback_render_stride waypoints --
+        derived per playback from the path's own joint motion, see
+        _derive_playback_render_stride() -- forced on the final one so
+        playback never ends on a stale mid-stride pose. Beads reveal via a sorted cutoff over
         gcode_bead_reveal_index, accumulated from the last *rendered*
         index so none are skipped across throttled frames. The
         registered mesh grows in PLAYBACK_LOOKAHEAD_BEADS chunks instead
         of registering the full mesh from frame 1.
 
-        Playback may start before precompute finishes: the advance is
-        capped at the live frontier (len(precompute_joint_path)), not a
-        snapshot. If playback catches the frontier before precompute is
-        exhausted, it holds there with a "Waiting for precompute" status
-        and playback_running stays True so the next frame rechecks the
-        frontier automatically. self.playback_waiting mirrors this state
-        -- gui_panel.py reads it to snap the Speed slider down the
-        moment playback actually hits the compute limit.
+        Playback cannot start before precompute finishes: since roadmap 7.4
+        precompute_joint_path is assigned whole (_finish_candidate_search, or
+        a cache load), never filled incrementally, and the initialisers refuse
+        an empty one -- so the path is always complete here and the advance is
+        never chasing a live frontier. The frontier/"Waiting for precompute"
+        machinery this once carried was unreachable and was removed in S1.57;
+        restoring incremental filling means restoring it, and re-deriving
+        playback_render_stride as the path grows.
 
         Dispatches on toolpath_source (roadmap 6.6): resolves which bead
         arrays/structure name/color/capacity to reveal into once at the top,
@@ -2954,21 +3056,14 @@ class VisContent:
             # precompute_joint_path shrank or emptied under an active
             # playback -- refuse cleanly instead of an IndexError below.
             self.playback_running = False
-            self.playback_waiting = False
             self.playback_status = "Toolpath data changed -- reset playback"
             return
 
-        new_index = min(self.playback_index + step_count, frontier - 1)
-        moved = new_index != self.playback_index
-        self.playback_index = new_index
+        self.playback_index = min(self.playback_index + step_count, frontier - 1)
 
-        exhausted = self.precompute_index >= self.precompute_total
-        at_frontier = self.playback_index >= frontier - 1
-        finished = exhausted and at_frontier
-        waiting = at_frontier and not exhausted
-        self.playback_waiting = waiting
+        finished = self.playback_index >= frontier - 1
 
-        if finished or (waiting and moved) or self.playback_index - self._last_rendered_playback_index >= PLAYBACK_RENDER_STRIDE:
+        if finished or self.playback_index - self._last_rendered_playback_index >= self.playback_render_stride:
             self.update_arm(self.precompute_joint_path[self.playback_index])
 
             curved = self.toolpath_source != -1
@@ -3021,8 +3116,6 @@ class VisContent:
         if finished:
             self.playback_running = False
             self.playback_status = "Playback complete"
-        elif waiting:
-            self.playback_status = f"Waiting for precompute ({frontier}/{self.precompute_total} solved)"
         else:
             self.playback_status = f"Playing {self.playback_index}/{self.precompute_total - 1}"
 
@@ -3165,6 +3258,13 @@ class VisContent:
         # not update_vertex_positions, hence the per-object self.update_fns lookup
         self.rest_verts.append(tcp_point)
         point_cloud = ps.register_point_cloud("TCP", tcp_point)
+        # Radius pinned absolute, matching the TCP Frame triad's own tube thickness
+        # so the marker reads as the triad's origin rather than a ball swallowing
+        # it. Was Polyscope's scene-scaled default (a 24mm ball), which the equally
+        # fat default-radius triad used to mask -- pinning the triad (S1.53) left it
+        # standing proud. Absolute for the same reason as every other radius here:
+        # a relative one grows and shrinks with the scene during playback.
+        point_cloud.set_radius(TCP_FRAME_SCALE_MM * FRAME_AXIS_RADIUS_RATIO, relative=False)
         self.mesh_handles.append(point_cloud)
         self.update_fns.append(point_cloud.update_point_positions)
 

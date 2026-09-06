@@ -87,6 +87,9 @@ Module-level constants in `geometry_backend.py`:
 | Constant | Effect |
 |---|---|
 | `TCP_FRAME_SCALE_MM` | Axis length, in world units (mm). Larger = easier to see at a distance, but can visually clutter the tool at close range. |
+| `FRAME_AXIS_RADIUS_RATIO` | Line thickness, as a fraction of the triad's own `scale` (axis length) — applied via `set_radius(scale * FRAME_AXIS_RADIUS_RATIO, relative=False)` in `create_coordinate_frame()`. Shared with the User Frame and world-origin triads, which pass different `scale` values, so a flat absolute radius would be wrong for one of them. Absolute, not relative: Polyscope's default radius is a fraction of the whole scene's bounding box, so it changed thickness as the print mesh grew during playback. See `settled.md` **S1.53**. |
+| `WORLD_FRAME_SCALE_MM` | Axis length (mm) of the world-origin triad drawn at `(0,0,0)`. Was `create_coordinate_frame()`'s bare `scale=1.0` default, which is sub-pixel in a ~2400mm scene — it only ever showed up because the unpinned default radius inflated it into a blob. |
+| The `"TCP"` point cloud's radius | Not a constant: pinned to `TCP_FRAME_SCALE_MM * FRAME_AXIS_RADIUS_RATIO` (2.5mm) at its `register_point_cloud` call, so the marker matches the triad's tube thickness instead of drawing as the 24mm ball Polyscope's default gave it. |
 
 `TOOL_AXIS_COLOR`/`TOOL_AXIS_RADIUS_MM` no longer exist — see "Changed in
 Stage 7.7" below.

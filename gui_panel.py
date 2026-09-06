@@ -1,8 +1,7 @@
 import polyscope.imgui as psim
 import numpy as np
 
-from geometry_backend import (USER_FRAME_ORIGIN_MM, PRECOMPUTE_CHUNK_SIZE,
-                              PHYSICAL_JOINT_LIMITS)
+from geometry_backend import USER_FRAME_ORIGIN_MM, PHYSICAL_JOINT_LIMITS
 
 # FR5 practical joint slider ranges (degrees), asymmetric per joint.
 # Source: docs/FR5_Joint_Limits.md "Practical Slider Ranges".
@@ -47,6 +46,7 @@ class UI_Menu:
         self.bp_target_rpy = np.zeros(3)
         self.bp_status = ""
         self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100
+        self.export_name_input = ""  # optional NAME for the dated export zip, see export_active_job()
         # -- snapped down automatically if it ever outruns precompute
 
     def _section_gap(self):
@@ -69,9 +69,9 @@ class UI_Menu:
         self.content.step_geodesic_precompute()
         self.content.step_export_job()
         self.content.advance_toolpath_playback(max(1, int(self.playback_speed)))
-        if self.content.playback_waiting:
-            # Snap down reactively the moment playback hits precompute's throughput
-            self.playback_speed = min(self.playback_speed, float(PRECOMPUTE_CHUNK_SIZE))
+        # The Speed snap-down that lived here is gone with playback_waiting
+        # (S1.57): playback can no longer outrun precompute, because the joint
+        # path is assigned whole rather than filled incrementally.
 
         if not self.content.playback_running:
             # Keep the FK sliders following the arm's real pose whenever
@@ -186,7 +186,7 @@ class UI_Menu:
             psim.Spacing()
 
             if self.content.playback_running:
-                if psim.Button("Pause"):
+                if psim.Button("Pause Toolpath"):
                     self.content.pause_toolpath_playback()
             else:
                 if psim.Button("Run Toolpath"):
@@ -215,10 +215,11 @@ class UI_Menu:
             # precompute_joint_path rather than full completion, matching
             # build_export_segments()'s own "partial precompute exports its
             # solved prefix" behavior.
-            psim.BeginDisabled(self.content.precompute_running or self.content.export_running
-                                or not self.content.precompute_joint_path)
+            export_locked = (self.content.precompute_running or self.content.export_running
+                             or not self.content.precompute_joint_path)
+            psim.BeginDisabled(export_locked)
             if psim.Button("Export IK Job"):
-                self.content.export_active_job()
+                self.content.export_active_job(self.export_name_input)
             psim.EndDisabled()
             if self.content.export_running:
                 psim.SameLine()
@@ -227,6 +228,14 @@ class UI_Menu:
                 total = self.content.export_total
                 fraction = (self.content.export_index / total) if total else 0.0
                 psim.ProgressBar(fraction, overlay=f"{fraction * 100:.0f}%" if total else "")
+            # Below the button, not above it: Cancel Export SameLine()s onto the
+            # button's row, so the name field has to sit clear of that pairing.
+            # Re-reads export_running rather than reusing export_locked alone --
+            # the click above may have set it after export_locked was evaluated,
+            # which would leave the field enabled for that one frame.
+            psim.BeginDisabled(export_locked or self.content.export_running)
+            _, self.export_name_input = psim.InputText("Export Name", self.export_name_input)
+            psim.EndDisabled()
             if self.content.export_status:
                 psim.TextWrapped(self.content.export_status)
 
