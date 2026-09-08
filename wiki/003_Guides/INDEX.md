@@ -4,8 +4,8 @@ status: active
 
 # 003_Guides
 
-User-facing operation guides (e.g. "how to add a new joint slider", "how to
-run the IK solution switcher"). Add one guide per file as features stabilise.
+User-facing operation guides — how to drive a feature, and how to change it for
+your own use. Add one guide per file as features stabilise.
 
 | Guide | Covers |
 |-------|--------|
@@ -19,3 +19,4 @@ run the IK solution switcher"). Add one guide per file as features stabilise.
 | [CurvedModel_Orientation.md](CurvedModel_Orientation.md) | How a target TCP orientation is attached to every feed point from the surface normal, holding the nozzle perpendicular (Stage 6.4) |
 | [CurvedModel_IKPrecompute.md](CurvedModel_IKPrecompute.md) | How the chunked curved IK precompute works, what clearance it checks, and how its per-layer cache is keyed (Stage 6.5) |
 | [CurvedModel_PrintSetup.md](CurvedModel_PrintSetup.md) | **Operating procedure** — the plate-then-model load order that produces a complete RX/TX solve, why the sequence matters, and why "solved" is not "collision-free" |
+| [CurvedModel_AdaptingYourOwnJob.md](CurvedModel_AdaptingYourOwnJob.md) | **Start here to print your own part** — selecting a study config via `FR5_STUDY_CONFIG`, the PLY/OBJ asset formats, the placement reach constraint, which constants to re-tune, cache invalidation, and the export format |

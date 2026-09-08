@@ -5,14 +5,37 @@ import time
 import heapq
 import shutil
 import hashlib
+import importlib
 from datetime import datetime, timezone
 from collections import namedtuple
 import polyscope as ps
 import numpy as np
 import trimesh
 
+# Docstrings throughout this file cite tutorials/Stage{1-4,5,6,7}_README.md as the
+# roadmap of record. That directory is local assignment scaffolding and is NOT
+# published (.gitignore), so those citations are historical provenance only -- a
+# clone will not have them. The published equivalents are wiki/003_Guides/ (how a
+# feature is operated) and wiki/002_Architecture/settled.md (why it is built that
+# way). See README.md "A note on roadmap references".
+
+# Every asset path below is anchored to this file's own directory rather than the
+# process CWD. Relative paths only worked when main.py was launched from the repo
+# root; an IDE "Run" button commonly uses a different CWD and turned every asset
+# into a bare FileNotFoundError before the window opened.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _asset_path(*parts):
+    """Repo-relative path -> absolute. An already-absolute input is returned as
+    given, so a user-supplied study config may point CURVED_MODEL_DIR outside
+    the repo."""
+    joined = os.path.join(*parts)
+    return joined if os.path.isabs(joined) else os.path.join(_REPO_ROOT, joined)
+
+
 # FR5 link meshes, zero-pose world frame (see docs/FR5_Mesh_Convention.md)
-MESH_DIR = "assets/fr5_meshes"
+MESH_DIR = _asset_path("assets/fr5_meshes")
 MESH_FILES = [f"Robot{i}.obj" for i in range(7)]  # Robot0 (base) .. Robot6
 
 # Tool head, mounted on the flange (Delta_6). The nozzle mesh is not the head
@@ -21,7 +44,7 @@ MESH_FILES = [f"Robot{i}.obj" for i in range(7)]  # Robot0 (base) .. Robot6
 # 7.7" in docs/FR5_Mesh_Convention.md). The TCP is no longer a zero-pose world
 # point read from TCP.txt (now legacy, kept as a record); it is derived from
 # the flange-local offset below.
-PRINTER_HEAD_DIR = "assets/printerHead"
+PRINTER_HEAD_DIR = _asset_path("assets/printerHead")
 NOZZLE_FILE = "nozzle.obj"
 
 # Half-width above which a nozzle.obj component is bracketry rather than a
@@ -82,7 +105,7 @@ SINGULARITY_WARN_J5_DEG = 2.0  # |J5| below this warns (does NOT reject)
 # --- External IK exchange spec: job export destination (roadmap 7.5) ---
 # Output location was explicitly open in Stage7_README.md/the inbox note;
 # settled during 7.5 implementation.
-EXPORT_DIR = "assets/export"
+EXPORT_DIR = _asset_path("assets/export")
 EXPORT_GENERATOR = "fairino-fr5-sim stage7 exporter"
 
 EXPORT_CHUNK_SIZE = 2000  # points written per step() call. FK + string
@@ -118,14 +141,36 @@ PLAYBACK_RENDER_STRIDE_MAX = 50  # Never push less often than S1.18's measured
 
 TRAJECTORY_CURVE_RENDER_STRIDE = 5  # Re-register the "Trajectory" curve
 # network every Nth recorded sample -- it has no incremental grow API, so
-# this throttles how often the O(n) rebuild fires.
+# this throttles how often the O(n) rebuild fires. This is now the FLOOR of a
+# derived stride, not a fixed value -- see TRAJECTORY_CURVE_NODES_PER_STRIDE.
+
+TRAJECTORY_CURVE_NODES_PER_STRIDE = 1000  # Grow the redraw stride by one for
+# every N recorded points, so the rebuild interval scales with the rebuild cost.
+#
+# Why: trajectory_points is unbounded (only clear_trajectory() empties it) and
+# _update_trajectory_curve() is O(n), so a FIXED stride meant the redraw cost per
+# second grew without limit -- total work O(n^2) over a session. Measured at
+# ~0.31us/node: 0.22ms at 500 points but 9.40ms at 30,000, still firing twice a
+# second. 30,000 is a ~50-minute planar playback at speed 1; curved RX reaches
+# only ~529 points and planar at speed 100 about 302, which is why this was a
+# real but narrow problem.
+#
+# Deriving the stride instead holds the AMORTISED cost flat at ~0.3% of wall time
+# at every size (10,000 -> stride 10, 30,000 -> 30, 60,000 -> 60). Same idea as
+# S1.55, which derives the playback stride from the path's own joint motion
+# rather than pinning it.
+#
+# Two deliberate properties: the max() floor keeps the stride at exactly 5 below
+# 5,000 points, so every realistic session behaves bit-for-bit as before; and no
+# point is ever DISCARDED -- only redraw frequency changes, so the trail stays
+# complete and clear_trajectory() keeps its meaning.
 
 PLAYBACK_LOOKAHEAD_BEADS = 5000  # How far ahead of current progress the
 # registered "G-code Print" mesh is grown, in beads -- render cost scales
 # with registered mesh size, so this stays close to actual progress instead
 # of registering the full mesh from frame 1.
 
-BUILD_PLATE_DIR = "assets/buildPlate"
+BUILD_PLATE_DIR = _asset_path("assets/buildPlate")
 BUILD_PLATE_FILE = "BambuLab_BuildPlate.obj"
 PLATE_COLOR = (0.75, 0.75, 0.78)  # Light cool gray, visually distinct from the orange print
 # Measured thickness of BambuLab_BuildPlate.obj (its local Z span is [-0.75, 0],
@@ -149,7 +194,7 @@ USER_FRAME_ORIGIN_MM = np.array([-570.0, -300.0, -100.0])
 USER_FRAME_SCALE_MM = 50.0  # Fixed axes drawn at the user frame, world units (mm)
 BUILD_PLATE_POSITION_FILE = os.path.join(BUILD_PLATE_DIR, "saved_position.json")  # GUI Save/Load Position buttons
 
-GCODE_DIR = "assets/models/planar/gcode"
+GCODE_DIR = _asset_path("assets/models/planar/gcode")
 GCODE_FILE = "model.gcode"  # Fixed name -- overwritten by each new Cura export, never hand-edited
 GCODE_COLOR = (1.0, 0.55, 0.0)  # Orange, so it doesn't visually merge with the Trajectory curve
 # Assumed, not parsed -- Cura's exported G-code carries no filament/nozzle-diameter
@@ -180,12 +225,53 @@ CURVE_RADIUS_MM = 0.5  # thin vs. TRAJECTORY_RADIUS_MM (2.0) -- 70 pieces should
 # names/colors -- is imported from a study config rather than hardcoded
 # here. See examples/curved_surface_printing/ to point this feature at a
 # different curved-print job.
-from examples.curved_surface_printing.study_config import (
-    CURVED_MODEL_DIR, CURVED_MODEL_ROTATE_X_DEG, CURVED_MODEL_XY_OFFSET_MM, CURVED_LAYERS,
-    CURVED_OBSTACLE_FILE, CURVED_OBSTACLE_STRUCTURE_NAME, CURVED_OBSTACLE_COLOR,
-    CURVED_TRAVEL_HOVER_MM, CURVED_TIP_CLEARANCE_TOLERANCE_MM,
-    CURVED_BEAD_WIDTH_MM, CURVED_BEAD_HEIGHT_MM,
+# Which study config to use is selectable via the FR5_STUDY_CONFIG environment
+# variable (a dotted module path), so pointing this feature at a different
+# curved-print job needs no edit to this file:
+#
+#   FR5_STUDY_CONFIG=mystudy.study_config python main.py
+#
+# Unset, it resolves to the shipped shoulder-sensor study, so default behaviour
+# is unchanged. See wiki/003_Guides/CurvedModel_AdaptingYourOwnJob.md.
+DEFAULT_STUDY_CONFIG = "examples.curved_surface_printing.study_config"
+STUDY_CONFIG_MODULE = os.environ.get("FR5_STUDY_CONFIG", DEFAULT_STUDY_CONFIG)
+
+# The names a study config must define. Read off the module by name rather than
+# star-imported so a config missing one of them fails here, at import, naming the
+# offender -- not hundreds of frames later as an AttributeError inside a render
+# callback where Polyscope swallows the context.
+_STUDY_CONFIG_NAMES = (
+    "CURVED_MODEL_DIR", "CURVED_MODEL_ROTATE_X_DEG", "CURVED_MODEL_XY_OFFSET_MM",
+    "CURVED_LAYERS", "CURVED_OBSTACLE_FILE", "CURVED_OBSTACLE_STRUCTURE_NAME",
+    "CURVED_OBSTACLE_COLOR", "CURVED_TRAVEL_HOVER_MM",
+    "CURVED_TIP_CLEARANCE_TOLERANCE_MM", "CURVED_BEAD_WIDTH_MM", "CURVED_BEAD_HEIGHT_MM",
 )
+
+try:
+    _study = importlib.import_module(STUDY_CONFIG_MODULE)
+except ImportError as e:
+    raise ImportError(
+        f"Could not import the study config '{STUDY_CONFIG_MODULE}' "
+        f"(from FR5_STUDY_CONFIG, or the default). Original error: {e}. "
+        f"See wiki/003_Guides/CurvedModel_AdaptingYourOwnJob.md.") from e
+
+_missing = [n for n in _STUDY_CONFIG_NAMES if not hasattr(_study, n)]
+if _missing:
+    raise ImportError(
+        f"Study config '{STUDY_CONFIG_MODULE}' is missing required name(s): "
+        f"{', '.join(_missing)}. Every name in _STUDY_CONFIG_NAMES must be defined -- "
+        f"copy examples/curved_surface_printing/study_config.py as a starting point.")
+
+(CURVED_MODEL_DIR, CURVED_MODEL_ROTATE_X_DEG, CURVED_MODEL_XY_OFFSET_MM, CURVED_LAYERS,
+ CURVED_OBSTACLE_FILE, CURVED_OBSTACLE_STRUCTURE_NAME, CURVED_OBSTACLE_COLOR,
+ CURVED_TRAVEL_HOVER_MM, CURVED_TIP_CLEARANCE_TOLERANCE_MM,
+ CURVED_BEAD_WIDTH_MM, CURVED_BEAD_HEIGHT_MM) = (
+    getattr(_study, n) for n in _STUDY_CONFIG_NAMES)
+
+# Anchored the same way as this file's own asset paths, and for the same reason.
+# An absolute CURVED_MODEL_DIR is left alone, so a study config may keep its
+# assets outside the repo.
+CURVED_MODEL_DIR = _asset_path(CURVED_MODEL_DIR)
 # CURVED_TIP_CLEARANCE_TOLERANCE_MM is imported again as of roadmap 7.4: it is
 # filter 8's surface-mesh clearance. It went unused between 7.2 (which removed
 # the tangent-plane check it originally fed) and 7.4 -- kept in study_config.py
@@ -359,6 +445,40 @@ def curved_precompute_cache_path(layer_name):
     return os.path.join(CURVED_MODEL_DIR, f"curved_{layer_name.lower()}.precompute.npz")
 
 
+def _solver_cache_fields():
+    """The solver-environment half of a precompute cache key -- every constant
+    that changes which joint path a solve produces without changing the waypoints
+    it was solved for.
+
+    Until the v1.0 review both cache metas keyed only on the source geometry, the
+    plate pose, the filter mode and (curved) the orientation-search shape. Tuning
+    a filter threshold, a joint limit, an edge cost or the TCP offset therefore
+    left the key identical, so the next Run Precompute returned the OLD joint path
+    from cache with no warning -- silently wrong, and worst for exactly the person
+    adapting this to their own job. `PRECOMPUTE_CACHE_VERSION` was the only lever
+    and it is a manual, undocumented one.
+
+    Rounded to 6dp for the same reason `user_frame` is: to absorb float noise
+    rather than cause false misses. Filter 8's clearance is deliberately NOT here
+    -- it is curved-only, so `_curved_toolpath_cache_meta` adds it itself and a
+    curved-only edit cannot invalidate a planar cache."""
+    return {
+        "tcp_offset": np.round(TCP_OFFSET_6D_MM_DEG, 6).tolist(),
+        "joint_limits": [list(pair) for pair in PHYSICAL_JOINT_LIMITS],
+        "filters": [
+            FILTER_J5_MIN_DEG, FILTER_J4_MIN_DEG, bool(FILTER_J4_ENABLED),
+            FILTER_UPPER_BRANCH_TOL_MM, FILTER_ELBOW_PLATE_TOL_MM,
+            FILTER_UNDER_PLATE_MARGIN_MM, FILTER_PLATE_SLAB_CLEARANCE_MM,
+            FILTER_SELF_COLLISION_CLEARANCE_MM, SELF_COLLISION_PROXY_SEGMENT_MM,
+            LINK_SAMPLE_SPACING_MM, SURFACE_GRID_CELL_MM,
+        ],
+        "edge": [
+            EDGE_MAX_JOINT_STEP_DEG, np.round(EDGE_JOINT_WEIGHTS, 6).tolist(),
+            EDGE_BRANCH_CHANGE_PENALTY, EDGE_ROLL_QUADRATIC_WEIGHT,
+        ],
+    }
+
+
 class VisContent:
     """
     [Backend Logic Layer]
@@ -393,6 +513,7 @@ class VisContent:
 
         # Chunked job-export write state, see step_export_job()
         self.export_running = False
+        self.export_phase = "write"     # "validate" on the first step, then "write" -- see export_active_job()
         self.export_index = 0
         self.export_total = 0
         self.export_segments = []
@@ -419,6 +540,18 @@ class VisContent:
         self.precompute_cand_branch = []
         self.precompute_dag_dist = None     # Running shortest-path cost to each live candidate
         self.precompute_dag_back = []
+        # KNOWINGLY RETAINED, reviewed at v1.0: nothing in the codebase reads this
+        # -- it is appended per waypoint, collapsed at the end, and never consumed.
+        # It is kept because GLOSSARY documents it as the record of the COMMANDED
+        # orientation as distinct from the nominal surface normal (a distinction
+        # 7.4 introduced deliberately, and the one an export reader would need if
+        # the spec ever asks for the tool axis rather than normal_base). Cost, so
+        # the next reader doesn't have to re-derive it: during a curved sweep this
+        # holds one (C,3,3) float64 array per waypoint (C up to 4,320), roughly 3x
+        # precompute_cand_joints, and unlike those it is not dropped in
+        # _finish_candidate_search's memory-release block -- though what survives
+        # idle is only the collapsed (N,3,3). Don't "optimise" it away without
+        # also removing the GLOSSARY entry.
         self.precompute_commanded_R = []    # The orientation actually chosen per waypoint --
                                     # distinct from precompute_R_target, which stays the
                                     # NOMINAL surface normal frame the export reads.
@@ -451,6 +584,7 @@ class VisContent:
         self.gcode_bead_verts_current = None    # (K*8,3) working copy, mutated as beads reveal
         self.gcode_print_handle = None          # Polyscope handle, reused across advance() calls
         self.gcode_preview_loaded = False       # True only while the static preview (not playback) owns "G-code Print"
+        self.gcode_status = ""                  # Why the last load_gcode() did nothing, if it did nothing
         self._registered_bead_capacity = 0      # How many beads are actually registered
         # with Polyscope right now, see PLAYBACK_LOOKAHEAD_BEADS
 
@@ -465,9 +599,11 @@ class VisContent:
         self._reset_orientation_state()
         self._reset_curved_bead_state()
 
-        # Initialise the scene
+        # Initialise the scene. The plate goes to the saved calibrated pose when
+        # one is readable -- see _load_startup_build_plate(). startup_plate_status
+        # is surfaced by the GUI so the choice is visible rather than silent.
         self.create_coordinate_frame(scale=WORLD_FRAME_SCALE_MM)
-        self.load_build_plate()
+        self.startup_plate_status = self._load_startup_build_plate()
         self.mesh_data = self.load_data()
         self.update_arm([0, 0, 0, 0, 0, 0])
 
@@ -489,6 +625,8 @@ class VisContent:
         study_config.py). The obstacle mesh is deliberately absent from these:
         it's a 6.5 collision body, not a print surface."""
         self.curved_model_loaded = False  # True once load_curved_model() has registered its structures -- roadmap 6.1/6.6
+        self.curved_model_stale = False   # True when the plate moved under a loaded model -- see load_build_plate()
+        self.curved_model_status = ""     # Why the last load_curved_model() failed, if it did -- mirrors gcode_status
         self.curved_pieces_world = None        # list of len(CURVED_LAYERS) lists of (Ni,3) polylines
         self.curved_surface_verts_world = None # list of len(CURVED_LAYERS) (V,3)
         self.curved_surface_vnormals_world = None  # list of len(CURVED_LAYERS) (V,3) outward unit normals -- 6.3 hover, 6.4 orientation
@@ -584,7 +722,11 @@ class VisContent:
         return ps_net, nodes
 
 
-    def load_build_plate(self, position_mm=USER_FRAME_ORIGIN_MM, rpy_deg=(0.0, 0.0, 0.0)):
+    # position_mm defaults to None, not USER_FRAME_ORIGIN_MM directly: a
+    # module-level np.ndarray as a default argument is shared by every call, one
+    # in-place mutation away from permanently corrupting the reset pose. Nothing
+    # mutates it today, so this is closing a latent trap rather than a live bug.
+    def load_build_plate(self, position_mm=None, rpy_deg=(0.0, 0.0, 0.0)):
         """Place the build plate at the user frame -- see GLOSSARY.md 'User
         frame' and settled.md S1.2/S1.6. Static geometry: registered once
         per call, never updated per-frame -- unlike the arm links, the
@@ -606,12 +748,22 @@ class VisContent:
         precompute; without this, resuming/replaying an already-loaded
         precompute after a plate move would silently drive the arm through
         the old pose's joint path."""
+        if position_mm is None:
+            position_mm = USER_FRAME_ORIGIN_MM
         roll, pitch, yaw = np.deg2rad(rpy_deg)
         R = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
 
         self.T_user_frame = np.eye(4)
         self.T_user_frame[:3, :3] = R
         self.T_user_frame[:3, 3] = position_mm
+
+        # Retained so the GUI can seed its Target Position/RPY fields from the pose
+        # actually applied rather than from USER_FRAME_ORIGIN_MM. Since startup may
+        # now load a saved pose, fields defaulted to the constant would have shown a
+        # pose the plate is not at -- and pressing Move without editing would have
+        # silently teleported it back to the demo pose.
+        self.build_plate_pose = (np.asarray(position_mm, dtype=float).copy(),
+                                 np.asarray(rpy_deg, dtype=float).copy())
 
         if self.precompute_cache_meta is not None:
             new_pose = np.round(self.T_user_frame, 6).tolist()
@@ -625,6 +777,16 @@ class VisContent:
             # stored paths do not, and 6.3 consumes the paths, not just the
             # numbers, so invalidating is the honest call.
             self._abort_geodesic_precompute()
+            # Mark the model itself stale, not just the geodesics. It used to stay
+            # curved_model_loaded=True with its world vertices and T_curved at the
+            # PRE-move pose, so Build Geodesics -> ... -> Run Precompute could be
+            # re-run on it: filter 8 would then bin its surface grid from the old
+            # workpiece position while filters 5-7 used the new plate pose -- a
+            # collision test against a surface that is not where the arm thinks it
+            # is. Only an advisory status stood in the way, and the next Build
+            # click overwrote that status. The geometry is still rendered where it
+            # was; requiring a reload is what makes the two frames agree again.
+            self.curved_model_stale = True
             self.geodesic_status = "Build plate moved -- geodesics invalidated, reload the curved model"
 
         plate = self.load_mesh(os.path.join(BUILD_PLATE_DIR, BUILD_PLATE_FILE))
@@ -667,21 +829,58 @@ class VisContent:
 
     def load_saved_build_plate_position(self):
         """Read a previously saved build-plate pose (if any) and apply it
-        immediately via load_build_plate(). Only ever called on explicit
-        user action (the GUI's "Load Saved Position" button), never
-        automatically at startup -- see settled.md S1.6. Returns
-        (position_mm, rpy_deg, status_message); position_mm/rpy_deg are
-        None on failure so the GUI knows not to update its input fields."""
+        immediately via load_build_plate(). Called by the GUI's "Load Saved
+        Position" button AND, as of the v1.0 review, once at startup -- see
+        _load_startup_build_plate() and settled.md S1.58, which supersedes S1.6's
+        "never automatically at startup" clause. Returns (position_mm, rpy_deg,
+        status_message); position_mm/rpy_deg are None on failure so the GUI knows
+        not to update its input fields.
+
+        A malformed or truncated file is reported, not raised. Behind a button a
+        raw JSONDecodeError/KeyError was merely ugly; on the startup path it would
+        kill the app before the Polyscope window opened, so this fails closed onto
+        the caller's fallback."""
         if not os.path.exists(BUILD_PLATE_POSITION_FILE):
             return None, None, "No saved position found"
 
-        with open(BUILD_PLATE_POSITION_FILE) as f:
-            data = json.load(f)
+        try:
+            with open(BUILD_PLATE_POSITION_FILE) as f:
+                data = json.load(f)
+            position_mm = np.array(data["position_mm"], dtype=float)
+            rpy_deg = np.array(data["rpy_deg"], dtype=float)
+            if position_mm.shape != (3,) or rpy_deg.shape != (3,):
+                raise ValueError("position_mm and rpy_deg must each have 3 elements")
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
+            return None, None, f"Saved position unreadable ({e}) -- using default pose"
 
-        position_mm = np.array(data["position_mm"], dtype=float)
-        rpy_deg = np.array(data["rpy_deg"], dtype=float)
         self.load_build_plate(position_mm, rpy_deg)
         return position_mm, rpy_deg, "Loaded saved position"
+
+
+    def _load_startup_build_plate(self):
+        """Place the plate at startup: the saved pose if one is readable, else
+        USER_FRAME_ORIGIN_MM. Returns a status string for the GUI to show.
+
+        Why this exists (v1.0 review, settled.md S1.58, superseding S1.6's
+        "never automatically at startup"): the shipped curved precompute caches
+        are keyed on the plate pose, and were solved at the real calibrated User
+        Frame in saved_position.json. Booting at USER_FRAME_ORIGIN_MM meant every
+        cache check missed and a first run re-solved ~3,175 waypoints at
+        ~0.5-0.75s each -- around half an hour per layer -- with nothing on screen
+        saying a cached solve existed. study_config's CURVED_MODEL_XY_OFFSET_MM is
+        measured for 100% reachability at that same saved frame, so the default
+        pose was not merely slower, it was a different (unvalidated) job.
+
+        S1.6's objection was to loading it *silently*; the returned status is what
+        answers that. The GUI's Reset button still means USER_FRAME_ORIGIN_MM, so
+        the demo pose remains one click away."""
+        position_mm, rpy_deg, status = self.load_saved_build_plate_position()
+        if position_mm is None:
+            self.load_build_plate()
+            return (f"{status}; build plate at default "
+                    f"{np.asarray(USER_FRAME_ORIGIN_MM, dtype=float).tolist()}")
+        return (f"Build plate at saved position {np.round(position_mm, 3).tolist()} "
+                f"rpy {np.round(rpy_deg, 3).tolist()}")
 
 
     def parse_gcode(self, filepath):
@@ -769,7 +968,17 @@ class VisContent:
             per-bead stride (settled.md S1.20, right-sized playback
             registration). All four arrays are empty/trivial (K == 0) if
             there are no printed beads.
+
+        Fewer than two points returns that empty result rather than raising:
+        with 0 points np.array([]) is 1-D and np.linalg.norm(..., axis=1) below
+        raises AxisError, and with 1 point every segment array is empty. Both
+        are reachable from a header-only or truncated G-code file, which is a
+        user-supplied asset (the *.gcode is gitignored).
         """
+        if len(gcode_points) < 2:
+            return (np.empty((0, 3)), np.empty((0, 3), dtype=int),
+                    np.empty(0, dtype=int), np.zeros(1, dtype=int))
+
         pts = np.array([p for p, _, _ in gcode_points])
         es = np.array([e for _, e, _ in gcode_points])
         is_feed = np.array([f for _, _, f in gcode_points])
@@ -857,9 +1066,17 @@ class VisContent:
         plate -- solid boxes, not a curve, so it reads as the printed
         object (settled.md S1.9). No-ops if the G-code file is missing;
         safe to call repeatedly, e.g. on plate reposition (settled.md
-        S1.8). Geometry itself comes from _build_gcode_beads()."""
+        S1.8). Geometry itself comes from _build_gcode_beads().
+
+        Every no-op path now reports why via self.gcode_status. It used to return
+        silently, and since assets/models/planar/gcode/*.gcode is gitignored, that
+        made "Load G-code preview" on a fresh clone a button that did nothing at
+        all with no feedback -- while every sibling entry point
+        (run_toolpath_ik_precompute, _init_toolpath_playback) already said "No
+        G-code file found"."""
         filepath = os.path.join(GCODE_DIR, GCODE_FILE)
         if not os.path.exists(filepath):
+            self.gcode_status = f"No G-code file found at {filepath}"
             return
 
         try:
@@ -868,17 +1085,21 @@ class VisContent:
             # File can be overwritten mid-read by a Cura re-export between
             # the exists() check above and here -- no-op like the missing-
             # file case rather than crashing the per-frame callback.
+            self.gcode_status = "G-code file changed while loading -- try again"
             return
         if len(waypoints) < 2:
+            self.gcode_status = f"G-code has {len(waypoints)} waypoint(s) -- need at least 2"
             return
 
         verts_world, faces, _reveal_waypoint_index, _bead_face_prefix = self._build_gcode_beads(waypoints)
         if len(verts_world) == 0:
+            self.gcode_status = "No extruding (G1) moves to preview"
             return
 
         self.gcode_print_handle = ps.register_surface_mesh("G-code Print", verts_world, faces)
         self.gcode_print_handle.set_color(GCODE_COLOR)
         self.gcode_preview_loaded = True
+        self.gcode_status = f"Loaded G-code preview ({len(waypoints)} waypoints)"
 
 
     def clear_gcode_preview(self):
@@ -953,15 +1174,25 @@ class VisContent:
         self._abort_geodesic_precompute()
         self.geodesic_status = ""
 
-        layers_local = [
-            [p for f in layer["curve_files"]
-             for p in reconstruct_polylines(*read_ply_polyline(os.path.join(CURVED_MODEL_DIR, f)))]
-            for layer in CURVED_LAYERS
-        ]
-        surfaces = [self.load_mesh(os.path.join(CURVED_MODEL_DIR, layer["surface_file"]))
-                    for layer in CURVED_LAYERS]
-        obstacle = (self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_OBSTACLE_FILE))
-                    if CURVED_OBSTACLE_FILE else None)
+        # Every asset read is guarded and reported through curved_model_status,
+        # the curved analogue of gcode_status. These paths come from a study
+        # config, which since S1.60 a user supplies themselves -- one mistyped
+        # filename, a PLY exported with faces, or a missing surface OBJ would
+        # otherwise raise straight out of the button click, killing the Polyscope
+        # window with a traceback the GUI never shows.
+        try:
+            layers_local = [
+                [p for f in layer["curve_files"]
+                 for p in reconstruct_polylines(*read_ply_polyline(os.path.join(CURVED_MODEL_DIR, f)))]
+                for layer in CURVED_LAYERS
+            ]
+            surfaces = [self.load_mesh(os.path.join(CURVED_MODEL_DIR, layer["surface_file"]))
+                        for layer in CURVED_LAYERS]
+            obstacle = (self.load_mesh(os.path.join(CURVED_MODEL_DIR, CURVED_OBSTACLE_FILE))
+                        if CURVED_OBSTACLE_FILE else None)
+        except (OSError, ValueError, KeyError, IndexError) as e:
+            self.curved_model_status = f"Could not load curved model from {CURVED_MODEL_DIR}: {e}"
+            return
 
         R = rot_x(np.deg2rad(CURVED_MODEL_ROTATE_X_DEG))[:3, :3]
 
@@ -1024,6 +1255,8 @@ class VisContent:
         self.T_curved = T_curved
         self._T_user_frame_at_curved_load = self.T_user_frame.copy()
         self.curved_model_loaded = True
+        self.curved_model_stale = False  # freshly placed against the current plate pose
+        self.curved_model_status = ""
 
 
     def clear_curved_model(self):
@@ -1139,6 +1372,16 @@ class VisContent:
                 self.geodesic_status = "Load Curved Model first"
                 return
 
+            if self.curved_model_stale:
+                # The plate moved under this model, so its retained world vertices
+                # describe the old pose. Routing over them would produce geodesics
+                # -- and eventually a solve whose filter-8 surface grid sits in a
+                # different place from the plate filters. Reloading re-places the
+                # geometry against the current pose; nothing else does.
+                self.geodesic_status = ("Build plate moved since the curved model was "
+                                        "loaded -- click Load Curved Model again first")
+                return
+
             n_layers = len(CURVED_LAYERS)
             graphs, snap_nodes, snap_dist, sources, source_row, prev, cost = [], [], [], [], [], [], []
             for layer in range(n_layers):
@@ -1184,9 +1427,16 @@ class VisContent:
 
     def cancel_geodesic_precompute(self):
         """Stop and discard the geodesic precompute entirely -- a following
-        run_geodesic_precompute() starts fresh."""
+        run_geodesic_precompute() starts fresh.
+
+        Says what it took with it, rather than blanking the status. This is the
+        most destructive button in the panel -- the cascade in
+        _abort_geodesic_precompute() drops the geodesics, the print order, the
+        travel moves, the orientation frames AND every layer's printed bead mesh
+        -- and it is always enabled, sitting beside Build Geodesics."""
         self._abort_geodesic_precompute()
-        self.geodesic_status = ""
+        self.geodesic_status = ("Geodesics cancelled -- print order, orientation frames "
+                                "and printed beads discarded with them")
 
 
     def _abort_geodesic_precompute(self):
@@ -1316,6 +1566,25 @@ class VisContent:
             self.curved_orient_loaded = False
             self.curved_orient_frames = None
             self.curved_orient_status = ""
+
+        # ...and it equally invalidates any curved SOLVE built against that order.
+        # The joint path, its cache path and the per-layer bead arrays are all
+        # derived from the waypoint sequence this is about to replace, and
+        # run_toolpath_playback()'s staleness test only compares cache paths --
+        # so without this a re-order would happily replay the previous order's
+        # solution against the new one. _abort_geodesic_precompute() already
+        # cascades order -> orient -> beads; this is the same cascade for the
+        # narrower "order changed underneath a finished solve" case.
+        if self.precompute_waypoints is not None and self.precompute_cache_path not in (
+                None, GCODE_PRECOMPUTE_CACHE):
+            self._abort_toolpath_ik_precompute()
+            self.precompute_status = "Print order rebuilt -- previous curved precompute discarded"
+        # _reset_curved_bead_state() is pure state by design, so the registered
+        # meshes come off here at the call site -- same split as
+        # _abort_geodesic_precompute().
+        for name in self.curved_layer_names:
+            ps.remove_surface_mesh(f"Curved Print {name}", error_if_absent=False)
+        self._reset_curved_bead_state()
 
         n_layers = len(self.curved_layer_names)
         self.curved_print_order = [None] * n_layers
@@ -1478,12 +1747,21 @@ class VisContent:
         travel = self.curved_travel_moves[layer]
         # build_print_order appends one travel polyline per consecutive-piece gap
         # (zip(order, order[1:])) but skips a gap whose geodesic is unreachable
-        # (never on the shipped single-component surfaces). Assert the 1:1 pairing
+        # (never on the shipped single-component surfaces). Check the 1:1 pairing
         # so a future non-trivial surface fails loud rather than stitching the
         # wrong travel move to the wrong gap.
-        assert len(travel) == len(order) - 1, (
-            f"layer {layer}: {len(travel)} travel moves for {len(order)} pieces "
-            f"(expected {len(order) - 1}); a geodesic gap was skipped")
+        #
+        # ValueError, not assert: this runs inside the per-frame Polyscope
+        # callback, where an AssertionError kills the window instead of surfacing
+        # a status -- and asserts vanish entirely under `python -O`, which is
+        # exactly when a silent wrong-travel-move stitch would be worst. Callers
+        # catch it and report. A disconnected print surface (two components with
+        # pieces on both) is the realistic trigger, which is a user-asset case.
+        if len(travel) != len(order) - 1:
+            raise ValueError(
+                f"layer {layer}: {len(travel)} travel moves for {len(order)} pieces "
+                f"(expected {len(order) - 1}); a geodesic gap was skipped, which "
+                f"means the print surface is not connected between those pieces")
 
         positions, is_feed = [], []
         for k, (p, entry) in enumerate(order):
@@ -1585,7 +1863,21 @@ class VisContent:
         under this layer's own name/slot so a different layer's already-
         printed mesh is untouched. Lazily sizes the per-layer bead-state
         lists to len(curved_layer_names) on first use. Returns True on
-        success, False (with playback_status explaining why) otherwise."""
+        success, False (with playback_status explaining why) otherwise.
+
+        The print-order/orientation guard below is load-bearing, not defensive
+        padding: cancel_geodesic_precompute() nulls curved_print_order (via
+        _reset_print_order_state) while leaving precompute_joint_path and
+        precompute_cache_path fully populated, so the cache-path check alone
+        passes and _build_curved_beads() then subscripts None. That is a
+        TypeError escaping the per-frame Polyscope callback -- i.e. the window
+        dies -- reachable by clicking Cancel Geodesics (always enabled, right
+        beside Build Geodesics) and then Run Toolpath. Loading the curved model
+        a second time after a completed precompute reaches the same state."""
+        if self.curved_model_loaded is False or not self.curved_layer_names:
+            self.playback_status = "Load the curved model first"
+            return False
+
         if self.curved_bead_verts_full is None:
             n = len(self.curved_layer_names)
             self.curved_bead_verts_full = [None] * n
@@ -1601,7 +1893,18 @@ class VisContent:
             self.playback_status = "Run Precompute for this layer first"
             return False
 
-        verts_world, faces, reveal_index, face_prefix = self._build_curved_beads(layer)
+        if not self.curved_order_loaded or not self.curved_orient_loaded:
+            self.playback_status = ("Print order/orientation frames were discarded "
+                                    "(Cancel Geodesics or a reload) -- rebuild them, "
+                                    "then Run Precompute again")
+            return False
+
+        try:
+            verts_world, faces, reveal_index, face_prefix = self._build_curved_beads(layer)
+        except ValueError as e:
+            # build_curved_toolpath_waypoints_world's travel/piece pairing check.
+            self.playback_status = str(e)
+            return False
         if len(verts_world) == 0:
             self.playback_status = "No printed beads to reveal"
             return False
@@ -1674,8 +1977,18 @@ class VisContent:
         -- the order-feed/travel/orientation curve networks and the base
         toolpath curve -- are force-hidden regardless of the stack rule, so the
         growing bead mesh is actually visible; surfaces and beads keep following
-        the i <= layer stack rule."""
-        if not self.curved_model_loaded:
+        the i <= layer stack rule.
+
+        layer == -1 is the Planar toolpath source and returns immediately. It has
+        to be an explicit early return, not a consequence of the loop: `i <= -1`
+        is False for every layer, so falling through would DISABLE the entire
+        curved workpiece -- every surface, overlay, travel network, triad and
+        bead mesh. That is what used to happen when Planar was selected with a
+        curved model loaded, and nothing restored it, because gui_panel only
+        calls this for a non-planar selection; the mockup stayed invisible until
+        the user picked a curved layer again. Two call sites document this as "a
+        safe no-op", which was true only while no curved model was loaded."""
+        if not self.curved_model_loaded or layer is None or layer < 0:
             return
         for i, cfg in enumerate(CURVED_LAYERS):
             visible = (i <= layer)  # layer k's view shows layers 0..k, the physical stack.
@@ -1722,7 +2035,19 @@ class VisContent:
             once here -- the constant TCP orientation for the whole path
             (the plate doesn't tilt mid-print, see settled.md S1.6/S1.8),
             not stored per-waypoint.
+        An empty gcode_points returns ([], R_target) rather than raising. Any
+        G-code with no G0/G1 line at all -- a header-only or truncated Cura
+        export, or a hand-made placeholder -- parses to zero points, and
+        np.array([]) is 1-D, so the pts_local[:, 2] lift below used to raise
+        IndexError straight out of the caller's per-frame path (its own
+        `if not waypoints` guard runs after this call, and its `except OSError`
+        does not catch it). assets/models/planar/gcode/*.gcode is gitignored, so
+        every user supplies this file themselves. load_gcode() already guards the
+        same input with its `len(waypoints) < 2` check.
         """
+        if not gcode_points:
+            return [], self.T_user_frame[:3, :3].copy()
+
         pts_local = np.array([p for p, _, _ in gcode_points], dtype=float)
         is_feed = [f for _, _, f in gcode_points]
         pts_local[:, 2] += PLATE_THICKNESS_MM
@@ -1860,7 +2185,7 @@ class VisContent:
         T_target_tcp = np.eye(4)
         T_target_tcp[:3, :3] = R_target
         T_target_tcp[:3, 3] = target_pos_mm
-        T_target_flange = T_target_tcp @ np.linalg.inv(self.T_flange_to_tcp)
+        T_target_flange = T_target_tcp @ self.T_tcp_to_flange
 
         branches = self.solve_ik(T_target_flange)
         if not branches:
@@ -1934,6 +2259,10 @@ class VisContent:
             # Which filter set solved this path -- roadmap 7.4. Replaces the
             # allow_tcp_through_plate entry, whose toggle S1.46 superseded.
             "filter_mode": "planar",
+            # The tuned constants the filter set actually reads -- see
+            # _solver_cache_fields(). Without these, retuning a filter left this
+            # key unchanged and the stale joint path was served from cache.
+            "solver": _solver_cache_fields(),
         }
 
 
@@ -1965,6 +2294,11 @@ class VisContent:
             "orient_search": [ORIENT_SEARCH_TILT_MAX_DEG,
                               ORIENT_SEARCH_TILT_RING_AZIMUTHS,
                               ORIENT_SEARCH_ROLL_SLOTS],
+            # As on the planar meta, plus filter 8's surface clearance, which only
+            # the curved path runs -- keeping it out of the planar key means a
+            # curved-only retune cannot invalidate a planar cache.
+            "solver": _solver_cache_fields(),
+            "tip_clearance": round(float(CURVED_TIP_CLEARANCE_TOLERANCE_MM), 6),
         }
 
 
@@ -2230,7 +2564,12 @@ class VisContent:
             if not self.curved_orient_loaded:
                 self.precompute_status = "Build orientation frames first"
                 return
-            waypoints, R_target_array = self.build_curved_toolpath_waypoints_world(layer)
+            try:
+                waypoints, R_target_array = self.build_curved_toolpath_waypoints_world(layer)
+            except ValueError as e:
+                # The travel/piece pairing check -- a disconnected print surface.
+                self.precompute_status = str(e)
+                return
             if not waypoints:
                 self.precompute_status = "No waypoints to solve"
                 return
@@ -2270,9 +2609,13 @@ class VisContent:
 
     def cancel_toolpath_ik_precompute(self):
         """Stop and discard the precompute entirely, resetting progress to
-        zero -- a following run_toolpath_ik_precompute() call starts fresh."""
+        zero -- a following run_toolpath_ik_precompute() call starts fresh.
+
+        Confirms rather than blanking the status, matching cancel_export_job()'s
+        "Export cancelled". Clearing it to empty meant a click that discards a
+        completed 3,175-waypoint solve reported itself by making the text vanish."""
         self._abort_toolpath_ik_precompute()
-        self.precompute_status = ""
+        self.precompute_status = "Precompute cancelled"
 
 
     def _abort_toolpath_ik_precompute(self):
@@ -2295,11 +2638,29 @@ class VisContent:
         stack rule -- a completed layer's printed mesh stays visible while a
         different layer's precompute is discarded/restarted); only
         clear_curved_model() or a re-order/re-orient cascade
-        (_abort_geodesic_precompute()) removes those."""
-        was_gcode = self.precompute_cache_path in (None, GCODE_PRECOMPUTE_CACHE)
+        (_abort_geodesic_precompute()) removes those.
+
+        The planar test is `== GCODE_PRECOMPUTE_CACHE`, deliberately NOT
+        `in (None, GCODE_PRECOMPUTE_CACHE)`. precompute_cache_path is None in two
+        different situations -- "a planar run that hasn't recorded its path yet"
+        and "no precompute has ever been started" -- and treating the second as
+        planar meant Cancel Precompute tore down a freshly loaded G-code PREVIEW
+        that no precompute had anything to do with. Cancel is always enabled, so
+        this was: click Load G-code preview, click Cancel Precompute, watch the
+        mesh disappear with cancel_toolpath_ik_precompute() then blanking the
+        status so nothing said why. A run that is genuinely planar always has the
+        path set by _begin_toolpath_precompute()/the cache loader before there is
+        anything to abort."""
+        was_gcode = self.precompute_cache_path == GCODE_PRECOMPUTE_CACHE
         self.playback_running = False
         self.playback_index = 0
         self.playback_status = ""
+        # playback_active gates apply_live_layer_visibility()'s force-hiding of the
+        # guide overlays during playback (6.7). Discarding the precompute ends
+        # playback, so leaving it True stranded the order-feed/travel/orientation
+        # overlays hidden with nothing playing, until someone pressed Reset.
+        self.playback_active = False
+        self._last_rendered_playback_index = 0
         if was_gcode:
             self._clear_gcode_print_mesh()
 
@@ -2379,12 +2740,19 @@ class VisContent:
                 key = tuple(np.round(angles, 2))
                 if key in seen:
                     continue
+                # Marked seen as soon as it is EVALUATED, not once it passes.
+                # Admissibility is a pure function of the pose, so a duplicate
+                # that failed will fail identically -- re-running the filter
+                # stack (up to an FK plus two collision tests) was wasted work,
+                # and each repeat also re-counted itself in the reject tally,
+                # inflating the very numbers _reject_summary() prints to explain
+                # a failed waypoint.
+                seen.add(key)
                 reason = self._candidate_admissible(angles, ctx)
                 if reason is not None:
                     self.precompute_reject_tally[reason] = (
                         self.precompute_reject_tally.get(reason, 0) + 1)
                     continue
-                seen.add(key)
                 joints.append(angles)
                 rolls.append(roll_slot)
                 branches.append(branch_idx)
@@ -2492,9 +2860,14 @@ class VisContent:
 
         The edge cost and the E1 hard rejection are defined and justified in
         dijkstra_candidate_path's docstring; this is the same arithmetic applied
-        incrementally so the search can be chunked across frames. The two are
-        kept deliberately in step: dijkstra_candidate_path is the readable,
-        unit-tested statement of the algorithm, this is its streaming form."""
+        incrementally so the search can be chunked across frames.
+
+        ⚠ THIS is the live implementation. dijkstra_candidate_path is LEGACY (it
+        is never called) and is kept only as the readable, whole-graph statement
+        of the same algorithm. An earlier version of this docstring called it
+        "unit-tested"; that was never true -- the repo has no tests -- so nothing
+        keeps the two copies of this arithmetic in step except reading them
+        together. Change one, change the other."""
         q_prev = self.precompute_cand_joints[-1].astype(np.float64)
         roll_prev, branch_prev = self.precompute_cand_roll[-1], self.precompute_cand_branch[-1]
 
@@ -2636,26 +3009,33 @@ class VisContent:
         if self.precompute_cache_path != self._expected_precompute_cache_path():
             self.export_status = "Run Precompute for the active toolpath source first"
             return
+
         segments = self.build_export_segments()
-        ok, results = validate_job(self, segments)
-        if not ok:
-            self.export_status = format_validation(ok, results)
-            return
 
-        job_name = ("planar" if self.toolpath_source == -1
-                    else self.curved_layer_names[self.toolpath_source])
-        job_dir = f"{EXPORT_DIR}/{job_name}"
-        os.makedirs(job_dir, exist_ok=True)
-        _prune_stale_export_files(job_dir, len(segments))
-
+        # Validation is DEFERRED to the first step_export_job() call rather than
+        # run here. It does one compute_fk per exported point -- measured 0.12s on
+        # a curved layer but 6.3s over planar's 134,618 points -- and running it
+        # inside the button click meant nothing repainted until it finished, so
+        # that pause was invisible and unexplained. Handing control back now lets
+        # the status line and progress bar paint first. Validation itself stays
+        # monolithic; 6s is not worth chunking.
+        #
+        # What must NOT move is the ordering: validate, THEN makedirs/prune. The
+        # prune is destructive, so a REJECT has to write nothing and delete
+        # nothing -- including a previous good export sitting in the same folder.
+        # Both now happen together in the validate phase.
+        #
+        # export_job_dir is cleared here for the same reason: while validating
+        # there is no job directory yet, and leaving the PREVIOUS export's path in
+        # place would let a Cancel during validation prune that older job.
         self.export_segments = segments
-        self.export_job_dir = job_dir
+        self.export_job_dir = ""
         # Control chars included: a NUL would reach shutil.make_archive as a
         # ValueError ("embedded null byte"), which the zip step's except OSError
         # does not catch and which would escape the per-frame callback.
         self.export_zip_name = re.sub(r'[\x00-\x1f<>:"/\\|?*]', '_', export_name.strip())
         self.export_toolpath_source = self.toolpath_source
-        self.export_warned = any(not r.passed for r in results if r.action == "WARN")
+        self.export_warned = False
         self.export_seg_index = 0
         self.export_point_index = 0
         self.export_ply_lines = []
@@ -2663,8 +3043,17 @@ class VisContent:
         self.export_job_meta = []
         self.export_index = 0
         self.export_total = sum(len(s.joints) for s in segments)
+        self.export_phase = "validate"
         self.export_running = True
-        self.export_status = f"Exporting 0/{self.export_total} point(s)"
+        # Segment count up front, because it is the cost the user cannot see
+        # coming: the exchange format is one .ply + one .json PER SEGMENT, and a
+        # segment is one continuous extrusion run. A curved layer yields ~35 (70
+        # files); the planar benchy yields ~20,350 (~40,700 files in one
+        # directory, which then all get zipped). That is spec-conformant, not a
+        # bug, but it should not be a surprise mid-write.
+        self.export_status = (f"Validating {self.export_total} point(s) "
+                              f"in {len(segments)} segment(s) against the exchange spec, "
+                              f"then writing {2 * len(segments) + 1} files...")
 
     def step_export_job(self):
         """Advance the in-progress job export by one chunk of points -- call
@@ -2676,6 +3065,40 @@ class VisContent:
         time, mirroring step_toolpath_ik_precompute()'s chunking, and
         flushes each segment's files as soon as its points are done."""
         if not self.export_running:
+            return
+
+        # Phase 1: the self-check, deferred here from export_active_job() so the
+        # "Validating..." status paints before it runs (see that method). Runs in
+        # one go and then hands the frame back, so the write starts next frame.
+        # A REJECT stops here having created nothing -- the makedirs/prune below
+        # is the first thing that touches the disk, and it is deliberately after
+        # the gate.
+        if self.export_phase == "validate":
+            ok, results = validate_job(self, self.export_segments)
+            if not ok:
+                self.export_running = False
+                self.export_segments = []
+                self.export_job_meta = []
+                self.export_status = format_validation(ok, results)
+                return
+
+            self.export_warned = any(not r.passed for r in results if r.action == "WARN")
+            job_name = ("planar" if self.export_toolpath_source == -1
+                        else self.curved_layer_names[self.export_toolpath_source])
+            job_dir = os.path.join(EXPORT_DIR, job_name)
+            try:
+                os.makedirs(job_dir, exist_ok=True)
+                _prune_stale_export_files(job_dir, len(self.export_segments))
+            except OSError as e:
+                self.export_running = False
+                self.export_segments = []
+                self.export_job_meta = []
+                self.export_status = f"Export failed preparing {job_dir}: {e}"
+                return
+
+            self.export_job_dir = job_dir
+            self.export_phase = "write"
+            self.export_status = f"Exporting 0/{self.export_total} point(s)"
             return
 
         remaining = EXPORT_CHUNK_SIZE
@@ -2701,7 +3124,8 @@ class VisContent:
             self.export_point_index = end
 
             if self.export_point_index >= len(seg.joints):
-                self._flush_export_segment(seg)
+                if not self._flush_export_segment(seg):
+                    return  # I/O failed; it has already stopped the export and said why
                 self.export_seg_index += 1
                 self.export_point_index = 0
                 self.export_ply_lines = []
@@ -2716,24 +3140,41 @@ class VisContent:
         """Write one finished segment's toolpath_TN.ply + segment_N_solution.json
         and record its job.json entry -- the per-segment half of the old
         write_job_export(), split out so step_export_job() can call it once
-        a segment's points are done."""
-        ply_name = f"toolpath_T{seg.index}.ply"
-        with open(os.path.join(self.export_job_dir, ply_name), "w", encoding="utf-8") as f:
-            f.writelines(self.export_ply_lines)
+        a segment's points are done. Returns True on success, False (with
+        export_status set and the export stopped) on an I/O failure.
 
-        solution = {
-            "segment_id": seg.index,
-            "toolpath_file": ply_name,
-            "num_points": len(self.export_points),
-            "points": self.export_points,
-        }
-        with open(os.path.join(self.export_job_dir, f"segment_{seg.index}_solution.json"),
-                  "w", encoding="utf-8") as f:
-            json.dump(solution, f, indent=2)
+        Wrapped for the same reason _finish_export_job() is, and more urgently:
+        this does the overwhelming majority of the export's I/O and runs from
+        step_export_job() on EVERY frame, so an unguarded OSError here escapes
+        the Polyscope callback for the whole duration of the write rather than
+        for one click. A planar job puts ~40,700 files in one directory, which is
+        ample opportunity for a disk-full, an AV scanner holding a handle, or a
+        Windows path/ACL failure."""
+        ply_name = f"toolpath_T{seg.index}.ply"
+        try:
+            with open(os.path.join(self.export_job_dir, ply_name), "w", encoding="utf-8") as f:
+                f.writelines(self.export_ply_lines)
+
+            solution = {
+                "segment_id": seg.index,
+                "toolpath_file": ply_name,
+                "num_points": len(self.export_points),
+                "points": self.export_points,
+            }
+            with open(os.path.join(self.export_job_dir, f"segment_{seg.index}_solution.json"),
+                      "w", encoding="utf-8") as f:
+                json.dump(solution, f, indent=2)
+        except OSError as e:
+            self.export_running = False
+            self.export_segments = []
+            self.export_job_meta = []
+            self.export_status = f"Export failed writing segment {seg.index}: {e}"
+            return False
 
         self.export_job_meta.append({
             "segment_id": seg.index, "toolpath": ply_name,
             "solution": f"segment_{seg.index}_solution.json"})
+        return True
 
     def _finish_export_job(self):
         """Write job.json + copy surface.obj and end the export -- the
@@ -2797,6 +3238,16 @@ class VisContent:
             date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
             zip_name = self.export_zip_name if self.export_zip_name.strip('_') else os.path.basename(job_dir)
             zip_base = os.path.join(EXPORT_DIR, f"{date_str}-{zip_name}")
+            # Two exports of the same job on the same day used to overwrite each
+            # other's archive silently -- the likeliest case being a re-export
+            # after a tweak, i.e. exactly when the earlier one is still wanted for
+            # comparison. Suffix instead of clobbering; the job_dir itself is
+            # still overwritten in place, which is intended (it is "current").
+            if os.path.exists(f"{zip_base}.zip"):
+                n = 2
+                while os.path.exists(f"{zip_base}-{n}.zip"):
+                    n += 1
+                zip_base = f"{zip_base}-{n}"
             archive_path = shutil.make_archive(zip_base, "zip",
                                                 root_dir=os.path.dirname(job_dir),
                                                 base_dir=os.path.basename(job_dir))
@@ -2813,11 +3264,50 @@ class VisContent:
         mirrors cancel_toolpath_ik_precompute(). Prunes whatever segment
         files were already flushed to export_job_dir (keep=0 matches every
         toolpath_T*.ply/segment_*_solution.json written so far) so a
-        cancelled run doesn't leave orphaned files behind -- job.json itself
-        is only written by _finish_export_job(), so none exists yet to worry
-        a receiving parser."""
+        cancelled run doesn't leave orphaned files behind.
+
+        The job.json removal is the v1.0 review's fix. The old reasoning --
+        "job.json is only written by _finish_export_job(), so none exists yet"
+        -- holds only for a first-ever export into a fresh directory. On a
+        RE-export the previous run's job.json is still sitting there, and
+        keep=0 has just deleted every segment file it references, leaving a
+        receiving parser a manifest pointing at files that no longer exist.
+        Cancelling must leave no job, not a broken one.
+
+        No-ops unless an export is actually in flight. That guard matters
+        *because* of the job.json removal above: a cancel with nothing running
+        would otherwise delete a just-completed, perfectly valid export. The GUI
+        only shows the Cancel Export button while export_running, so this is
+        defence against a programmatic caller rather than a reachable click --
+        but "cancel" must never be able to destroy finished work."""
+        if not self.export_running:
+            self.export_status = "No export in progress"
+            return
+
+        self.export_phase = "write"
+        # Clear the in-flight write buffers and counters too, not just the two
+        # collections below. Retention is capped at one segment (they are emptied
+        # after every flush) and the largest segment across both toolpath sources
+        # is 264 points -- about 145KB -- so this is consistency rather than
+        # memory: a cancel that leaves half its state behind is exactly the
+        # asymmetry S1.42's grouped resets exist to prevent. Everything here is
+        # re-initialised by the next export_active_job() regardless.
+        self.export_ply_lines = []
+        self.export_points = []
+        self.export_seg_index = 0
+        self.export_point_index = 0
+        self.export_index = 0
+        self.export_total = 0
+        # export_job_dir is "" throughout the validate phase (nothing has been
+        # created yet), so cancelling then prunes nothing -- in particular it
+        # cannot reach into a PREVIOUS export's folder.
         if self.export_job_dir:
             _prune_stale_export_files(self.export_job_dir, keep=0)
+            stale_manifest = os.path.join(self.export_job_dir, "job.json")
+            try:
+                os.remove(stale_manifest)
+            except OSError:
+                pass  # absent (the common case: a first export) or locked
         self.export_running = False
         self.export_segments = []
         self.export_job_meta = []
@@ -2832,10 +3322,27 @@ class VisContent:
         of what else is active) and _abort_toolpath_ik_precompute() (only
         when G-code was actually the source being discarded, roadmap 6.6) --
         split out so those two call sites can apply it under different
-        conditions without duplicating the four lines."""
+        conditions without duplicating the four lines.
+
+        Clears ALL five bead arrays, not just gcode_bead_verts_full. The other
+        four were left live despite this docstring saying "bead arrays" -- for a
+        benchy that is roughly 34MB of vertices plus ~50MB of face indices
+        retained after every Clear. Functionally harmless (every re-entry re-inits
+        all five) but the contract was untrue.
+
+        gcode_status goes too: it describes the preview's state, and leaving it
+        set made Clear leave the panel reading "Loaded G-code preview (181375
+        waypoints)" with no preview on screen. That is exactly the drift S1.42
+        set these grouped helpers up to prevent -- a field added in one place and
+        forgotten in the other."""
         self.gcode_bead_verts_full = None
+        self.gcode_bead_faces = None
+        self.gcode_bead_reveal_index = None
+        self.gcode_bead_face_prefix = None
+        self.gcode_bead_verts_current = None
         self.gcode_print_handle = None
         self.gcode_preview_loaded = False
+        self.gcode_status = ""
         ps.remove_surface_mesh("G-code Print", error_if_absent=False)
 
 
@@ -2843,10 +3350,16 @@ class VisContent:
         """Playback reset used only by clear_gcode_preview() -- unconditionally
         discards G-code's own playback/bead state and the shared playback
         pointer, regardless of which toolpath source is currently active,
-        since the Clear button's whole point is "wipe G-code now"."""
+        since the Clear button's whole point is "wipe G-code now".
+
+        Clears playback_active for the same reason _abort_toolpath_ik_precompute()
+        does: it gates the 6.7 overlay force-hide, and leaving it True with nothing
+        playing strands the curved guide overlays hidden."""
         self.playback_running = False
         self.playback_index = 0
         self.playback_status = ""
+        self.playback_active = False
+        self._last_rendered_playback_index = 0
         self._clear_gcode_print_mesh()
 
 
@@ -3162,6 +3675,11 @@ class VisContent:
         # (roadmap 7.1), replacing S1.4's world point + rotation borrowed from
         # inv(T_zero[5]), which could not express a tool with its own orientation.
         self.T_flange_to_tcp = pose_to_matrix(*TCP_OFFSET_6D_MM_DEG)
+        # Cached because solve_ik_tcp_matrix needs it on every call and the matrix
+        # is constant from here on: the curved search runs ORIENT_SEARCH_FRAMES
+        # (540) solves per waypoint, so inverting it inline was 540 4x4 inversions
+        # per waypoint on the app's slowest documented loop (437-749ms/waypoint).
+        self.T_tcp_to_flange = np.linalg.inv(self.T_flange_to_tcp)
         T_zero_tcp = self.T_zero[5] @ self.T_flange_to_tcp  # TCP pose at zero joints
         # .copy() so this is rest-pose data in its own right, not a view into
         # T_zero_tcp -- it is shared by the collision set and rest_verts, and
@@ -3313,8 +3831,17 @@ class VisContent:
 
     def update_arm(self, joint_angles_deg):
         """GUI-facing entry point: record the current joint state and move
-        the rendered arm to match via the Delta transform."""
-        self.current_joint_angles = joint_angles_deg
+        the rendered arm to match via the Delta transform.
+
+        Copies rather than storing the caller's array by reference: gui_panel
+        passes its own self.joint_angles, which the FK sliders then mutate IN
+        PLACE every frame, and _begin_toolpath_precompute aliases the same object
+        into precompute_ref. The FK panel is disabled during playback but not
+        during a precompute, so dragging a slider mid-solve reached inside the
+        solver's reference pose. Bounded in practice (the reference is an
+        ordering hint, overwritten after the first waypoint) -- the copy removes
+        the need to reason about it at all."""
+        self.current_joint_angles = np.array(joint_angles_deg, dtype=float)
         self.apply_delta_transform(joint_angles_deg)
 
 
@@ -3338,7 +3865,12 @@ class VisContent:
 
 
     def _meshes_clear_plane(self, joint_angles_deg, indices, point, normal, tol):
-        """True if every moving mesh in `indices` stays outward of the plane
+        """⚠ LEGACY -- NOT CALLED. Retained per the mark-legacy-rather-than-delete
+        convention as the cheap-corners/exact-verts plane bound. Its caller was
+        the infinite-plane plate check that filters 6 and 7 replaced at 7.4
+        (S1.46/S1.47); filter 5 uses _plate_plane() directly, not this.
+
+        True if every moving mesh in `indices` stays outward of the plane
         through `point` with unit `normal`, allowing `tol` mm of inward slack
         (roadmap 6.8). A vertex's signed distance is (world - point) @ normal,
         positive on the outward (+normal) side; a mesh clears iff its worst
@@ -3404,8 +3936,10 @@ class VisContent:
     # unavailable once the plate height is a measurement rather than a knob. A
     # real bed is finite and the arm legitimately reaches around it.
     #
-    # _meshes_clear_plane() and _plate_plane() are both retained: filter 5 uses
-    # the latter, and the former is still the cheap-corners/exact-verts bound.
+    # _plate_plane() is LIVE -- filter 5 calls it. _meshes_clear_plane() is
+    # retained but is NOT called by any filter; it is kept only as the
+    # cheap-corners/exact-verts plane bound. (An earlier wording of this comment
+    # read as though filter 5 used both.)
 
     def _link_sample_points(self, deltas, indices):
         """World-space sampled surface points for the given moving-geometry
@@ -3604,7 +4138,14 @@ class VisContent:
         # Three or more apart is where a link can actually fold back onto another
         # (the forearm reaching the shoulder, the flange reaching the upper arm),
         # which is what filter 9 is for. The tool point sits at chain position 6,
-        # so the same rule pairs it with Robot1..Robot4.
+        # so the same rule (6 - k >= 3, i.e. k <= 3) pairs it with Robot1..Robot4.
+        #
+        # Mind the index convention when reading that: these are MOVING-geometry
+        # indices, and moving_geometry_rest_verts is rest_verts[:6] + [tcp_point]
+        # -- the static base Robot0 is not in it. So index i means Robot(i+1),
+        # and range(4) is Robot1..Robot4, NOT Robot0..Robot3. (A v1.0 review
+        # "corrected" this comment to the latter by mapping index k to Robot k;
+        # the indices were right and the mesh names were wrong.)
         link_pairs = [(i, j) for i in range(6) for j in range(i + 3, 6)]
         link_pairs += [(6, k) for k in range(4)]
 
@@ -3664,9 +4205,22 @@ class VisContent:
 
         self.trajectory_points.append(self.tcp_world.copy())
         self._trajectory_curve_sample_count += 1
-        if self._trajectory_curve_sample_count >= TRAJECTORY_CURVE_RENDER_STRIDE:
+        if self._trajectory_curve_sample_count >= self._trajectory_render_stride():
             self._trajectory_curve_sample_count = 0
             self._update_trajectory_curve()
+
+
+    def _trajectory_render_stride(self):
+        """How many recorded samples to wait between full curve re-registrations,
+        derived from the point count -- see TRAJECTORY_CURVE_NODES_PER_STRIDE.
+
+        The rebuild is O(n) and the list is unbounded, so a fixed stride let the
+        per-second redraw cost grow without limit. Growing the interval in step
+        with the cost keeps the amortised cost flat. Returns exactly
+        TRAJECTORY_CURVE_RENDER_STRIDE below TRAJECTORY_CURVE_NODES_PER_STRIDE x
+        that floor (5,000 points), which covers every realistic session."""
+        return max(TRAJECTORY_CURVE_RENDER_STRIDE,
+                   len(self.trajectory_points) // TRAJECTORY_CURVE_NODES_PER_STRIDE)
 
 
     def _update_trajectory_curve(self):
@@ -3675,7 +4229,12 @@ class VisContent:
         nodes = np.array(self.trajectory_points)
         if len(nodes) < 2:
             return
-        edges = np.array([[i, i + 1] for i in range(len(nodes) - 1)])
+        # np.arange rather than a list comprehension: this reruns every
+        # TRAJECTORY_CURVE_RENDER_STRIDE samples (~2x/sec) over trajectory_points,
+        # which grows without bound through a long playback and is only emptied by
+        # clear_trajectory().
+        idx = np.arange(len(nodes) - 1)
+        edges = np.column_stack((idx, idx + 1))
         self.trajectory_handle = ps.register_curve_network("Trajectory", nodes, edges)
         self.trajectory_handle.set_radius(TRAJECTORY_RADIUS_MM, relative=False)
 
@@ -4135,7 +4694,13 @@ def read_ply_polyline(filepath):
     faces to produce anything but a degenerate empty mesh. Returns
     (verts: Nx3 float64, edges: Mx2 int) exactly as declared in the header;
     edges are a disjoint segment soup in file order, not a walkable curve
-    -- see reconstruct_polylines()."""
+    -- see reconstruct_polylines().
+
+    Raises ValueError naming the file if the header lacks `element vertex`,
+    `element edge` or `end_header`. A vertices-only PLY used to leave n_edge as
+    None and fail on `v_end + n_edge` with a bare TypeError that named nothing --
+    unhelpful for the case this actually arises in, which is a user pointing a
+    study config at their own toolpath assets."""
     with open(filepath) as f:
         lines = f.readlines()
     n_vertex = n_edge = header_end = None
@@ -4147,6 +4712,13 @@ def read_ply_polyline(filepath):
         elif line.startswith("end_header"):
             header_end = i + 1
             break
+    if n_vertex is None or n_edge is None or header_end is None:
+        missing = [n for n, v in (("element vertex", n_vertex), ("element edge", n_edge),
+                                  ("end_header", header_end)) if v is None]
+        raise ValueError(
+            f"{filepath}: PLY header missing {', '.join(missing)}. This reader expects an "
+            f"ASCII PLY of vertices + edges and no faces -- see "
+            f"wiki/003_Guides/CurvedModel_AdaptingYourOwnJob.md")
     v_end = header_end + n_vertex
     e_end = v_end + n_edge
     verts = np.loadtxt(lines[header_end:v_end], dtype=np.float64).reshape(n_vertex, 3)
@@ -4390,6 +4962,14 @@ def dijkstra_candidate_path(layer_joints, layer_roll, layer_branch, layer_is_fee
     """Globally optimal joint trajectory through the candidate DAG -- roadmap
     7.4 step 4, settled.md S1.46 part 4.
 
+    ⚠ LEGACY -- NOT CALLED. The live implementation is the streaming pair
+    VisContent._relax_candidate_layer() + _finish_candidate_search(), which apply
+    this same relaxation one layer at a time so the search can be chunked across
+    frames and hold only the previous layer in memory. This whole-graph form is
+    retained (per the project's mark-legacy-rather-than-delete convention) as the
+    readable statement of the algorithm the streaming version implements. There
+    are no tests keeping the two in step -- edit both together.
+
     Nodes are `(waypoint i, candidate c)`; edges run only from layer i to layer
     i+1. Every argument is a per-waypoint list, all four the same length W, with
     entry i describing that waypoint's C_i surviving candidates:
@@ -4560,28 +5140,59 @@ def _reverse_block(order, i, j):
     return order[:i] + [(p, e ^ 1) for p, e in reversed(order[i:j + 1])] + order[j + 1:]
 
 
+def _reverse_delta(order, i, j, cost):
+    """Change in total travel from reversing order[i..j] -- the two cut edges only.
+
+    Reversing the block turns [..., X, (p_i,e_i), ..., (p_j,e_j), Y, ...] into
+    [..., X, (p_j,e_j^1), ..., (p_i,e_i^1), Y, ...]. Each internal hop
+    (p_k,e_k)->(p_k+1,e_k+1), cost[e_k^1, e_k+1], becomes
+    (p_k+1,e_k+1^1)->(p_k,e_k^1), cost[e_k+1, e_k^1] -- the same two physical
+    endpoints, and geodesic cost is symmetric, so every internal hop is unchanged.
+    Only the edge into the block and the edge out of it move; either is absent
+    when the block touches an end of the tour.
+
+    i == j is the single-piece end-swap and falls out of the same formula."""
+    n = len(order)
+    d = 0.0
+    if i > 0:
+        exit_prev = order[i - 1][1] ^ 1
+        d += cost[exit_prev, order[j][1] ^ 1] - cost[exit_prev, order[i][1]]
+    if j < n - 1:
+        entry_next = order[j + 1][1]
+        d += cost[order[i][1], entry_next] - cost[order[j][1] ^ 1, entry_next]
+    return d
+
+
 def two_opt(cost, order):
     """Improve a greedy order by 2-opt: repeatedly reverse the contiguous block
     that reduces total travel, until a full sweep finds none. Reversing
     order[i:j] flips each block piece's entry/exit end as well as the block
-    order. Because geodesic cost is symmetric a reversed internal hop keeps the
-    same two physical endpoints and is unchanged in cost, so only the two cut
-    edges actually move -- but with N=35 the tour is re-summed in full, trivial
-    and immune to delta-sign slips. Block length 1 is a single-piece end-swap,
-    included so a piece's entry end can be improved on its own. A good order,
-    not proven-optimal (Stage6_README 6.3)."""
+    order. Block length 1 is a single-piece end-swap, included so a piece's entry
+    end can be improved on its own. A good order, not proven-optimal.
+
+    Scores candidates by _reverse_delta (the two cut edges) rather than re-summing
+    the whole tour, making a sweep O(N^2) instead of O(N^3). This is a v1.0 review
+    fix: build_print_order() calls this synchronously from a button click with no
+    chunking, progress bar or cancel, so the cost lands as a frozen GUI. At the
+    shipped N=35 the full re-sum was genuinely "trivial", but the loading/geodesic
+    machinery is generic over whatever a study config describes, and a job with a
+    few hundred pieces made the freeze minutes long.
+
+    The scan order and the apply-immediately-and-keep-scanning behaviour are
+    deliberately unchanged, and `delta < -1e-9` is exactly the old
+    `candidate_total < best - 1e-9` -- so this selects the same moves and returns
+    the same order, which matters because the print order feeds the waypoint
+    positions the precompute cache is keyed on."""
     order = list(order)
-    best = travel_cost(order, cost)
     improved = True
     while improved:
         improved = False
         n = len(order)
         for i in range(n):
             for j in range(i, n):
-                cand = _reverse_block(order, i, j)
-                c = travel_cost(cand, cost)
-                if c < best - 1e-9:
-                    order, best, improved = cand, c, True
+                if _reverse_delta(order, i, j, cost) < -1e-9:
+                    order = _reverse_block(order, i, j)
+                    improved = True
     return order
 
 
@@ -4830,11 +5441,24 @@ def _prune_stale_export_files(job_dir, keep):
 
     surface.obj (curved-only: the planar path's "plate" is S1.40's infinite
     plane, not a mesh asset) and job.json are overwritten in place by
-    _finish_export_job(), not pruned here."""
-    for fname in os.listdir(job_dir):
-        m = re.match(r"^(?:toolpath_T|segment_)(\d+)(?:_solution)?\.(?:ply|json)$", fname)
-        if m and int(m.group(1)) >= keep:
-            os.remove(os.path.join(job_dir, fname))
+    _finish_export_job(), not pruned here -- except on the cancel path, which
+    removes a stale job.json itself (see cancel_export_job).
+
+    The pattern matches exactly the two filenames the writer emits. The previous
+    one, `(?:toolpath_T|segment_)(\\d+)(?:_solution)?\\.(?:ply|json)`, also matched
+    their cross-products -- toolpath_T5_solution.ply, segment_5.json -- which the
+    writer never produces but which a user's own file in this directory could
+    collide with.
+
+    Uses scandir rather than listdir: a planar job dir holds ~40,700 entries
+    (one .ply + one .json per extrusion run, plus job.json), and scandir avoids
+    materialising that whole list before filtering it."""
+    pattern = re.compile(r"^(?:toolpath_T(\d+)\.ply|segment_(\d+)_solution\.json)$")
+    with os.scandir(job_dir) as it:
+        for entry in it:
+            m = pattern.match(entry.name)
+            if m and int(m.group(1) or m.group(2)) >= keep:
+                os.remove(entry.path)
 
 
 # Validation
@@ -4844,7 +5468,14 @@ if __name__ == "__main__":
     vis.end_effector_position([0, 0, 0, 0, 0, 0])
     print(f"[Backend] Loaded {len(vis.mesh_data)} link meshes")
 
-    gcode_waypoints = vis.parse_gcode(os.path.join(GCODE_DIR, GCODE_FILE))
-    print(f"[Backend] Parsed {len(gcode_waypoints)} G-code waypoints")
-    vis.load_gcode()
+    # Guarded: assets/models/planar/gcode/*.gcode is gitignored, so on a fresh
+    # clone this smoke check used to die with a FileNotFoundError on a file the
+    # repo never ships.
+    gcode_path = os.path.join(GCODE_DIR, GCODE_FILE)
+    if os.path.exists(gcode_path):
+        gcode_waypoints = vis.parse_gcode(gcode_path)
+        print(f"[Backend] Parsed {len(gcode_waypoints)} G-code waypoints")
+        vis.load_gcode()
+    else:
+        print(f"[Backend] No G-code at {gcode_path} -- skipping the planar check")
 

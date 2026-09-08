@@ -18,6 +18,16 @@ short version:
    full toolpath execution pipeline (chunked/cached IK precompute,
    progressive-reveal playback) — see `ctx_system_current.md` for the
    per-feature status.
+   Two more stages landed after that list was written, and they are now the
+   bulk of the project: **curved-surface printing** (conformal toolpaths on a
+   curved part — geodesic travel routing, per-waypoint tool orientation, a
+   540-frame orientation search behind nine candidate filters) and **job
+   export** (writing a validated robot job for an external IK team). If you
+   are here for curved printing, start at
+   [`../../../003_Guides/CurvedModel_PrintSetup.md`](../../../003_Guides/CurvedModel_PrintSetup.md),
+   and read
+   [`../../../003_Guides/CurvedModel_AdaptingYourOwnJob.md`](../../../003_Guides/CurvedModel_AdaptingYourOwnJob.md)
+   before pointing it at a part of your own.
 4. Before touching mesh rendering code, read
    `docs/FR5_Mesh_Convention.md` — skipping it guarantees broken rendering.
 5. `wiki/002_Architecture/settled.md` will fill up with decisions as you

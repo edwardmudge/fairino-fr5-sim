@@ -51,9 +51,10 @@ manual silicone fill happens in that gap.
    proven-optimal one. Reversing a block also **flips each piece's entry/exit
    end** — because geodesic cost is symmetric, a reversed *internal* hop keeps
    the same two physical endpoints and is unchanged, so only the two cut edges
-   at the block's boundary actually move. With only 35 pieces the tour is
-   re-summed in full rather than tracked incrementally — trivial at this size,
-   and immune to delta-sign bugs. A block length of 1 is a single-piece
+   at the block's boundary actually move. Those two cut edges are exactly what
+   `_reverse_delta()` scores — see the "Changed at v1.0" note at the end of this
+   file; this paragraph's "the tour is re-summed in full" is no longer accurate.
+   A block length of 1 is a single-piece
    end-swap, so even one piece's entry end alone can improve.
 3. **Zero-cost ties break to the lowest endpoint index** (a stable `argmin`),
    so the order is reproducible run to run. A zero-cost hop to a genuinely
@@ -143,9 +144,9 @@ reproducible.
   arm or nozzle against any obstacle mesh. That check (ultimately built
   differently than first planned) belongs to 6.5, see
   [`CurvedModel_IKPrecompute.md`](CurvedModel_IKPrecompute.md).
-- **2-opt full re-sum, not incremental.** Fine at N=35 pieces; would need the
+- ~~**2-opt full re-sum, not incremental.** Fine at N=35 pieces; would need the
   two-cut-edge delta the symmetry argument already justifies if piece counts
-  grew enough to matter.
+  grew enough to matter.~~ **✅ Resolved at v1.0** — see below.
 - **Minimal GUI only** — a Build Print Order button and the RX/TX radio that
   drives `apply_live_layer_visibility()`. No Clear button (roadmap 6.6).
 
@@ -182,3 +183,38 @@ Generic engine tuning, `geometry_backend.py`:
   and predecessor rows this stage consumes, and the zero-cost/rim-hugging
   phenomena this guide reuses.
 - `tutorials/Stage6_README.md` — sub-stage 6.3 and what 6.4/6.5 do next.
+
+## Changed at v1.0 (2026-09-08)
+
+**2-opt now scores by the two cut edges, not a full tour re-sum**
+(`settled.md` **S1.62**). The limitation this guide listed — "would need the
+two-cut-edge delta the symmetry argument already justifies if piece counts grew
+enough to matter" — is implemented. `_reverse_delta()` computes the change from
+the edge entering the reversed block and the edge leaving it; a sweep is now
+O(N²) instead of O(N³).
+
+Why it mattered: `build_print_order()` runs `two_opt()` synchronously from a
+button click with no chunking, progress bar or cancel, so the cost lands as a
+frozen GUI. At the shipped N=35 the full re-sum genuinely was trivial, but the
+loading/geodesic/ordering machinery is generic over whatever a study config
+describes, and a job with a few hundred pieces made the freeze minutes long.
+
+The guide's own caution — that a full re-sum is "immune to delta-sign bugs" — was
+the right thing to worry about, so it was answered by measurement rather than by
+argument. Both implementations were run against **280 random symmetric cost
+matrices** (2–35 pieces, including the coincident-endpoint closed loops the real
+assets contain) and returned **identical orders in all 280 cases**; over 300
+random reversals the worst `|delta − exact re-sum|` was **1.7e-13**, four orders
+of magnitude below the `1e-9` acceptance threshold.
+
+That equivalence is load-bearing, not cosmetic: the print order determines the
+waypoint positions hashed into the curved precompute cache key, so a different
+order would silently invalidate the shipped RX/TX caches. It does not — both
+still hit.
+
+**The one condition that would break it:** the delta derivation depends on the
+cost matrix being **symmetric**. Reversing a block flips each piece's entry/exit
+ends, so an internal hop keeps the same two physical endpoints and is unchanged
+in cost *only* because `cost[a,b] == cost[b,a]`. Geodesic distance is symmetric;
+a directional cost (an asymmetric travel-time model, say) would require
+reverting to the full re-sum.

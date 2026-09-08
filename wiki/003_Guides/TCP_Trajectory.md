@@ -77,13 +77,14 @@ count over the threshold — the trail can visibly lag behind
 
 ## How to tune it
 
-Three module-level constants at the top of `geometry_backend.py`:
+Four module-level constants at the top of `geometry_backend.py`:
 
 | Constant | Effect |
 |---|---|
 | `TRAJECTORY_SAMPLE_INTERVAL_S` | Minimum seconds between recorded points. Lower = denser trail. |
 | `TRAJECTORY_RADIUS_MM` | Trajectory line thickness, in world units (mm). Applied via `CurveNetwork.set_radius(TRAJECTORY_RADIUS_MM, relative=False)` each time the curve is rebuilt. |
-| `TRAJECTORY_CURVE_RENDER_STRIDE` | How many accepted samples accumulate in `trajectory_points` before `_update_trajectory_curve()` re-registers the curve. Higher = fewer rebuilds, more visible lag while idle. |
+| `TRAJECTORY_CURVE_RENDER_STRIDE` | The **floor** of the redraw stride (see "Changed at v1.0" below — it was a fixed value until then). How many accepted samples accumulate in `trajectory_points` before `_update_trajectory_curve()` re-registers the curve. Higher = fewer rebuilds, more visible lag while idle. |
+| `TRAJECTORY_CURVE_NODES_PER_STRIDE` | Grows the redraw stride by 1 per N recorded points, so the rebuild interval scales with the O(n) rebuild cost. |
 
 ## Code anchors
 
@@ -95,3 +96,48 @@ Three module-level constants at the top of `geometry_backend.py`:
 - `gui_panel.py`: the "Enable Trajectory" `psim.Checkbox` and the
   `self.content.record_trajectory_point()` call, both at the top of
   `render()`.
+
+## Changed at v1.0 (2026-09-08)
+
+**The redraw stride is now derived from the point count, not fixed at 5**
+(`settled.md` **S1.69**). `record_trajectory_point()` tests against
+`_trajectory_render_stride()`:
+
+```python
+max(TRAJECTORY_CURVE_RENDER_STRIDE,
+    len(trajectory_points) // TRAJECTORY_CURVE_NODES_PER_STRIDE)
+```
+
+Why: `trajectory_points` is unbounded — only `clear_trajectory()` (the FK panel's
+Reset) empties it — while `_update_trajectory_curve()` is an O(n) full
+re-registration, because Polyscope curve networks have no incremental grow API.
+A fixed stride therefore fired a growing rebuild at a constant ~2/sec, so redraw
+work grew O(n²) over a session.
+
+Measured at ~0.31 µs/node:
+
+| Points | Rebuild | Derived stride | Amortised cost |
+|---|---|---|---|
+| 500 | 0.22 ms | 5 (unchanged) | 0.05% |
+| 10,000 | 2.99 ms | 10 | 0.37% |
+| 30,000 | 9.40 ms | 30 | 0.39% |
+| 60,000 | 18.89 ms | 60 | 0.46% |
+
+30,000 points is roughly a **50-minute planar playback at speed 1**. The sessions
+that actually happen are far smaller — curved RX at speed 1 reaches about 529
+points, planar at speed 100 about 302 — so this was a real but narrow problem,
+and the fix is scoped to match.
+
+Two properties worth knowing before tuning either constant:
+
+- **Below 5,000 points nothing changed.** The `max()` floor pins the stride at
+  exactly 5, so every realistic session behaves as it did before. This is a
+  tail-case fix that deliberately does not perturb the common case.
+- **No point is ever discarded.** Only redraw *frequency* changes. Capping the
+  list was considered and rejected: the trail is a debug overlay whose whole value
+  is showing where the TCP has been, so silent truncation would be a behaviour
+  change rather than a performance one.
+
+Same reasoning as **S1.55**, which replaced the fixed `PLAYBACK_RENDER_STRIDE`
+with one derived from the solved path's own joint motion — a fixed count only
+means a fixed cost if the thing being counted has fixed cost.

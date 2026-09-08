@@ -140,8 +140,12 @@ per-structure transparency-mode opt-in found), not on rendering cost.
     not re-transform an already-loaded preview mesh; it's left showing
     the old `T_user_frame` until "Load G-code preview" is clicked again
     (`settled.md` S1.23 superseded S1.8's button-triggered reload). It
-    no-ops if the G-code file doesn't exist yet, since the button is
-    reachable before any G-code has ever been loaded.
+    declines with a "No G-code file found" status if the file doesn't exist
+    yet, since the button is reachable before any G-code has ever been
+    loaded. (Until v1.0 it no-oped *silently*, which on a fresh clone — where
+    `assets/models/planar/gcode/*.gcode` is gitignored and therefore absent —
+    made the button look broken. Every load path now reports through
+    `gcode_status`, which the panel renders beneath the button.)
 
 ## Current scope and limitations
 

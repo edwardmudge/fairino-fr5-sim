@@ -20,6 +20,29 @@ status: active
 > The precompute's planar/curved discriminator is now the boolean
 > `check_collision` on `_begin_toolpath_precompute` (was `tip_tolerance_mm`).
 
+> ✅ **The banner above is itself out of date — read this first (2026-09-08).**
+> Its central claim, that "the curved path now runs **no clearance check at
+> all**", was true at 7.2 and **false since 7.4**. Filter 8 restored a clearance
+> check: arm links against the layer's own print surface, binned through
+> `_build_surface_grid()` at `SURFACE_GRID_CELL_MM`, with the tolerance read from
+> `study_config`'s `CURVED_TIP_CLEARANCE_TOLERANCE_MM` (1.0mm) — which is why
+> that constant is live again. A curved solve now means *reachable, within joint
+> limits, and past all nine candidate filters* (`settled.md` **S1.46/S1.47**).
+>
+> What the banner still gets right: the tool is **not** part of that check. Its
+> whole collision body is the single TCP point, which IK pins to the commanded
+> waypoint, so it is deliberately excluded from filters 6–8 — **nothing guards
+> the nozzle against the workpiece**, only the arm.
+>
+> Three further corrections to the body of this guide:
+> - `PRECOMPUTE_CACHE_VERSION` is **7**, not 4 or 5.
+> - The cache key gained a `solver` block (TCP offset, joint limits, every
+>   `FILTER_*`/`EDGE_*` value) plus `tip_clearance` at v1.0, so retuning any of
+>   those correctly invalidates a cached solve — `settled.md` **S1.59**.
+> - The "Code anchors" list near the end cites `_nozzle_clears_plane()` and
+>   `_branch_clears_ground()`, which survive only as tombstone comments, and
+>   `precompute_tip_tolerance_mm`, which **no longer exists in any form**.
+
 ## What it is
 
 `run_curved_toolpath_ik_precompute(layer, ...)` wires a print layer's ordered,

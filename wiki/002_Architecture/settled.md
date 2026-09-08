@@ -163,6 +163,15 @@ entry is pre-selected.
 
 ## S1.6 Build plate is fully re-posable (position + rotation), XYZ fixed-angle convention, via click-to-apply GUI buttons
 
+> ⚠ **Amended 2026-09-06 (S1.58).** The final clause below -- that loading a
+> saved position is "only ever triggered by that explicit button click, never
+> automatically at startup, which still always begins from
+> `USER_FRAME_ORIGIN_MM`/zero-rotation" -- **no longer holds.** Startup now
+> applies `saved_position.json` when readable, falling back to
+> `USER_FRAME_ORIGIN_MM` otherwise, because the shipped curved caches are keyed
+> on the plate pose and were solved at the saved frame. Everything else in this
+> entry (the re-posable plate, the RPY convention, Move/Reset/Save/Load) stands.
+
 **Decision:** `load_build_plate(position_mm, rpy_deg)` now takes both a
 position and an `[roll, pitch, yaw]` (degrees) rotation, superseding S1.2's
 translation-only description -- this is S1.2's own anticipated trigger
@@ -536,6 +545,9 @@ split with `run_/step_/pause_/cancel_toolpath_ik_precompute` (four):
    `precompute_total`, discarding `precompute_waypoints`/
    `precompute_joint_path` -- the same relationship `Reset` already has to
    `playback_waypoint_index` (`gui_panel.py:80-82`).
+   > ⚠ **Symbol gone (noted 2026-09-08).** `playback_waypoint_index` no longer
+   > exists anywhere in the codebase, and that line range now points at unrelated
+   > code. The analogy stands as written; only the pointer is dead.
 4. `step_toolpath_ik_precompute()` -- a no-op unless `precompute_running`
    -- solves up to `PRECOMPUTE_CHUNK_SIZE = 25` waypoints per call (chosen
    from S1.13's ~0.5ms/waypoint benchmark at benchy scale, keeping each
@@ -1874,6 +1886,13 @@ this entry adopts those numbers rather than re-deriving them.
 
 ## S1.33 Curved-surface printing generalized to a configurable layer list; RX/TX study config moved to examples/curved_surface_printing/
 
+> ⚠ **Amended 2026-09-08 (S1.60).** The split described below stands, but the
+> *mechanism* has changed: the study config is no longer selected by editing
+> `geometry_backend.py`'s import. It resolves
+> `os.environ.get("FR5_STUDY_CONFIG", DEFAULT_STUDY_CONFIG)` via `importlib`, so
+> pointing the feature at another job needs no source edit at all. Read every
+> "swappable via one import" phrasing below as "swappable via `FR5_STUDY_CONFIG`".
+
 **Decision:** Curved-surface printing (roadmap Stage 6) is a core,
 project-agnostic simulator feature -- same standing as flat-plate G-code
 printing -- and stays in `geometry_backend.py`/`gui_panel.py`. What was
@@ -1983,6 +2002,14 @@ between them emitted by `build_print_order()` (`geometry_backend.py`), consuming
   unchanged, so only the two cut edges move -- but with N=35 the tour is
   re-summed in full (trivial, and immune to delta-sign slips). Block length 1 is
   a single-piece end-swap, so a piece's entry end can be improved on its own.
+  > ⚠ **Amended 2026-09-08 (S1.62).** The full re-sum is gone: `two_opt()` now
+  > scores candidates with `_reverse_delta()` -- exactly the two cut edges this
+  > paragraph identifies -- making a sweep O(N^2) rather than O(N^3), because
+  > this stage runs synchronously off a button click and a study config with a
+  > few hundred pieces froze the GUI for minutes. The "immune to delta-sign
+  > slips" caution was answered by measurement, not argument: 280/280 identical
+  > orders on random symmetric cost matrices, worst delta error 1.7e-13 against a
+  > 1e-9 threshold. Everything else in this bullet still holds.
 - **Zero-cost ties break to the lowest endpoint index** (stable `argmin`), so
   the order is reproducible. A zero-cost hop to a *different* piece is real free
   travel and is taken; a piece leaves the candidate set the moment it is entered,
@@ -3512,8 +3539,8 @@ T_placement[:2, 3] = CURVED_MODEL_XY_OFFSET_MM - (assembly_min[:2] + assembly_ma
 
 The `plate = self.load_mesh(...)` line for bounds is deleted outright --
 confirmed nothing else in the function or file reads `plate_min`/`plate_max`.
-**Not the same `plate` as `load_build_plate()`'s** (a separate load at
-[geometry_backend.py:580](geometry_backend.py#L580)), which registers the
+**Not the same `plate` as `load_build_plate()`'s** (a separate load inside
+[`load_build_plate()`](../../geometry_backend.py)), which registers the
 visible plate mesh and sets `self.plate_local_bounds` for roadmap 7.4's
 collision filters 6/7 -- fully independent, untouched by this change.
 `T_placement[2, 3]` (Z anchoring) is untouched; this fix is XY-only.
@@ -4140,3 +4167,374 @@ because the path is complete by then. A note to that effect sits on
 (5 sites, all wholesale) and to `precompute_index` before removing anything.
 Post-removal the curved benchmark is unchanged (stride 6, 63fps median) and
 playback still terminates on the `finished` branch with "Playback complete".
+
+## S1.58 Build plate loads the saved calibrated User Frame at startup, superseding S1.6's "never automatically at startup"
+
+**Decision:** `VisContent.__init__` now calls `_load_startup_build_plate()`,
+which applies `assets/buildPlate/saved_position.json` when it is readable and
+falls back to `USER_FRAME_ORIGIN_MM` when it is absent or malformed. The chosen
+pose is reported through `startup_plate_status`, which the GUI seeds `bp_status`
+from, and `load_build_plate()` now retains the applied `(position_mm, rpy_deg)`
+in `build_plate_pose` so `UI_Menu.__init__` seeds its Target Position/RPY fields
+from the pose actually applied. The **Reset** button still means
+`USER_FRAME_ORIGIN_MM`. `load_saved_build_plate_position()` gained a `try/except`
+around the file read and returns a status instead of raising.
+
+This supersedes the final clause of **S1.6**, which specified that loading is
+"only ever triggered by that explicit button click, never automatically at
+startup, which still always begins from `USER_FRAME_ORIGIN_MM`/zero-rotation".
+
+**Reason:** the shipped curved precompute caches are keyed on the plate pose and
+were solved at the real calibrated User Frame ([649.456, 133.762, 322.778], rpy
+[-0.369, 0.329, -89.080]) adopted by S1.45. Booting at `USER_FRAME_ORIGIN_MM`
+meant every cache check missed, so a first run re-solved ~3,175 (RX) / ~2,688
+(TX) waypoints at the measured 437-749ms each -- around half an hour per layer at
+1.3-2.3fps -- with nothing on screen indicating that a cached solve existed. It
+was also not the same job: `CURVED_MODEL_XY_OFFSET_MM = (0,0)` is measured for
+100% reachability at the saved frame specifically (S1.48), so the default pose
+silently offered an unvalidated configuration.
+
+S1.6's stated objection was to loading the pose *silently* ("without forcing
+every future startup to load it silently"). The status message is the direct
+answer to that objection, and Reset keeps the demo pose one click away -- so this
+supersedes the mechanism while honouring the reason behind it.
+
+**Non-revertible unless:** the shipped caches are regenerated at
+`USER_FRAME_ORIGIN_MM`, or the plate pose leaves the cache key. Note the GUI
+field seeding is load-bearing, not cosmetic: fields hard-coded to
+`USER_FRAME_ORIGIN_MM` while the plate sits elsewhere would make an unedited
+**Move** click silently teleport the plate back to the demo pose.
+
+**Verified on:** 2026-09-06. Cache metas read directly from
+`curved_rx/tx.precompute.npz` confirm the stored `user_frame` is the saved pose,
+not `USER_FRAME_ORIGIN_MM`.
+
+## S1.59 Precompute cache key includes the tuned solver constants
+
+**Decision:** both `_toolpath_cache_meta()` and `_curved_toolpath_cache_meta()`
+gained a `solver` field from the shared `_solver_cache_fields()` helper --
+`TCP_OFFSET_6D_MM_DEG`, `PHYSICAL_JOINT_LIMITS`, the `FILTER_*` values plus
+`SELF_COLLISION_PROXY_SEGMENT_MM` / `LINK_SAMPLE_SPACING_MM` /
+`SURFACE_GRID_CELL_MM`, and the `EDGE_*` costs. The curved meta additionally
+carries `tip_clearance` (`CURVED_TIP_CLEARANCE_TOLERANCE_MM`, filter 8's
+clearance), deliberately kept out of the planar key because filter 8 never runs
+on the planar path -- a curved-only retune must not invalidate a planar cache.
+
+Existing caches were **migrated in place** (meta rewritten, arrays untouched)
+rather than invalidated, so `PRECOMPUTE_CACHE_VERSION` stays 7.
+
+**Reason:** the key covered the source geometry, the plate pose, the filter mode
+and the orientation-search shape, but none of the constants that decide *which
+candidate survives*. Retuning a filter threshold, a joint limit, an edge cost or
+the TCP offset therefore left the key identical, and the next Run Precompute
+served the joint path solved under the OLD values with no warning. That is worst
+for exactly the person adapting this to their own job, whose first action is to
+retune those constants. `PRECOMPUTE_CACHE_VERSION` was the only lever and it is
+manual and undocumented for users.
+
+**Non-revertible unless:** the filter stack stops reading these constants. If a
+new tuned constant is added to the filter or edge machinery, it belongs in
+`_solver_cache_fields()` -- otherwise this class of silent staleness returns.
+
+**Verified on:** 2026-09-06. Migration re-read each cache and confirmed the
+stored `solver` block equals `_solver_cache_fields()` (so the caches still hit)
+with `joint_path` shapes intact at (3175, 6) and (2688, 6); mutating
+`FILTER_J5_MIN_DEG` or `EDGE_BRANCH_CHANGE_PENALTY` changes the key, and
+restoring the value restores it.
+
+## S1.60 Study config is selected by the `FR5_STUDY_CONFIG` environment variable
+
+**Decision:** `geometry_backend.py`'s single hard-coded
+`from examples.curved_surface_printing.study_config import (...)` is replaced by
+an `importlib` resolution of
+`os.environ.get("FR5_STUDY_CONFIG", DEFAULT_STUDY_CONFIG)`. The required names
+are listed in `_STUDY_CONFIG_NAMES` and read off the module by name, so a config
+missing one fails at import naming the offender. `CURVED_MODEL_DIR` is then
+anchored via `_asset_path()`, leaving an absolute path untouched so a study may
+keep assets outside the repo. Unset, behaviour is byte-for-byte unchanged.
+
+**Reason:** S1.33 established the generic-engine / study-config split, and the
+README already told users to "swap it for a different curved-print job" -- but
+the only way to do so was to edit `geometry_backend.py`, one of the two files
+AGENTS.md section 3 designates as the simulator core. An environment variable
+keeps the single import seam S1.33 intended while making the documented action
+actually possible without a source edit, and `main.py` stays untouched.
+
+**Non-revertible unless:** more than one study must be loaded simultaneously, at
+which point this becomes an instance parameter rather than a module-level
+constant -- a much larger change, since `CURVED_LAYERS` and friends are read as
+module globals throughout.
+
+**Verified on:** 2026-09-06.
+
+## S1.61 Asset paths are anchored to the source directory, not the process CWD
+
+**Decision:** `MESH_DIR`, `PRINTER_HEAD_DIR`, `BUILD_PLATE_DIR`, `GCODE_DIR`,
+`EXPORT_DIR` and the study config's `CURVED_MODEL_DIR` are resolved through
+`_asset_path()` against `os.path.dirname(os.path.abspath(__file__))`. An
+already-absolute path is returned unchanged.
+
+**Reason:** every asset path was relative to the working directory, so the app
+only started when launched from the repo root. An IDE Run button, a
+`python /path/to/main.py` invocation, or any wrapper script produced a bare
+`FileNotFoundError` before the window opened -- a poor first impression with a
+non-obvious cause.
+
+**Non-revertible unless:** assets must be relocatable at runtime, which would
+want a config entry rather than a return to CWD-relative paths.
+
+**Verified on:** 2026-09-06.
+
+## S1.62 `two_opt` scores candidate reversals by the two cut edges instead of re-summing the tour
+
+**Decision:** `two_opt()` now calls the new `_reverse_delta()` (the change in
+total travel from the edge entering the block and the edge leaving it) rather
+than building each candidate order and re-summing it with `travel_cost()`. A
+sweep is O(N^2) instead of O(N^3). The scan order, the
+apply-immediately-and-keep-scanning behaviour, and the acceptance threshold are
+unchanged: `delta < -1e-9` is exactly the previous
+`candidate_total < best - 1e-9`.
+
+**Reason:** `build_print_order()` calls this synchronously from a button click
+with no chunking, progress bar or cancel, so its cost lands as a frozen GUI. At
+the shipped N=35 the full re-sum was genuinely trivial, as its docstring said --
+but the curved pipeline is generic over whatever a study config describes, and a
+job with a few hundred pieces made the freeze minutes long. This is the cheapest
+fix that removes the scaling problem without restructuring the call into the
+chunked-step pattern.
+
+**Non-revertible unless:** the cost matrix stops being symmetric. The delta
+derivation depends on it: reversing a block flips each piece's entry/exit ends,
+so an internal hop keeps the same two physical endpoints and is unchanged in cost
+*only* because `cost[a,b] == cost[b,a]`. Geodesic distance is symmetric; a
+directional cost (e.g. an asymmetric travel-time model) would break this and
+require the full re-sum.
+
+**Verified on:** 2026-09-06. Both implementations run against 280 random
+symmetric cost matrices (2-35 pieces, including coincident-endpoint closed loops)
+returned **identical orders in all 280 cases**; over 300 random reversals the
+worst |delta - exact re-sum| was 1.7e-13, four orders of magnitude below the
+1e-9 acceptance threshold, so a flipped near-tie is not a practical risk. This
+mattered because the print order feeds the waypoint positions hashed into the
+curved cache key -- a changed order would have silently invalidated the shipped
+RX/TX caches.
+
+## S1.63 Cancelling an export removes the stale job.json, and is a no-op when no export is running
+
+**Decision:** `cancel_export_job()` now also deletes `job.json` from the job
+directory alongside the segment files it already pruned, **and** returns early
+with "No export in progress" unless `export_running` is true.
+
+**Reason:** two halves of the same hazard, found in the v1.0 review.
+
+The first: cancel pruned every `toolpath_T*.ply` / `segment_*_solution.json`
+with `keep=0`, and the old docstring justified leaving `job.json` alone on the
+grounds that "job.json is only written by `_finish_export_job()`, so none exists
+yet". That holds only for a first-ever export into a fresh directory. On a
+**re-export**, the previous run's `job.json` is still present, and the prune has
+just deleted every segment file it references -- handing a receiving parser a
+manifest pointing at files that no longer exist. Cancelling must leave no job,
+not a broken one.
+
+The second follows directly from the first: once cancel deletes `job.json`, a
+cancel with nothing in flight would destroy a **completed, valid** export. The
+GUI only shows the Cancel Export button while `export_running`, so this is not a
+reachable click today -- but a destructive operation must not depend on a GUI
+gate for its safety.
+
+**Non-revertible unless:** `job.json` stops being the manifest that names the
+segment files, or export gains a resume-from-partial mode -- in which case
+cancel would need to distinguish "abandon" from "pause" rather than always
+clearing.
+
+**Verified on:** 2026-09-08. With `EXPORT_CHUNK_SIZE` temporarily lowered to 50
+so the export stays genuinely mid-flight, cancel leaves no `job.json`, no
+partial segment files, and no new zip, while the two zips from previously
+completed exports survive; a subsequent stray `cancel_export_job()` after a
+completed export leaves that export's manifest and all 35 `.ply` files intact.
+
+## S1.64 Playback/precompute initialisers gate on the state they dereference, not only on the precompute's existence
+
+**Decision:** `_init_curved_toolpath_playback()` now refuses unless the curved
+model is loaded AND `curved_order_loaded`/`curved_orient_loaded` are both true,
+returning False with a `playback_status` like its sibling guards.
+`build_toolpath_waypoints_world()` returns `([], R_target)` for an empty
+`gcode_points`, and `_build_gcode_beads()` returns its empty-result tuple for
+fewer than two points. `build_curved_toolpath_waypoints_world()`'s travel/piece
+pairing check raises `ValueError` instead of `assert`, and both callers catch it.
+
+**Reason:** two of these were crashes reachable by ordinary clicks, and every one
+of them escaped into the per-frame Polyscope callback, which kills the window
+rather than showing a message.
+
+1. `cancel_geodesic_precompute()` nulls `curved_print_order` (via
+   `_reset_print_order_state`) while leaving `precompute_joint_path` and
+   `precompute_cache_path` fully populated. The initialiser gated only on those
+   two, so Cancel Geodesics -> Run Toolpath reached
+   `self.curved_print_order[layer]` on `None`. Reproduced:
+   `TypeError: 'NoneType' object is not subscriptable`. Cancel Geodesics is
+   always enabled and sits beside Build Geodesics; clicking Load Curved Model a
+   second time after a completed precompute reaches the same state.
+2. `parse_gcode()` returns `[]` for any file with no G0/G1 line -- a header-only
+   or truncated Cura export. `np.array([])` is 1-D, so `pts_local[:, 2]` raised
+   `IndexError: too many indices for array`, and the caller's `if not waypoints`
+   guard ran *after* the call while its `except OSError` could not catch it.
+   `assets/models/planar/gcode/*.gcode` is gitignored, so every user supplies
+   this file themselves. `load_gcode()` already guarded the same input.
+3. The `assert` additionally evaporates under `python -O`, which is exactly when
+   a silent wrong-travel-move stitch would be worst.
+
+**Non-revertible unless:** the guards move somewhere that provably runs earlier.
+The principle to keep: a function that is about to subscript retained state
+validates that state itself, rather than trusting a caller's unrelated check --
+`precompute_cache_path` says who solved the path, not whether the geometry that
+path was built from still exists.
+
+**Verified on:** 2026-09-08. Both crashes reproduced against the running backend
+before the fix and re-run after; all four entry points (Run Toolpath, Reset
+Toolpath, Run Precompute, Load G-code preview) now decline with a status.
+
+## S1.65 `apply_live_layer_visibility(-1)` is an explicit early return, not a fall-through
+
+**Decision:** the method returns immediately for `layer is None or layer < 0`.
+
+**Reason:** the body computes `visible = (i <= layer)`, which at `layer == -1` is
+False for every configured layer -- so selecting the **Planar** toolpath source
+with a curved model loaded disabled the entire workpiece: every surface,
+ordered-feed overlay, travel network, orientation triad and printed bead mesh.
+Nothing restored it, because `gui_panel` only calls this for a non-planar
+selection, so re-selecting Planar never helped; the mockup stayed invisible until
+the user picked a curved layer again. Two call sites documented the -1 case as "a
+safe no-op", which was true only while no curved model was loaded.
+
+**Non-revertible unless:** -1 stops meaning "planar" as the toolpath-source
+sentinel.
+
+**Verified on:** 2026-09-08. Reproduced (`Surface RX Offset` enabled True -> False
+on `apply_live_layer_visibility(-1)`), and confirmed it stays enabled after.
+
+## S1.66 A plate move marks the curved model stale, and the build chain refuses to run on it
+
+**Decision:** `load_build_plate()` sets `curved_model_stale = True` when the plate
+moves under a loaded curved model (alongside the geodesic abort it already did);
+`load_curved_model()` clears it, and `run_geodesic_precompute()` refuses to start
+while it is set, directing the user to reload.
+
+**Reason:** the pre-existing guard aborted the geodesics and advised "reload the
+curved model", but left `curved_model_loaded` True with the retained world
+vertices and `T_curved` at the **pre-move** pose, and the structures still
+rendered there. Nothing stopped Build Geodesics -> Build Print Order -> Build
+Orientation Frames -> Run Precompute being re-run on that stale geometry. The
+result would be a solve whose filter 8 bins its surface grid from the old
+workpiece position while filters 5-7 use the new plate pose -- a collision test
+against a surface that is not where the arm thinks it is. The advisory status was
+the only thing in the way, and the next Build click overwrote it.
+
+**Non-revertible unless:** `load_build_plate()` gains the ability to re-place the
+curved geometry itself, at which point staleness would be resolved rather than
+reported.
+
+**Verified on:** 2026-09-08.
+
+## S1.67 Export validation is deferred to the first `step_export_job()` call
+
+**Decision:** `export_active_job()` builds the segments, sets `export_running`
+with `export_phase = "validate"` and a "Validating N point(s)..." status, and
+returns. The first `step_export_job()` runs `validate_job()`, and only on ACCEPT
+does it `makedirs` + `_prune_stale_export_files` and switch to `export_phase =
+"write"`. `export_job_dir` is cleared at the start so a Cancel during validation
+cannot prune a previous job's folder.
+
+**Reason:** validation does one `compute_fk` per exported point. Measured: 0.12s
+over curved RX (35 segments, 2,527 points) but **6.32s** over planar (20,350
+segments, 134,618 points). Running it inside the button click meant nothing
+repainted until it finished -- the same freeze `step_export_job()` was created to
+eliminate, reintroduced ahead of it. Deferring by one frame lets the status line
+and progress bar paint first. Validation itself stays monolithic: 6s does not
+justify restructuring `validate_job` into a chunked walk.
+
+**Non-revertible unless:** the ordering is preserved. Validate must stay strictly
+before `makedirs`/prune -- the prune is destructive, and a REJECT must write
+nothing and delete nothing, including a previously completed export sharing the
+job folder. Both moved into the validate phase together for exactly this reason.
+
+**Verified on:** 2026-09-08. A forced REJECT (one joint driven outside
+`PHYSICAL_JOINT_LIMITS`) reports the failing row, leaves a previously completed
+export's `job.json` and all 35 `.ply` files intact, and writes no zip.
+
+## S1.68 Destructive cancels confirm what they discarded; `_abort_toolpath_ik_precompute` no longer treats "no run" as "planar run"
+
+**Decision:** `cancel_toolpath_ik_precompute()` reports "Precompute cancelled" and
+`cancel_geodesic_precompute()` names the cascade it triggered, instead of blanking
+their status to empty. `_abort_toolpath_ik_precompute()` tests
+`precompute_cache_path == GCODE_PRECOMPUTE_CACHE` rather than
+`in (None, GCODE_PRECOMPUTE_CACHE)`. `_clear_gcode_print_mesh()` clears all five
+bead arrays plus `gcode_status`; `_abort_toolpath_ik_precompute()` and
+`_reset_toolpath_playback_state()` clear `playback_active`; `build_print_order()`
+cascades into the curved precompute and bead meshes.
+
+**Reason:** `precompute_cache_path` is None in two unrelated situations -- "a
+planar run" and "no run has ever started" -- and conflating them meant Cancel
+Precompute tore down a freshly loaded G-code **preview** that no precompute had
+anything to do with, then blanked the status so nothing said why. The rest are the
+same class of defect S1.42 set the grouped reset helpers up to prevent: state
+cleared in one path and forgotten in another. `playback_active` gates the 6.7
+overlay force-hide, so leaving it True stranded the guide overlays hidden with
+nothing playing; `build_print_order()` invalidated the orientation frames but left
+the joint path and bead arrays derived from the order it was replacing, and
+`run_toolpath_playback()`'s staleness test only compares cache paths.
+
+**Non-revertible unless:** a status field is added to the G-code or curved
+subsystems without also being cleared in its subsystem's reset helper -- the
+recurring failure this entry exists to close.
+
+**Verified on:** 2026-09-08. Nine regression groups covering all of the above.
+
+## S1.69 Trajectory curve redraw stride is derived from the point count, not fixed at 5
+
+**Decision:** `record_trajectory_point()` now tests against
+`_trajectory_render_stride()`, which returns
+`max(TRAJECTORY_CURVE_RENDER_STRIDE, len(trajectory_points) // TRAJECTORY_CURVE_NODES_PER_STRIDE)`
+with the new `TRAJECTORY_CURVE_NODES_PER_STRIDE = 1000`.
+`TRAJECTORY_CURVE_RENDER_STRIDE` (5) becomes the floor of that derivation rather
+than the value itself. No recorded point is discarded; only the redraw interval
+changes.
+
+**Reason:** `trajectory_points` is unbounded -- `record_trajectory_point()` appends
+up to 10 points/sec while the TCP moves, and only `clear_trajectory()` (the FK
+panel's Reset) empties it -- while `_update_trajectory_curve()` is an O(n) full
+re-registration, Polyscope curve networks having no incremental grow API. A FIXED
+stride therefore fired that growing rebuild at a constant ~2/sec, so redraw work
+grew O(n^2) over a session.
+
+Measured at ~0.31us/node: 0.22ms at 500 points, 2.99ms at 10,000, **9.40ms at
+30,000**, 18.89ms at 60,000. 30,000 points corresponds to a ~50-minute planar
+playback at speed 1. The scenarios that actually occur are far smaller -- curved
+RX at speed 1 reaches ~529 points and planar at speed 100 about 302 -- so this was
+a real but narrow problem, which is why the response is a derived stride and not a
+redesign of the overlay.
+
+Deriving the interval in step with the cost holds the amortised redraw cost flat:
+measured 0.05% of wall time at 500 points, 0.37% at 10,000, 0.39% at 30,000 and
+0.46% at 60,000.
+
+Directly analogous to **S1.55**, which replaced the fixed `PLAYBACK_RENDER_STRIDE`
+with a stride derived from the solved path's own joint motion, for the same reason:
+a fixed count only means a fixed cost if the thing being counted has fixed cost.
+
+**Non-revertible unless:** Polyscope gains an incremental grow API for curve
+networks, at which point the rebuild stops being O(n) and the whole derivation is
+unnecessary.
+
+**Deliberate properties, both load-bearing:**
+- The `max()` floor keeps the stride at exactly 5 below 5,000 points, so every
+  realistic session -- all curved playback, all speed-100 planar -- behaves
+  bit-for-bit as before. This is a tail-case fix that must not perturb the common
+  case.
+- **No point is discarded.** Capping the list was rejected: the trail is a debug
+  overlay whose entire value is showing where the TCP has been, and silent
+  truncation would be a behaviour change rather than a performance one.
+
+**Verified on:** 2026-09-08. Derived stride is 5 at 0/500/4,999/5,000 points and
+10/30/60 at 10,000/30,000/60,000; amortised cost flat as tabulated above; 2,000
+recorded samples all retained in order, and `clear_trajectory()` still empties.

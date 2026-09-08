@@ -11,14 +11,25 @@ reached yet (e.g. don't generalise the FK code for arbitrary DOF arms; this
 is a 6-axis FR5, hard-code that).
 
 ## 3. Surgical Changes
-`geometry_backend.py` and `gui_panel.py` are the only files that should
-change during FK/IK development. `main.py` is wiring and shouldn't need
-edits once Stage 1 starts.
+`geometry_backend.py` and `gui_panel.py` are the two files that carry the
+simulator itself; `main.py` is wiring and shouldn't need edits.
+
+The one standing exception: **job-specific constants belong in a study config**
+(`examples/<study>/study_config.py`), not in `geometry_backend.py` — settled.md
+S1.33/S1.41. Material and nozzle values (bead size, hover height, tip clearance)
+and asset wiring go there; robot- and planner-level values (joint limits, filter
+thresholds, edge costs) stay in `geometry_backend.py`.
 
 ## 4. Goal-Driven Execution
-Follow the 4-stage roadmap: FK maths → mesh rendering → tool head/TCP → IK.
-Don't jump ahead to IK before FK visually works — the Delta transform in
-Stage 2 depends on a correct `compute_fk()` from Stage 1.
+The original 4-stage roadmap (FK maths → mesh rendering → tool head/TCP → IK) is
+**complete**, as are Stage 5 (planar G-code printing), Stage 6 (curved-surface
+printing) and Stage 7 (calibration + external IK job export). New work extends
+that base rather than following the stage order.
+
+The dependency the old rule protected still holds and is worth stating directly:
+the Delta transform depends on a correct `compute_fk()`, and every curved-path
+feature depends on both. Check `wiki/005_AgentMgmt/active/ctx_main/ctx_system_current.md`
+for what is actually built before assuming a stage is still ahead of you.
 
 ## Mesh Rendering Hard Rule
 
@@ -63,6 +74,9 @@ This project uses the conda environment `fairino-fr5-sim`. Always use its interp
 
 Do not call bare `python`, `python3`, or `pip`. They resolve to system Python, not this environment.
 
-<!-->
-(Note to self: change this in final version)
--->
+This is the maintainer's local setup. `README.md` gives the portable
+`pip install -r requirements.txt` route for anyone else; the two are not in
+conflict — use the conda interpreter when working in this repo.
+
+<!-- The interpreter paths above are machine-specific and should be generalised
+     if this repo is handed to someone else. -->

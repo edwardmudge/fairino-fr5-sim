@@ -1,3 +1,10 @@
-numpy
-polyscope
-trimesh
+# Lower bounds are the versions this project is developed and verified against
+# (Python 3.12.13). They are bounds rather than exact pins so a patch release
+# still installs, but anything older than these is untested here.
+#
+# NumPy 2.x is required, not merely tolerated: the code relies on 2.x array
+# semantics throughout and there is deliberately no SciPy dependency
+# (compute_vertex_normals hand-rolls what would otherwise need it).
+numpy>=2.5.1
+polyscope>=2.6.1
+trimesh>=4.12.2

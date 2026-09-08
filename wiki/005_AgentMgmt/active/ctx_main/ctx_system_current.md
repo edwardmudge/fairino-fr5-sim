@@ -126,4 +126,71 @@ callback. See `wiki/002_Architecture/INDEX.md` as subsystems get built out.
 
 ## Recent Decisions
 
-See `wiki/002_Architecture/settled.md` (S1.1–S1.57).
+See `wiki/002_Architecture/settled.md` (S1.1–S1.69).
+
+## Changed at v1.0 (2026-09-06) — repo-wide review before the curved-printing tag
+
+Five changes an agent will trip over if it assumes the pre-v1.0 shape:
+
+- **The build plate no longer starts at `USER_FRAME_ORIGIN_MM`** (S1.58). It
+  loads `assets/buildPlate/saved_position.json` (the real calibrated User Frame)
+  when readable, falling back to the constant otherwise, and reports which
+  through `startup_plate_status`. This supersedes S1.6's "never automatically at
+  startup" clause. Reason: the shipped curved caches are keyed on the plate pose
+  and were solved at the saved frame, so booting at the constant meant a ~30
+  min/layer re-solve on every first run. **`load_build_plate()` now also retains
+  `build_plate_pose`**, which `UI_Menu` seeds its input fields from.
+- **The precompute cache key now includes the tuned solver constants** (S1.59),
+  via `_solver_cache_fields()` — `TCP_OFFSET_6D_MM_DEG`, `PHYSICAL_JOINT_LIMITS`,
+  the `FILTER_*` set, the `EDGE_*` costs, plus `tip_clearance` on curved keys.
+  Retuning any of them now correctly misses. `PRECOMPUTE_CACHE_VERSION` stays
+  **7**: the existing caches were migrated in place, not invalidated.
+- **The study config is selected by `FR5_STUDY_CONFIG`** (S1.60), not by editing
+  the import in `geometry_backend.py`. Required names are listed in
+  `_STUDY_CONFIG_NAMES`. Default behaviour is unchanged.
+- **Asset paths are absolute**, anchored to the source directory via
+  `_asset_path()` (S1.61) — do not assume CWD-relative paths any more.
+- **`two_opt` scores by `_reverse_delta`**, not a full tour re-sum (S1.62). It
+  provably returns the same orders (280/280 on random cost matrices), which is
+  why the shipped caches still hit.
+
+Two dead functions are now marked ⚠ LEGACY in their docstrings rather than
+silently uncalled: `dijkstra_candidate_path()` (the live path is
+`_relax_candidate_layer()` + `_finish_candidate_search()`) and
+`_meshes_clear_plane()` (filter 5 uses `_plate_plane()` only). There are **no
+tests in this repo** — an earlier docstring claiming `dijkstra_candidate_path`
+was "unit-tested" was wrong and has been corrected.
+
+New guide: `wiki/003_Guides/CurvedModel_AdaptingYourOwnJob.md`, the reference for
+pointing the curved feature at a different part.
+
+A second sweep then found defects the first pass had missed (S1.64–S1.68) — most
+of them state-machine rather than maths:
+
+- **Two crashes that killed the Polyscope window**, both reachable by ordinary
+  clicks: *Cancel Geodesics → Run Toolpath* (the playback initialiser gated on
+  the precompute but dereferenced the print order the cancel had nulled), and
+  *Run Precompute on a motion-free G-code file* (`np.array([])` is 1-D). Both now
+  decline with a status. **The lesson to carry: a function that subscripts
+  retained state must validate that state itself** — `precompute_cache_path` says
+  *who solved the path*, not whether the geometry it came from still exists.
+- **Selecting Planar hid the entire curved workpiece** — `visible = (i <= layer)`
+  is False for every layer at `layer == -1`, and nothing restored it. Now an
+  explicit early return (S1.65).
+- **Cancel Precompute destroyed a G-code preview it never owned**, because
+  `precompute_cache_path is None` meant both "planar run" and "no run at all"
+  (S1.68).
+- **A plate move left the curved model usable at its old pose** (S1.66).
+- **Export validation now runs in the first `step_export_job()`**, not the click,
+  so its pause is visible — measured 0.12s curved, 6.32s planar (S1.67). Validate
+  still strictly precedes the destructive prune.
+
+⚠ One correction to the earlier v1.0 pass recorded above: the filter-9 comment in
+`_filter_context` was "fixed" from Robot1..Robot4 to Robot0..Robot3, and that was
+**wrong** — `moving_geometry_rest_verts` is `rest_verts[:6] + [tcp_point]`, so
+index 0 is **Robot1** and `range(4)` is Robot1..Robot4. Reverted, with the index
+convention spelled out in place.
+
+⚠ `tutorials/` is gitignored and unpublished; the many docstring/wiki citations
+to `tutorials/Stage*_README.md` are historical provenance and cannot be followed
+from a clone. See `wiki/INDEX.md`.

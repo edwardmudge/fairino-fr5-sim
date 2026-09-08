@@ -160,9 +160,23 @@ faces = mesh.faces          # Mx3 numpy array (int)
 
 ## Working Directory
 
-All asset paths (`./assets/...`) are relative. Always run `main.py` from the
-repo root:
+Asset paths are anchored to the **source directory**, not the process working
+directory: `geometry_backend.py` resolves `MESH_DIR`, `PRINTER_HEAD_DIR`,
+`BUILD_PLATE_DIR`, `GCODE_DIR`, `EXPORT_DIR` and the study config's
+`CURVED_MODEL_DIR` through `_asset_path()` against
+`os.path.dirname(os.path.abspath(__file__))`. So `main.py` runs from anywhere —
+including an IDE Run button, which is what motivated the change:
 
 ```bash
-python main.py
+python main.py                    # from the repo root
+python /path/to/repo/main.py      # or from anywhere else
 ```
+
+An **absolute** path is passed through untouched, so a study config may keep its
+assets outside the repo.
+
+> ⚠ **Changed at v1.0 (`settled.md` S1.61).** These paths were previously
+> relative to the working directory, and the app only started from the repo root
+> — anything else produced a bare `FileNotFoundError` before the window opened.
+> Older docs saying "always run `main.py` from the repo root" describe that
+> behaviour, not this one.

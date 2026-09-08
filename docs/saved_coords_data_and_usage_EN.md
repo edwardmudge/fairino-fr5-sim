@@ -4,6 +4,13 @@
 >
 > Data source: `assets/calib/active_tcp_wobj.json` (MultiHeadTCPStore, Single Source of Truth)
 >
+> ⚠ **That path is the supervisor's, not this repository's** — `assets/calib/`
+> does not exist here and never has. This document is a supplied reference; the
+> values below were transcribed from it into `geometry_backend.py` constants
+> (`TCP_OFFSET_6D_MM_DEG`, `PHYSICAL_JOINT_LIMITS`) and into
+> `assets/buildPlate/saved_position.json`, which are this project's actual
+> sources of truth.
+>
 > Collected: 2026-05-28, from the real robot (IP: 192.168.58.2, mode: real)
 
 ---

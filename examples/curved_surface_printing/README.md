@@ -11,10 +11,28 @@ describes two offset electrode layers (RX/TX) with their PLY toolpath
 files, host surface, and display colors; `CURVED_OBSTACLE_FILE` is the
 non-print collision body underneath them.
 
-`geometry_backend.py` imports this module with one clearly-commented import
-block. To point the same feature at a different curved-print job, write a
-new module shaped like `study_config.py` and change that one import — the
+To point the same feature at a different curved-print job, write a new module
+shaped like `study_config.py` and select it with an environment variable — **no
+source edit is needed**:
+
+```bash
+FR5_STUDY_CONFIG=mystudy.study_config python main.py
+```
+
+`geometry_backend.py` resolves that name with `importlib`, defaulting to this
+module when the variable is unset, and fails at import naming any required
+constant the module is missing (the list is `_STUDY_CONFIG_NAMES`). The
 loading/geodesic/GUI mechanism itself needs no changes.
+
+**The full guide is
+[`wiki/003_Guides/CurvedModel_AdaptingYourOwnJob.md`](../../wiki/003_Guides/CurvedModel_AdaptingYourOwnJob.md)** —
+asset formats, the placement reach constraint, the build order, which constants
+to re-tune, cache invalidation, and the export format.
+
+> ⚠ Earlier wording here said to "change that one import" in
+> `geometry_backend.py`. That was accurate until v1.0; the environment variable
+> replaced it (`settled.md` **S1.60**), precisely so adapting the tool no longer
+> means editing the simulator core.
 
 The physical context and the reasoning behind this layer configuration is
 recorded in `wiki/001_Inbox/2026-07-18_curved_surface_assets.md` and

@@ -106,6 +106,18 @@ Loading a saved position only ever happens on that explicit click —
 `__init__` never reads the saved-position file automatically, so every
 fresh start still begins from `USER_FRAME_ORIGIN_MM`/zero-rotation.
 
+> ⚠ **No longer true — changed at v1.0 (`settled.md` S1.58).** Startup now calls
+> `_load_startup_build_plate()`, which applies `saved_position.json` when it is
+> readable and falls back to `USER_FRAME_ORIGIN_MM` only when it is absent or
+> malformed, reporting which through `startup_plate_status`. The reason is that
+> the shipped curved precompute caches are keyed on the plate pose and were
+> solved at the saved frame, so booting at the constant meant a ~30-minute
+> re-solve per layer on every first run.
+>
+> **Reset** still means `USER_FRAME_ORIGIN_MM`, so the pose described above is
+> one click away. The reference table's "used when `load_build_plate()` is called
+> argument-free (startup, Reset)" should now read **Reset only**.
+
 **Move, Reset, and Load Saved Position do *not* reload the G-code
 preview.** Each just sets a `bp_status` message prompting an explicit
 "Load G-code preview" click — an already-loaded preview mesh is left

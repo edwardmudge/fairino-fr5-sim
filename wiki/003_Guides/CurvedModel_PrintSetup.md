@@ -4,7 +4,26 @@ status: active
 
 # Curved Print: The Working Setup
 
-## ⚠ Scope — SUPERSEDED by Stage 7.1, not yet re-validated
+## ✅ Re-validated 2026-09-03 — read this before the banner below
+
+**The banner that follows is out of date and is kept only as history.** It says
+the curved path "has *not* been re-run since 7.1" and that the 3,175 RX / 2,688 TX
+figures are pre-7.1 historical evidence. That has not been true since roadmap 7.4:
+
+- Both layers solve **completely** at the real calibrated User Frame — RX
+  3,175/3,175 and TX 2,688/2,688 — and both export `validate_job` **ACCEPTED**
+  (`settled.md` S1.47/S1.48). The counts below are current, not historical.
+- The placement that makes this work is `CURVED_MODEL_XY_OFFSET_MM = (0, 0)`
+  (S1.48), which supersedes any plate-mesh-centred placement described later.
+- Since v1.0 the app **starts at the saved calibrated User Frame** rather than
+  `USER_FRAME_ORIGIN_MM` (S1.58), so the "move the plate first" step is already
+  done for you on startup.
+
+The order of operations below is still correct and is still the point of this
+guide. To adapt the procedure to a *different* part, see
+[`CurvedModel_AdaptingYourOwnJob.md`](CurvedModel_AdaptingYourOwnJob.md).
+
+## ⚠ Scope — SUPERSEDED by Stage 7.1, not yet re-validated (HISTORICAL — see above)
 
 This procedure was written against the pre-7.1 code: the original
 `assets/printerHead/nozzle.obj` mesh and the `settled.md` S1.4 `tcp_local` TCP

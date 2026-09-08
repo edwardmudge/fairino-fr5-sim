@@ -42,9 +42,15 @@ class UI_Menu:
         self.ik_status = ""
         self.ik_solutions = []       # list of (angles, is_singular, raw_branch_index) from solve_ik_tcp
         self.ik_selected_index = 0
-        self.bp_target_pos = np.array(USER_FRAME_ORIGIN_MM, dtype=float)
-        self.bp_target_rpy = np.zeros(3)
-        self.bp_status = ""
+        # Seeded from the pose the backend actually applied at startup, not from
+        # USER_FRAME_ORIGIN_MM. The backend may boot at the saved calibrated pose
+        # (see _load_startup_build_plate), and fields hard-coded to the constant
+        # would then show a pose the plate is not at -- with the trap that pressing
+        # Move without editing anything would silently move it back.
+        bp_pos, bp_rpy = content_instance.build_plate_pose
+        self.bp_target_pos = np.array(bp_pos, dtype=float)
+        self.bp_target_rpy = np.array(bp_rpy, dtype=float)
+        self.bp_status = content_instance.startup_plate_status
         self.playback_speed = 1.0   # whole-steps-per-frame multiplier, 1-100
         self.export_name_input = ""  # optional NAME for the dated export zip, see export_active_job()
         # -- snapped down automatically if it ever outruns precompute
@@ -102,6 +108,11 @@ class UI_Menu:
                 if psim.Button("Clear G-code preview"):
                     self.content.clear_gcode_preview()
 
+            # Without this the button was silent on a fresh clone, where the
+            # gitignored model.gcode does not exist -- see load_gcode().
+            if self.content.gcode_status:
+                psim.TextWrapped(self.content.gcode_status)
+
             psim.BeginDisabled(self.content.playback_running)
             if psim.Button("Load Curved Model"):
                 self.content.load_curved_model()
@@ -109,6 +120,11 @@ class UI_Menu:
                 psim.SameLine()
                 if psim.Button("Clear Curved Model"):
                     self.content.clear_curved_model()
+
+            # Mirrors the G-code status line. Matters most for a user-supplied
+            # study config, where a bad path/format is otherwise invisible.
+            if self.content.curved_model_status:
+                psim.TextWrapped(self.content.curved_model_status)
 
             # Curved model properties -- a collapsible summary of what just
             # loaded, right below the Load button so it reads top-down (roadmap
