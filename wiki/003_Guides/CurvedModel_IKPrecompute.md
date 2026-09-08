@@ -4,44 +4,39 @@ status: active
 
 # Curved-Surface IK Precompute
 
-> ⚠ **Changed in Stage 7.2 (`settled.md` S1.44) — the clearance sections below
-> are historical.** The curved path now runs **no clearance check at all**:
-> `_nozzle_clears_plane` (the tangent-plane check) is deleted, and the
-> posed-plate check was narrowed to the planar path. A curved solve now means
-> *reachable and within joint limits*, nothing more.
->
-> The tangent-plane check was also already inert before it was removed — §7.1
-> made the tool's collision body a single TCP point, which IK pins to the very
-> plane being tested, so its signed distance was identically zero (measured:
-> 7,471 evaluations, zero rejections, worst 3.4e-13mm against a 1.0mm
-> tolerance). Everything below describing it as live describes §6.5's design,
-> not current behaviour. The planar path is unchanged.
->
-> The precompute's planar/curved discriminator is now the boolean
-> `check_collision` on `_begin_toolpath_precompute` (was `tip_tolerance_mm`).
+## Current behaviour (verified 2026-09-08)
 
-> ✅ **The banner above is itself out of date — read this first (2026-09-08).**
-> Its central claim, that "the curved path now runs **no clearance check at
-> all**", was true at 7.2 and **false since 7.4**. Filter 8 restored a clearance
-> check: arm links against the layer's own print surface, binned through
-> `_build_surface_grid()` at `SURFACE_GRID_CELL_MM`, with the tolerance read from
-> `study_config`'s `CURVED_TIP_CLEARANCE_TOLERANCE_MM` (1.0mm) — which is why
-> that constant is live again. A curved solve now means *reachable, within joint
-> limits, and past all nine candidate filters* (`settled.md` **S1.46/S1.47**).
->
-> What the banner still gets right: the tool is **not** part of that check. Its
-> whole collision body is the single TCP point, which IK pins to the commanded
-> waypoint, so it is deliberately excluded from filters 6–8 — **nothing guards
-> the nozzle against the workpiece**, only the arm.
->
-> Three further corrections to the body of this guide:
-> - `PRECOMPUTE_CACHE_VERSION` is **7**, not 4 or 5.
-> - The cache key gained a `solver` block (TCP offset, joint limits, every
->   `FILTER_*`/`EDGE_*` value) plus `tip_clearance` at v1.0, so retuning any of
->   those correctly invalidates a cached solve — `settled.md` **S1.59**.
-> - The "Code anchors" list near the end cites `_nozzle_clears_plane()` and
->   `_branch_clears_ground()`, which survive only as tombstone comments, and
->   `precompute_tip_tolerance_mm`, which **no longer exists in any form**.
+This guide accumulated three layers of correction, one of which opened by saying
+the layer above it was out of date. This section replaces all of them. Everything
+from **How it got here** onward is the superseded design record, kept per the
+never-delete convention — read it for *why*, never for *what*.
+
+**A curved solve means: reachable, within `PHYSICAL_JOINT_LIMITS`, and past all
+nine candidate filters.** The precompute searches 540 commanded orientations per
+waypoint (a 20° tilt cone × 60 roll slots) and selects a path by cost over a
+layered `(waypoint, candidate)` DAG, rather than commanding one frame and taking
+the first IK branch that clears. Full specification, with every tolerance:
+[`../../docs/FR5_IK_Branch_Rejection.md`](../../docs/FR5_IK_Branch_Rejection.md).
+
+| Aspect | Current |
+|---|---|
+| Planar/curved discriminator | `filter_mode` on `_begin_toolpath_precompute` — `"planar"` or `"curved"`. Not a boolean; `check_collision` and `tip_tolerance_mm` are both gone |
+| Surface collision | **Filter 8** — arm links vs the live layer's own print surface, broadphase `_build_surface_grid()` at `SURFACE_GRID_CELL_MM` (8.0mm), tolerance `CURVED_TIP_CLEARANCE_TOLERANCE_MM` (1.0mm, `study_config.py`). Curved runs only |
+| Plate collision | **Filters 6 and 7** — a finite under-plate footprint (20mm margin) plus a bounding slab (3.0mm). Not an infinite plane |
+| Tangent-plane nozzle check | **Deleted** at 7.2. It had been incapable of rejecting anything since 7.1 — 7,471 evaluations, zero rejections, worst 3.4e-13mm against a 1.0mm tolerance |
+| `allow_tcp_through_plate` | **Deleted** at 7.4 — the state, the cache-key field and the GUI checkbox. Do not look for it and do not tell a reader to enable it |
+| Cache version | **7**. The key also gained a `solver` block (TCP offset, joint limits, every `FILTER_*`/`EDGE_*` value) plus `tip_clearance` at v1.0, so retuning any of them correctly invalidates a cached solve (`settled.md` **S1.59**) |
+| Placement | `CURVED_MODEL_XY_OFFSET_MM` (`study_config.py`, default `(0,0)`) centres the workpiece on the **User Frame origin**. The "adopted X+30 pose" described below is not how placement works any more (**S1.48**) |
+| Result | Both layers solve **completely** at the real calibrated User Frame — RX **3,175/3,175**, TX **2,688/2,688** — and both export `validate_job` **ACCEPTED** |
+
+**The one real gap: nothing guards the nozzle against the workpiece — only the
+arm.** The tool's whole collision body is the single TCP point, and IK pins that
+point to the commanded waypoint, which lies *on* the print surface during a feed
+move. Testing it would reject every legitimate printing pose, so it is excluded
+from filters 6–8 by construction. Closing this needs a corrected tool asset, not
+another filter. **Note this inverts the "Known limitation" section below**, which
+predates filter 8: arm-vs-mockup *is* now checked, and filter 8 caught a real
+pose with an arm link 0.71mm inside the TX surface.
 
 ## What it is
 
@@ -96,6 +91,22 @@ one solver loop for both.
    on a re-order or re-orient), plus the build-plate pose.
    `PRECOMPUTE_CACHE_VERSION` bumped 1→2 for the schema change (a one-time
    silent rebuild of the existing planar cache too, not a bug).
+
+---
+
+# How it got here — superseded design record
+
+Everything from here to **Current scope and limitations** describes 6.5's design
+and its 7.1/7.2-era amendments. It is retained because the reasoning is
+instructive — in particular *why* an obstacle mesh was rejected, and why that
+reasoning expired. None of it describes current behaviour; the table at the top
+of this file does.
+
+The short version of what overturned it: 6.5 argued a full-arm obstacle check
+"would reject every real printing pose". That holds while **one** orientation is
+commanded per waypoint. Stage 7.4 searches 540, so the arm has alternatives to
+fall back on, and the mesh-vs-mesh check 6.5 declined to build became both
+affordable and useful.
 
 ## Why the obstacle-mesh plan was rejected
 
@@ -255,41 +266,61 @@ Rejection Criteria validate *data*, not geometry. That is a deliberate,
 recorded trade (`settled.md` S1.43 and the Stage 7 inbox note §7.2), which is
 why re-tuning the tolerance now would be wasted work.
 
-## Current scope and limitations
+---
 
-- **Shared GUI wiring is now landed in 6.6**, including the posed-plate toggle
-  added in 6.8; `main.py` remains wiring only.
+# Current scope and limitations
+
+*(End of the superseded record. Everything below is current.)*
+
+- **Shared GUI wiring landed in 6.6**; `main.py` remains wiring only. The
+  posed-plate toggle 6.8 added was **deleted** at 7.4 along with the rest of the
+  infinite-plane model.
 - **Curved playback is implemented** through the shared source-aware playback
   controls; the curved bead-size constants are active in that path.
-- **The per-pass obstacle distinction is moot** under the tangent-plane
-  design — `study_config.py` needed no new per-pass obstacle field.
+- **The per-pass obstacle distinction stayed moot**, but not for the reason 6.5
+  gave. Filter 8 tests each layer against **its own print surface**
+  (`Surface_RX_Offset` for RX, `Surface_TX_Base` for TX), taken from
+  `CURVED_LAYERS`, so no separate per-pass obstacle field was needed.
+  `CURVED_OBSTACLE_FILE` (`Surface_Bot.obj`) is **not** a collision body.
+- **The nozzle is unguarded against the workpiece** — see the top of this file.
+  This is the one open gap, and it needs a corrected tool asset.
 
 ## Non-revertible unless
 
-The mockup stack turns out non-convex somewhere — then a waypoint's tangent
-plane is no longer a global supporting hyperplane and the nozzle-clearance
-argument fails, forcing a real obstacle-mesh (or per-triangle) check for the
-affected surface (also the path to close the known arm-vs-mockup limitation
-above).
+A corrected tool asset arrives with real geometry and a calibrated length, at
+which point the tool can join filters 6–8 as a body rather than a pinned point,
+and the nozzle gap above closes. (The original condition recorded here — the
+mockup stack turning out non-convex, invalidating the supporting-hyperplane
+argument — is moot: that argument was abandoned with the tangent-plane check at
+7.2, and filter 8 makes no convexity assumption.)
 
 ## Code anchors
 
-- `geometry_backend.py`: `_begin_toolpath_precompute()` — the shared seam;
-  `run_curved_toolpath_ik_precompute(layer, ...)`,
+- `geometry_backend.py`: `_begin_toolpath_precompute()` — the shared seam, taking
+  `filter_mode`; `run_curved_toolpath_ik_precompute(layer, ...)`,
   `build_curved_toolpath_waypoints_world()`,
-  `_orientation_frames_for_points()` (shared with 6.4),
-  `_nozzle_clears_plane()`, `_plate_plane()`, `_meshes_clear_plane()`,
-  `_branch_clears_ground()` (now takes an optional `plane` arg),
+  `_orientation_frames_for_points()` (shared with 6.4 — now the search cone's
+  axis and the exported normal, not the commanded pose),
+  `orientation_candidates()`, `_waypoint_candidates()`, `_candidate_admissible()`
+  and `_filter_context()` (the nine filters), `_relax_candidate_layer()` and
+  `_finish_candidate_search()` (the DAG), `_plate_plane()`, `_plate_box_frame()`,
+  `_build_surface_grid()`/`_points_clear_surface()` (filter 8),
   `curved_precompute_cache_path()`, `_curved_toolpath_cache_meta()`;
-  `precompute_cache_path`/`precompute_tip_tolerance_mm` state.
+  `precompute_cache_path` state.
+  ⚠ Gone, despite appearing throughout the record above: `_nozzle_clears_plane()`
+  and `_branch_clears_ground()` survive only as tombstone comments,
+  `_meshes_clear_plane()` survives but is uncalled, and
+  `precompute_tip_tolerance_mm` no longer exists in any form.
 - `examples/curved_surface_printing/study_config.py`:
   `CURVED_TIP_CLEARANCE_TOLERANCE_MM` (moved here by `settled.md` S1.41 — it
-  is nozzle/material-dependent).
-- `wiki/002_Architecture/settled.md` **S1.37** — the full decision record;
-  S1.12/S1.13/S1.21 — the Stage-5 chunked-precompute/ground-clearance/cache
-  machinery this reuses; S1.36 — the orientation frames this consumes;
-  S1.30/S1.32/S1.34 — the measured layer stack the supporting-hyperplane
-  argument depends on.
+  is nozzle/material-dependent), `CURVED_MODEL_XY_OFFSET_MM` (placement, S1.48).
+- [`../../docs/FR5_IK_Branch_Rejection.md`](../../docs/FR5_IK_Branch_Rejection.md)
+  — the filters, the orientation search, the edge costs and every tolerance.
+- `wiki/002_Architecture/settled.md` **S1.37** — the original decision record;
+  **S1.46/S1.47** — the orientation search and filter set that replaced it;
+  **S1.48** — the placement fix; S1.12/S1.13/S1.21 — the Stage-5 chunked-
+  precompute/cache machinery this reuses; S1.36 — the orientation frames this
+  consumes; S1.30/S1.32/S1.34 — the measured layer stack.
 - [`CurvedModel_Orientation.md`](CurvedModel_Orientation.md) — where
   `R_target` per waypoint comes from.
 - [`CurvedModel_PrintOrder.md`](CurvedModel_PrintOrder.md) — where the

@@ -139,11 +139,15 @@ reproducible.
 
 ## Current scope and limitations
 
-- **No per-pass obstacle-mesh collision check.** 6.3 only offsets travel moves
-  by a fixed hover clearance along the surface normal — it does not check the
-  arm or nozzle against any obstacle mesh. That check (ultimately built
-  differently than first planned) belongs to 6.5, see
-  [`CurvedModel_IKPrecompute.md`](CurvedModel_IKPrecompute.md).
+- **No collision check in 6.3 itself.** 6.3 only offsets travel moves by a fixed
+  hover clearance along the surface normal — it does not check the arm or nozzle
+  against any obstacle. Collision belongs to the precompute, and since Stage 7.4
+  it genuinely exists there: **filter 8** tests every arm link against the live
+  layer's own print surface. (This bullet previously said the check was "built
+  differently than first planned" via a tangent-plane test — that test was
+  deleted at 7.2; the mesh-vs-mesh check 6.5 declined to build is what 7.4
+  built.) See [`CurvedModel_IKPrecompute.md`](CurvedModel_IKPrecompute.md) and
+  [`../../docs/FR5_IK_Branch_Rejection.md`](../../docs/FR5_IK_Branch_Rejection.md).
 - ~~**2-opt full re-sum, not incremental.** Fine at N=35 pieces; would need the
   two-cut-edge delta the symmetry argument already justifies if piece counts
   grew enough to matter.~~ **✅ Resolved at v1.0** — see below.

@@ -1103,6 +1103,12 @@ running or already loaded.
 (`precompute_cache_meta["user_frame"]`) for the in-session check, so no
 change was needed here after all.
 
+**Verified on:** not recorded. This entry was closed by the forward reference
+above rather than by a verification pass, and it states no date and describes no
+test. Left as an honest gap rather than back-filled with a guessed date (audited
+2026-09-08, S1.74) -- the mechanism it describes is exercised by S1.22's and
+S1.59's cache-key verifications.
+
 ## S1.22 In-session precompute/playback invalidation on plate move, compared against the same pose captured at precompute-start
 
 **Decision:** roadmap 5.11. `load_build_plate()` (`geometry_backend.py`)
@@ -3015,6 +3021,13 @@ positions in the exported ply anyway, so it pays for itself there and not here.
 including the cheaper curved-only half:
 `wiki/001_Inbox/2026-08-15_export_segments_cache_gap.md`.
 
+**Verified on:** 2026-08-15 -- headless, `fairino-fr5-sim` env. Not a second
+pass: this is the labelled field for the `### Verified on 2026-08-15` section
+above, which carries the detail (seven fixtures each failing only its own row,
+row 7 warning without rejecting, planar re-run 181,375/181,375 under the
+physical limits). Labelled 2026-09-08 (S1.74) so the field census matches the
+template; no content changed.
+
 ---
 
 ## S1.45 Real calibrated User Frame adopted (roadmap 7.3) -- `saved_position.json` replaces the 6.8 demo pose; neither toolpath runs there, and that is the finding
@@ -3135,6 +3148,14 @@ correctly paired, just later than 7.3 planned.
 
 Full measurements, method and the open questions in priority order:
 `wiki/001_Inbox/2026-08-15_real_user_frame_reachability.md`.
+
+**Verified on:** 2026-08-15 -- headless, `PHYSICAL_JOINT_LIMITS`,
+`allow_tcp_through_plate = False`. The rotation convention round-trips at
+`max \|ΔT\| = 0.0` and `matrix_to_pose` returns the six input digits, which is
+what licensed the data-only change; the reachability counts in the tables above
+were measured in the same pass. Labelled 2026-09-08 (S1.74) from the dates
+already stated in this entry; no content changed, and the **diagnosis** here
+remains superseded by S1.46/S1.48 per the notice at the top.
 
 ---
 
@@ -4538,3 +4559,306 @@ unnecessary.
 **Verified on:** 2026-09-08. Derived stride is 5 at 0/500/4,999/5,000 points and
 10/30/60 at 10,000/30,000/60,000; amortised cost flat as tabulated above; 2,000
 recorded samples all retained in order, and `clear_trajectory()` still empties.
+
+## S1.70 `tutorials/` is published, and the stage READMEs are a reconstruction
+
+**Decision:** `tutorials/` is removed from `.gitignore` and published. Stages 6
+and 7 are rewritten to `Stage5_README.md`'s granularity, and corrections that
+Stage 7 discovered about Stage 6 are folded back into Stage 6 so the stages read
+in build order. The stage READMEs are therefore a **clean reconstruction, not a
+chronology**: this file remains the sole authority on what was decided when and
+what superseded what. No existing entry in this file, and no `001_Inbox/` note,
+was altered.
+
+Specifically migrated into Stage 6: the User Frame-origin placement
+(`CURVED_MODEL_XY_OFFSET_MM`, S1.48) into 6.1; the study-config home for job
+constants (S1.41) into 6.3/6.6; the reframing of 6.4's frame as *nominal* (the
+axis of S1.46's search cone) rather than commanded; the removal of the
+tangent-plane clearance check (S1.37/S1.44) from 6.5; and the cache's storage of
+waypoints and orientation frames alongside the joint path. Stage 6.8 keeps its
+number but becomes a scope statement — what Stage 6 does not check, and why the
+three obvious collision models fail — since S1.40's plate plane and
+`allow_tcp_through_plate` no longer exist in the code. Correspondingly removed
+from Stage 7: the placement root-cause narrative, the tangent-check deletion, the
+cache-gap fix, the S1.40-plane framing of filter 6, the 7.1→7.7 nozzle-render
+reversal, and the measurement tables taken under superseded conditions
+(226/2,527 RX, the planar waypoint-0 abort, the 105.6 mm control run).
+
+No exception: the `tutorials/` rule is removed from `.gitignore` outright, so the
+directory is published whole -- seven files, nothing excluded.
+
+The wiki construction guide is not among them. `tutorials/` had carried an
+earlier FR5-specific fork ~95% identical to `wiki-template/WIKI_CONSTRUCTION_GUIDE.md`,
+differing only in worked examples; that fork was folded out rather than committed
+as a second copy, leaving the generalised `wiki-template/` version as the single
+canonical guide. `tutorials/README.md` links it under "Method" for anyone wanting
+to run the same working method on another project.
+
+**Reason:** ~40 wiki pages and 15 `geometry_backend.py` docstrings cite the stage
+READMEs as the roadmap of record, so gitignoring them meant a clone got dangling
+citations — `README.md` and `wiki/INDEX.md` each carried a section apologising
+for it. Publishing closes that gap.
+
+The reconstruction is the harder half. Stage 6 was built entirely against
+stand-ins (a chosen plate pose, a stand-in plate mesh, a stand-in tool, one
+commanded orientation per waypoint) and Stage 7 replaced each with a measurement,
+so Stage 6's README had accumulated a 25-line superseding block plus 6 inline
+amendment banners and Stage 7 a further 9. A reader following that in order would
+build code that a later stage deletes. Since these files exist to be *followed*,
+teaching order beats chronological order — provided the chronology survives
+intact somewhere, which is this file's job.
+
+Where a wrong turn is instructive it survives in the tutorials as a short
+`Pitfall:` note rather than a dated reversal — notably the two general lessons:
+*pinning a free DOF per-waypoint is a defect* (S1.36 → S1.46), and *a check that
+can never reject is not a check* (S1.37's tangent-plane test: 7,471 evaluations,
+zero rejections).
+
+**Non-revertible unless:** the tutorials need to double as a dated record, at
+which point they would be duplicating this file and should be deleted instead.
+
+**Verified on:** 2026-09-08. `.gitignore` carries no `tutorials/` rule and
+`git check-ignore` matches nothing in the directory; zero amendment banners
+remain in Stages 5-7; `Verify:` coverage is 10/10, 8/8, 7/7 sub-stages; every
+relative link in the stage READMEs resolves on disk; every `settled.md` S-number
+they cite exists here; and every sub-stage number cited from
+`geometry_backend.py` and from this file (5.4, 5.6, 5.7, 5.9-5.11, 6.1, 6.2,
+6.5, 6.8, 7.4) still resolves to a section.
+
+## S1.71 The IK branch rejection criteria are a `docs/` spec, not an external reference
+
+**Decision:** `examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md`
+moves to **`docs/FR5_IK_Branch_Rejection.md`** and is rewritten as *this
+project's* specification: the orientation search, the nine candidate filters in
+run order with their real constant names and values, the edge filter and cost
+terms, the DAG selection, the failure behaviour, and a closing section listing
+every deviation from the external implementation it was adapted from.
+
+The external document's own text is not preserved in the working tree. It is in
+git history at the old path, and it was never this project's code -- its preamble
+said so ("nothing here exists in `geometry_backend.py` today"). Nothing depended
+on its verbatim wording; what mattered was which values were adopted, and that is
+recorded in **S1.46**/**S1.47** and now restated in the new doc.
+
+**S1.46 and S1.47 are deliberately left unedited.** Both cite the guide at its old
+path, and S1.47 describes it as "external, describing another project's code, with
+its file paths and its 35 deg default" -- an accurate description of the file as it
+stood when that decision was made. They are append-only decision history; this
+entry is the forward pointer.
+
+Deviations the new doc records, so they are not lost if it is ever re-derived:
+35 deg -> **30 deg** joint step (aliased to `JOINT_STEP_MAX_DEG` so the exchange
+spec's own value cannot drift); the step filter scoped **feed-to-feed only**;
+2.0mm -> **1.0mm** surface clearance; J5 0 deg -> **2 deg**; 480 -> **540**
+commanded frames (a 20 deg tilt cone added); the tool point **excluded** from
+filters 6-8 rather than given a tip-exclusion radius; **multi-proxy 80mm** OBB
+bands rather than one box per link; filter 9 pairs **three** apart rather than
+two; no per-filter flags; no plain L1/L2 edge terms; no safe-branch mask; and a
+vectorised layered relaxation rather than a heap frontier.
+
+**Reason:** the file was the only thing left in `examples/curved_surface_printing/`
+that is not tied to the shoulder-sensor study. Everything it describes is
+robot/planner-level and applies to the planar path too --
+`geometry_backend.py`'s own filter-block comment already says exactly that, which
+is why those constants live there and not in `study_config.py` (S1.41). The
+folder's README states the rule that decides it: general FR5 data belongs in
+`docs/`, study-specific material stays here.
+
+Keeping it as an external reference also had a live cost. Its values are *not*
+this project's, and the differences are the kind that silently break an export
+(35 deg admits jobs the receiver rejects) or reject every pose (one OBB per link,
+pairs two apart). A reader reaching for "the rejection criteria" needs this
+project's numbers first, with the reference's as a footnote -- not the reverse.
+
+**Non-revertible unless:** a second consumer of the same criteria appears that
+needs them stated project-agnostically, at which point the `docs/` copy would
+split into a spec and a project binding.
+
+**Verified on:** 2026-09-08. No reference to the old filename survives outside
+this entry and the S1.46/S1.47 history; every constant name and value in the new
+doc matches `geometry_backend.py`/`study_config.py`, checked mechanically; every
+function it names exists; and it carries no line numbers, so it does not rot
+against edits to a 5,000-line module.
+
+## S1.72 BOOT_MATRIX's 7.4 row no longer says curved reachability is unsolved
+
+**Decision:** The Stage 7.4 row's "Do NOT Treat as Current" cell said, as its
+emphatic closing claim, that the orientation search did not fix curved
+reachability and that "curved still aborts and the S1.45 **placement question is
+now the blocker**". Both halves are false and have been since **S1.48**, the same
+day. Rewritten to state the true two-cause story: the search bought 8.5x
+(8.9%/9.3% -> 76%/70%), the placement fix closed the rest, and both layers now
+solve 100% at the real User Frame with `validate_job` ACCEPTED.
+
+**Reason:** BOOT_MATRIX is a routing table read at the *start* of a task, and the
+"Do NOT Treat as Current" column exists precisely to stop an agent acting on a
+stale belief. A false entry there is worse than a missing one -- this one told a
+reader that the curved pipeline aborts and that placement is unresolved, which
+would have sent them to re-open a closed question. Unlike `settled.md`, this file
+describes present state rather than history, so it is corrected in place.
+
+The useful half of the original warning is kept: do not credit the orientation
+search alone with the 100% result. They are two separate causes and only the pair
+gets there.
+
+**Non-revertible unless:** the placement or the search changes, in which case the
+row is re-measured rather than reverted.
+
+**Verified on:** 2026-09-08. Row 28 read end to end; it no longer asserts that
+curved aborts or that placement is open. Noted but **not** corrected in this pass:
+row 26 (Stage 7.2) still carries clauses falsified by 7.4/7.5 -- curved paths as
+failing row 5 and unexportable, `PRECOMPUTE_CACHE_VERSION` "now 6" (7),
+`build_export_segments` returning `[]` after a cache hit, and two inbox notes
+marked open that are closed. Row 26 is a stage-scoped snapshot; a full sweep of it
+is its own task. **Swept 2026-09-08** -- see the row itself; every clause listed
+above is now either corrected or explicitly marked as superseded by 7.4/7.5.
+
+## S1.73 The planar row-5 step figures are re-measured, and are solve-dependent
+
+**Decision:** The planar path's max joint step, measured 2026-09-08 directly from
+the shipped `model.precompute.npz`, is **15.49 deg overall** and **4.43 deg within
+a feed segment**, with **0** in-segment edges over the 30 deg limit. Live docs now
+carry these: `geometry_backend.py` (both the `_relax_candidate_layer` comment and
+`dijkstra_candidate_path`'s docstring), `docs/FR5_IK_Branch_Rejection.md`,
+`GLOSSARY.md`, `BOOT_MATRIX.md` and `tutorials/Stage7_README.md`.
+
+**S1.44's and S1.47's figures are left exactly as they are.** They are dated
+measurements and were correct when taken; this entry is the forward pointer.
+
+**Reason:** three different numbers were in circulation and the disagreement was
+not a transcription error -- each was measured against a different solve:
+
+| Measured | Overall | In-segment | Conditions |
+|---|---|---|---|
+| 7.2 (2026-08-15, S1.44) | 57.32 deg | **5.85 deg** | one commanded orientation per waypoint, pre-search |
+| 7.4 (2026-09-03, S1.47) | 57.32 deg *(carried over)* | **4.58 deg** | after the orientation search |
+| Now (2026-09-08) | **15.49 deg** | **4.43 deg** | shipped v7 cache, written 2026-09-06 |
+
+Two things follow. First, **S1.47's 57.32 deg was never re-measured** -- it was
+carried forward from S1.44 while the in-segment figure beside it was updated. The
+orientation search changes which pose is chosen at every waypoint, including
+travel waypoints, so the overall step had no reason to survive unchanged, and it
+did not: it is 3.7x smaller. That is the specific defect this entry fixes.
+
+Second, the shipped cache disagrees with the 7.4 figures too, though only
+slightly (4.43 vs 4.58). It was written 2026-09-06, during the v1.0 review pass
+(S1.58-S1.69), and its metadata records the same configuration the 7.4 run used
+-- v7, `filter_mode` planar, real User Frame, the same TCP offset, filters and
+edge costs, and a matching g-code hash. Something in that pass changed the solved
+path without changing the cache key, and the row-5 statistics were not re-taken.
+Not chased further: the numbers moved in the safe direction and the conclusion is
+unaffected.
+
+**These figures are indicative, not constants.** They describe a particular
+solved path, and any change to the filters, the edge costs, the search or the
+plate pose moves them. What is stable, and what row 5 actually needs, is the
+qualitative result: no feed-to-feed edge comes near 30 deg, so an unscoped E1 is
+what breaks the planar job (at its first G0), not a genuine violation.
+
+**Non-revertible unless:** the numbers are re-measured from a newer cache, in
+which case this entry gets the same treatment it gives S1.44 and S1.47 -- a new
+entry, not an edit.
+
+**Verified on:** 2026-09-08. Computed from `model.precompute.npz` as
+`max|diff(joint_path)|` per edge, masked to `waypoint_is_feed[:-1] &
+waypoint_is_feed[1:]`: 114,268 feed-to-feed edges of 181,374, max 4.43 deg, none
+over 30 deg. Cache meta confirms version 7, planar, User Frame
+`[649.456, 133.762, 322.778]`, and `gcode_sha256` matching the `model.gcode` on
+disk. L1 and L2 interpretations were also computed (61.41/28.72 overall) and
+reproduce none of 57.32, 5.85 or 4.58, ruling out a units or metric mismatch.
+
+## S1.74 Stage-scoped guides get a current-state head, not another banner layer
+
+**Decision:** A post-change audit of the whole doc set found ten stale claims in
+six files, all the same failure mode as S1.72's BOOT_MATRIX rows: text written
+before 7.4/7.5/S1.48 that those stages falsified. All corrected.
+
+`ctx_system_current.md` (`scope: current-truth`, the agent boot file) carried
+five, in its own inline `**(no longer true -- see S1.4x)**` convention where rows
+46/47/48/50 already used it and rows 35/43/49 did not. The worst was the S1.40
+amendment's closing line -- "the curved pipeline was **deliberately not re-run**
+-- placement has to be answered first" -- which is the *last word* of that
+section, so a reader left believing placement was open. It has been closed since
+S1.48. The file also still said `tutorials/` was gitignored, and
+`CurvedModel_AdaptingYourOwnJob.md` said the same; both cited `wiki/INDEX.md` as
+the authority for a claim `wiki/INDEX.md` now refutes.
+
+**`CurvedModel_IKPrecompute.md` and `CurvedModel_PrintSetup.md` are restructured
+rather than re-bannered:** a **Current behaviour** section at the head, the
+superseded material demoted under an explicit **How it got here** heading, and
+the "Code anchors" list -- a live reference -- corrected in place. Nothing is
+deleted.
+
+**Reason:** the append-a-banner convention is right for `settled.md` and for
+`001_Inbox/`, which are dated ledgers. It fails for an *operating guide*, and
+`CurvedModel_IKPrecompute.md` is the proof: it had reached a banner whose first
+line was "the banner above is itself out of date", and even that third layer did
+not reach four body sites -- including a literal instruction to "enable
+`allow_tcp_through_plate`", a GUI checkbox deleted at 7.4, and a "Known
+limitation" section asserting nothing checks the arm against the mockup, which
+**filter 8 closed** (it caught a real pose with an arm link 0.71mm inside the TX
+surface). A reader following that guide would have looked for a control that does
+not exist and believed a safety gap that no longer exists.
+
+The distinction worth keeping: a *ledger* records what was decided and when, so
+it is append-only. A *guide* answers "what do I do now", so its first screen must
+be true, and history belongs below the fold. Both are honoured here -- nothing
+was deleted, only reordered.
+
+`CurvedModel_Orientation.md` was the only Stage 6 guide with no 7.4 marker at
+all, while S1.36 itself carries one; its central claim -- that the frame it
+builds is the commanded pose with the roll pinned for stability -- is precisely
+what 7.4 replaced. `CurvedModel_PrintSetup.md`'s evidence table was re-read from
+the shipped `.npz` metadata rather than hand-edited: three of its five columns
+(plate pose, cache version, `allow_tcp_through_plate`) were dead, under a banner
+that endorsed them as "current".
+
+**Code was audited and needed nothing.** The session's `geometry_backend.py` diff
+is 43 lines, every one a comment or docstring.
+
+**Two follow-ups, same audit (2026-09-08).**
+
+**A render defect, not just a content one.** `BOOT_MATRIX.md` row 27 carried
+`` `max |ΔT| = 0.0` `` with **unescaped** pipes. A markdown table row splits on
+any unescaped `|` regardless of code spans, so that row rendered as 7 cells
+against a 5-cell header -- the Stage 7.1-7.3 row displayed wrong wherever the
+wiki is read rendered rather than raw. Escaped to `\|ΔT\|`, matching row 28's
+existing `\|J5\|`. Worth stating because a content audit that only greps text
+will never see this class of defect; the check is to split each row on unescaped
+pipes and assert the cell count matches the header.
+
+**The verification census, and two entries that must stay as they are.** 74
+entries against 71 `**Verified on:**` lines. Five deviations, and only one was a
+plain omission:
+
+- **S1.31** has two, correctly -- one verification per revision: the first closes
+  the original 6.2 decision, the second closes its same-day amendments, and a
+  third unlabelled pass covers the second amendment. Not a duplicate.
+- **S1.46** has none, ***deliberately***. It contains `### NOT YET MEASURED -- do
+  not report these as results` and states "Nothing in this entry has been run";
+  S1.47 is the answer to it and carries the date. **Do not add a `Verified on`
+  line here** -- a future census will flag it again, and it must be left alone.
+- **S1.44** and **S1.45** had the verification and the date present -- S1.44 as
+  an `###` heading among its other `###` parts, S1.45 as prose ("Measured
+  2026-08-15") -- but no labelled field. Both now carry one, worded only from
+  what those entries already stated.
+- **S1.21** genuinely has no verification record: no date, no test described in
+  60 lines. Given `**Verified on:** not recorded` rather than a guessed date.
+
+The rule this follows: a missing verification is information, and back-filling it
+with a plausible date destroys that information. Label what the entry already
+proves; say "not recorded" when it proves nothing.
+
+**Non-revertible unless:** a guide's history section grows past the point of
+being worth carrying inline, at which point it moves to `001_Inbox/` as a dated
+note and the guide keeps a pointer.
+
+**Verified on:** 2026-09-08. All 143 markdown links repo-wide resolve, anchors
+and case included; no `INDEX.md` lists a deleted file or omits a present one; no
+live doc names `allow_tcp_through_plate`, `_branch_clears_ground`,
+`_nozzle_clears_plane`, `precompute_tip_tolerance_mm` or `check_collision` as
+current; every remaining `226/2,527`, `186/2,000`, `23/35`, `15/35` and `X+30`
+sits inside a history section, an inbox note or a `settled.md` entry;
+`PrintSetup.md`'s rebuilt table matches the cache metadata exactly (RX 3,175 /
+2,527 feed, TX 2,688 / 2,000 feed, v7, `filter_mode` curved, User Frame
+`[649.456, 133.762, 322.778]`); `geometry_backend` imports.

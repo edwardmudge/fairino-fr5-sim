@@ -51,3 +51,11 @@ must satisfy, and it is the authority behind Stage 7's Rejection Criteria.
 Its companion, `docs/saved_coords_data_and_usage_EN.md`, stays in `docs/` —
 that one is general FR5 data (DH table, joint limits, FK verification) the
 whole simulator depends on, not just this study.
+
+`IK_BRANCH_REJECTION_GUIDE.md` used to sit here too, and left under that same
+rule (`settled.md` **S1.71**). What it describes — joint limits, elbow branch,
+plate footprint, self-collision, edge costs — is robot- and planner-level and
+applies to the planar path as much as this one, so it now lives at
+[`docs/FR5_IK_Branch_Rejection.md`](../../docs/FR5_IK_Branch_Rejection.md),
+rewritten as this project's own specification rather than the external
+implementation it was adapted from.

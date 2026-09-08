@@ -99,18 +99,35 @@ be loaded while the plate is at `Z = 0`.
 
 Read from the precompute caches, not from memory:
 
-| Cache | Waypoints solved | Plate pose | Cache ver | Toggle |
-|---|---|---|---|---|
-| `curved_rx.precompute.npz` | **3,175** | `[-570, -300, -200]` | 4 | `allow_tcp_through_plate = False` |
-| `curved_tx.precompute.npz` | **2,688** | `[-570, -300, -200]` | 4 | `allow_tcp_through_plate = False` |
+| Cache | Waypoints solved | Feed points | Plate pose | Cache ver | `filter_mode` |
+|---|---|---|---|---|---|
+| `curved_rx.precompute.npz` | **3,175** | 2,527 | real User Frame `[649.456, 133.762, 322.778]` | 7 | `curved` |
+| `curved_tx.precompute.npz` | **2,688** | 2,000 | real User Frame `[649.456, 133.762, 322.778]` | 7 | `curved` |
 
-Both layers solve completely. Note both ran with `allow_tcp_through_plate`
-**False** — the nozzle *is* blocked below the plate. Earlier prose in
-`ctx_system_current.md` / `BOOT_MATRIX.md` described the adopted setup as
-running with TCP-through *enabled*; the cache metadata is the evidence and the
-prose has been corrected to match.
+Read back from the shipped `.npz` metadata on 2026-09-08. Both layers solve
+**completely**, at the real calibrated User Frame, through the full nine-filter
+candidate stack — and both export `validate_job` **ACCEPTED**.
 
-## ⚠ Known limitation — "solved" is not "collision-free"
+⚠ This table previously recorded the plate pose as `[-570, -300, -200]`, cache
+version `4`, and an `allow_tcp_through_plate = False` column. All three are gone:
+the pose is the real calibrated frame since 7.3, the version is 7 since 7.4, and
+the toggle was **deleted** at 7.4 with the rest of the infinite-plane plate model
+(replaced by the finite footprint + slab filters). Only the waypoint counts
+carried over — and they are a property of the print order, not of placement,
+which is why they are unchanged. (The historical point this paragraph used to
+make — that prose elsewhere once described the adopted setup as running with
+TCP-through *enabled*, which the cache metadata contradicted — is moot now that
+the toggle does not exist.)
+
+> ✅ **The next section is superseded — arm-vs-mockup IS guarded.** Since Stage
+> 7.4, filter 8 tests every arm link against the live layer's own print surface
+> at 1.0mm, so "a completed precompute is not collision-free" no longer holds for
+> the arm. It still holds for the **nozzle**, which is excluded from the filters
+> by construction. Full detail, with the measured evidence: **"Changed in Stage
+> 7.4"** below. Filters and tolerances:
+> [`../../docs/FR5_IK_Branch_Rejection.md`](../../docs/FR5_IK_Branch_Rejection.md).
+
+## ⚠ Known limitation — "solved" is not "collision-free" (superseded, see the note above)
 
 A completed precompute means **reachable and plate-clearing**. It does *not*
 mean safe. The TX run above completes, but **the arm passes through the

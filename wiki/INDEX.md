@@ -25,15 +25,16 @@
 
 Pages throughout this wiki (and docstrings throughout the source) cite
 `tutorials/Stage5_README.md`, `Stage6_README.md`, `Stage7_README.md` and
-similar as the roadmap of record. **That directory is local assignment
-scaffolding and is not published** — it is gitignored, so a clone does not
-contain it and those citations cannot be followed.
+similar as the roadmap of record. That directory **is published** — a clone
+contains it and every cited sub-stage number resolves to a section.
 
-They are kept as historical provenance rather than rewritten, per the
-never-delete convention: they record which roadmap stage a decision came from,
-and the decision itself is always restated in `002_Architecture/settled.md`.
-For anything you actually need to read: `003_Guides/` covers how a feature is
-operated, `002_Architecture/settled.md` covers why it is built that way.
+One caveat when cross-reading. The stage READMEs are a clean reconstruction
+written to be followed in order: corrections discovered in a later stage have
+been folded back into the stage where a builder needs them, so a sub-stage may
+describe the corrected approach rather than the one originally built there. This
+file's own chronology is the authority — `002_Architecture/settled.md` records
+every decision with its date and what superseded it, and `001_Inbox/` holds the
+working notes. `003_Guides/` covers how a finished feature is operated.
 
 ## Start here
 

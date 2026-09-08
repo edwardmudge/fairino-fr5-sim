@@ -11,9 +11,10 @@ operate on whatever a **study config** describes. The shipped config prints an
 elastomeric capacitive sensor conformally onto a shoulder mockup; nothing about
 that job is baked into the engine.
 
-This guide is what you need to substitute your own part. It is self-contained on
-purpose — source docstrings cite `tutorials/Stage6_README.md` /
-`Stage7_README.md`, which are not published (see `wiki/INDEX.md`).
+This guide is what you need to substitute your own part, and is self-contained on
+purpose. Source docstrings cite `tutorials/Stage6_README.md` /
+`Stage7_README.md`, which **are** published (`settled.md` S1.70) if you want the
+build-order narrative behind any of it — but you should not need them here.
 
 Related: [`CurvedModel_PrintSetup.md`](CurvedModel_PrintSetup.md) (operating the
 shipped job), [`CurvedModel_Loading.md`](CurvedModel_Loading.md),

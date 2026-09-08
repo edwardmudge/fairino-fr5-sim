@@ -61,9 +61,11 @@ study config describes — there is no longer a fixed two-layer assumption.
    is in **world coordinates**, already through `T_curved`, because
    everything downstream — 6.3's hover offsets, 6.4's normals, 6.5's IK —
    works in the frame the arm works in. `Surface_Bot` is rendered but not
-   retained: 6.5 ended up **not** needing it as a collision mesh (a
-   per-waypoint tangent-plane check replaced the obstacle-mesh idea,
-   `settled.md` S1.37).
+   retained: it is not a collision body. (6.5's stated reason, a per-waypoint
+   tangent-plane check replacing the obstacle-mesh idea, is superseded — that
+   check was deleted at 7.2 and Stage 7.4's filter 8 is a real mesh-vs-mesh
+   check against each layer's *own print surface*, still not `Surface_Bot`.
+   `settled.md` S1.37 → **S1.46/S1.47**.)
 
 2. **`build_surface_graph(verts, faces)`** — nodes are mesh vertices, edges
    are triangle edges, weights are Euclidean edge lengths. Returns a

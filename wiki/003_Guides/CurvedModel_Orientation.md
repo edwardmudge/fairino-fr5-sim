@@ -4,6 +4,32 @@ status: active
 
 # Per-Waypoint Tool Orientation from Surface Normals
 
+> ⚠ **Changed in Stage 7.4 (`settled.md` S1.46/S1.47) — this frame is no longer
+> the commanded pose.** `_orientation_frames_for_points()` is **unchanged in
+> code**, but what consumes it changed completely. It now supplies only two
+> things: the **axis of the search cone**, and the surface normal exported as the
+> job's `normal_base`. It is never handed to IK as the pose to solve.
+>
+> Two claims below give way:
+>
+> - **"Z = the outward surface normal"** was a hard equality. The tool axis now
+>   need only be perpendicular **within 20°**, per the supervisor, and 7.4
+>   searches a 20° tilt cone about this frame's Z.
+> - **The in-plane roll is no longer pinned.** This guide's reasoning for pinning
+>   it — the nozzle is rotationally symmetric, so that DOF is free — is exactly
+>   why it was safe to *search* instead. All 60 roll slots are swept and resolved
+>   globally by continuity cost over the candidate DAG.
+>
+> That second change is not a refinement, it is a defect fix. Choosing a free DOF
+> per waypoint with a discrete `argmin |a·z|` rule flips as the normal sweeps,
+> and produced joint steps up to **180.10°** between neighbouring waypoints —
+> which is why both curved layers failed the exchange spec's row 5 at 7.2. The
+> stability this guide argues for is real; pinning per waypoint was the wrong way
+> to get it. See
+> [`../../docs/FR5_IK_Branch_Rejection.md`](../../docs/FR5_IK_Branch_Rejection.md)
+> for what is actually commanded, and `tutorials/Stage6_README.md` §6.4 for the
+> same framing in build order.
+
 ## What it is
 
 The "Build Orientation Frames" button (I/O Operations panel, shown once a

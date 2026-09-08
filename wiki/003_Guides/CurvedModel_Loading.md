@@ -134,9 +134,12 @@ measured-property writeup this guide's numbers come from.
    (`curved_pieces_world`, `curved_surface_verts_world`,
    `curved_surface_faces`, `T_curved`) for roadmap 6.2's geodesic routing,
    which needs the per-piece curves and the two print surfaces in the frame
-   the arm works in. `Surface_Bot` is rendered but not retained — 6.5 ended
-   up **not** needing it as a collision mesh (a per-waypoint tangent-plane
-   check replaced the obstacle-mesh idea, `settled.md` S1.37). Reloading
+   the arm works in. `Surface_Bot` is rendered but not retained — it is not
+   a collision body. (6.5's stated reason, that a per-waypoint tangent-plane
+   check replaced the obstacle-mesh idea, is superseded: that check was deleted
+   at 7.2 and Stage 7.4 built a real mesh-vs-mesh check — filter 8 — against
+   each layer's *own print surface*. `Surface_Bot` is still not among them.
+   `settled.md` S1.37 → **S1.46/S1.47**.) Reloading
    aborts any geodesic solved against the previous load, since every world
    vertex is re-derived here (`settled.md` S1.31).
 

@@ -1,0 +1,999 @@
+<title>Human-AI Collaboration Wiki: Beginner's Guide</title>
+<style>
+  :root {
+    --bg:        #f7f6f3;
+    --bg-raised: #ffffff;
+    --fg:        #1b1d24;
+    --fg-muted:  #6b6d78;
+    --accent:    #2b5e8c;
+    --accent-bg: #e6eef5;
+    --warn:      #b85530;
+    --warn-bg:   #fdf0ea;
+    --ok:        #3a7a54;
+    --ok-bg:     #e7f3ec;
+    --border:    #d6d3cb;
+    --border-lt: #eae8e3;
+    --code-bg:   #eeedea;
+    --hero-bg:   #1c2a3a;
+    --hero-fg:   #e4e2dc;
+    --hero-sub:  #8a9aac;
+    --ladder-bg: #f2f0ec;
+    --tag-bg:    #dfe6ed;
+    --tag-fg:    #2b5e8c;
+    --node-bg:   #ffffff;
+    --node-border: #c8d4e0;
+    --node-active: #2b5e8c;
+    --node-active-fg: #ffffff;
+    --edge:      #bcc4cc;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #111115;
+      --bg-raised: #1a1a20;
+      --fg:        #d5d2ca;
+      --fg-muted:  #7e7c74;
+      --accent:    #6aaad4;
+      --accent-bg: #172530;
+      --warn:      #e08a5e;
+      --warn-bg:   #261c14;
+      --ok:        #5eb87a;
+      --ok-bg:     #142618;
+      --border:    #2c2c32;
+      --border-lt: #222228;
+      --code-bg:   #1c1c22;
+      --hero-bg:   #0c1018;
+      --hero-fg:   #d5d2ca;
+      --hero-sub:  #6a7a8c;
+      --ladder-bg: #16161c;
+      --tag-bg:    #172530;
+      --tag-fg:    #6aaad4;
+      --node-bg:   #1a1a20;
+      --node-border: #2c3a48;
+      --node-active: #6aaad4;
+      --node-active-fg: #111115;
+      --edge:      #333844;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #111115;
+    --bg-raised: #1a1a20;
+    --fg:        #d5d2ca;
+    --fg-muted:  #7e7c74;
+    --accent:    #6aaad4;
+    --accent-bg: #172530;
+    --warn:      #e08a5e;
+    --warn-bg:   #261c14;
+    --ok:        #5eb87a;
+    --ok-bg:     #142618;
+    --border:    #2c2c32;
+    --border-lt: #222228;
+    --code-bg:   #1c1c22;
+    --hero-bg:   #0c1018;
+    --hero-fg:   #d5d2ca;
+    --hero-sub:  #6a7a8c;
+    --ladder-bg: #16161c;
+    --tag-bg:    #172530;
+    --tag-fg:    #6aaad4;
+    --node-bg:   #1a1a20;
+    --node-border: #2c3a48;
+    --node-active: #6aaad4;
+    --node-active-fg: #111115;
+    --edge:      #333844;
+  }
+  :root[data-theme="light"] {
+    --bg:        #f7f6f3;
+    --bg-raised: #ffffff;
+    --fg:        #1b1d24;
+    --fg-muted:  #6b6d78;
+    --accent:    #2b5e8c;
+    --accent-bg: #e6eef5;
+    --warn:      #b85530;
+    --warn-bg:   #fdf0ea;
+    --ok:        #3a7a54;
+    --ok-bg:     #e7f3ec;
+    --border:    #d6d3cb;
+    --border-lt: #eae8e3;
+    --code-bg:   #eeedea;
+    --hero-bg:   #1c2a3a;
+    --hero-fg:   #e4e2dc;
+    --hero-sub:  #8a9aac;
+    --ladder-bg: #f2f0ec;
+    --tag-bg:    #dfe6ed;
+    --tag-fg:    #2b5e8c;
+    --node-bg:   #ffffff;
+    --node-border: #c8d4e0;
+    --node-active: #2b5e8c;
+    --node-active-fg: #ffffff;
+    --edge:      #bcc4cc;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.74;
+    font-size: 15.5px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    background: var(--hero-bg);
+    color: var(--hero-fg);
+    padding: 3.8rem 2rem 3rem;
+  }
+  .hero-inner { max-width: 660px; margin: 0 auto; }
+  .hero-eyebrow {
+    font-size: 0.76rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--hero-sub);
+    margin-bottom: 1.1rem;
+    font-weight: 500;
+  }
+  .hero h1 {
+    font-family: Georgia, "Noto Serif SC", "Source Han Serif SC", serif;
+    font-size: clamp(1.5rem, 3.8vw, 2.15rem);
+    font-weight: 700;
+    line-height: 1.35;
+    text-wrap: balance;
+    margin-bottom: 1.2rem;
+  }
+  .hero-thesis {
+    color: var(--hero-sub);
+    font-size: 0.94rem;
+    line-height: 1.7;
+    max-width: 580px;
+    border-left: 2px solid var(--hero-sub);
+    padding-left: 1rem;
+  }
+  .hero-thesis strong { color: var(--hero-fg); font-weight: 600; }
+
+  /* ── Main ── */
+  .main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 5rem;
+  }
+
+  /* ── Typography ── */
+  h2 {
+    font-family: Georgia, "Noto Serif SC", "Source Han Serif SC", serif;
+    font-size: 1.4rem;
+    font-weight: 700;
+    margin-top: 3.5rem;
+    margin-bottom: 0.6rem;
+    line-height: 1.35;
+  }
+  h3 {
+    font-size: 1.06rem;
+    font-weight: 600;
+    margin-top: 2.2rem;
+    margin-bottom: 0.4rem;
+  }
+  h4 {
+    font-size: 0.92rem;
+    font-weight: 600;
+    margin-top: 1.6rem;
+    margin-bottom: 0.3rem;
+    color: var(--fg-muted);
+    letter-spacing: 0.02em;
+  }
+  p { margin-bottom: 0.9rem; }
+  strong { font-weight: 600; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  hr { border: none; height: 1px; background: var(--border); margin: 3rem 0; }
+  ul, ol { margin-bottom: 1rem; padding-left: 1.4rem; }
+  li { margin-bottom: 0.35rem; }
+  li::marker { color: var(--fg-muted); }
+
+  code {
+    font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace;
+    font-size: 0.86em;
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border-lt);
+    border-radius: 6px;
+    padding: 1rem 1.2rem;
+    overflow-x: auto;
+    margin-bottom: 1.2rem;
+    line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; font-size: 0.84em; }
+
+  /* ── Callouts ── */
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-bg);
+    padding: 0.9rem 1.1rem;
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 1.2rem;
+    font-size: 0.93rem;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout--warn { border-left-color: var(--warn); background: var(--warn-bg); }
+  .callout--ok { border-left-color: var(--ok); background: var(--ok-bg); }
+
+  .tag {
+    display: inline-block;
+    font-size: 0.74rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 0.15em 0.55em;
+    border-radius: 3px;
+    background: var(--tag-bg);
+    color: var(--tag-fg);
+    vertical-align: middle;
+    margin-right: 0.3em;
+  }
+
+  .table-wrap { overflow-x: auto; margin-bottom: 1.2rem; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+  }
+  th, td { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border-lt); }
+  th { font-weight: 600; font-size: 0.82rem; color: var(--fg-muted); letter-spacing: 0.03em; border-bottom-color: var(--border); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .sec-num { font-family: Georgia, serif; color: var(--accent); font-weight: 700; margin-right: 0.25em; }
+
+  /* ── Knowledge Graph (canvas) ── */
+  .graph-wrap {
+    position: relative;
+    width: 100%;
+    height: 340px;
+    margin: 1.5rem 0 1.8rem;
+    border: 1px solid var(--border-lt);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--ladder-bg);
+  }
+  .graph-wrap canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* ── Workflow steps ── */
+  .wf-step {
+    display: grid;
+    grid-template-columns: 2.6rem 1fr;
+    gap: 0 0.9rem;
+    margin-bottom: 1.5rem;
+    align-items: start;
+  }
+  .wf-num {
+    font-family: Georgia, serif;
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--accent);
+    line-height: 1.5;
+    text-align: right;
+    padding-top: 0.1rem;
+  }
+  .wf-body h4 { margin-top: 0; color: var(--fg); font-size: 0.98rem; }
+  .wf-body p, .wf-body ul { font-size: 0.93rem; }
+
+  /* ── Dialogue ── */
+  .dialogue {
+    border: 1px solid var(--border-lt);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 1.2rem;
+  }
+  .dialogue-header {
+    background: var(--accent-bg);
+    padding: 0.45rem 0.9rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.03em;
+    border-bottom: 1px solid var(--border-lt);
+  }
+  .dialogue-row {
+    display: grid;
+    grid-template-columns: 4.2rem 1fr;
+    gap: 0;
+    border-bottom: 1px solid var(--border-lt);
+    font-size: 0.9rem;
+  }
+  .dialogue-row:last-child { border-bottom: none; }
+  .dialogue-role {
+    padding: 0.55rem 0.7rem;
+    font-weight: 600;
+    font-size: 0.78rem;
+    color: var(--fg-muted);
+    background: var(--ladder-bg);
+    display: flex;
+    align-items: start;
+    padding-top: 0.65rem;
+  }
+  .dialogue-msg { padding: 0.55rem 0.9rem; line-height: 1.6; }
+
+  /* ── Insight ── */
+  .insight {
+    position: relative;
+    padding: 1rem 1.1rem 1rem 2.8rem;
+    background: var(--accent-bg);
+    border-radius: 6px;
+    margin-bottom: 1.2rem;
+    font-size: 0.92rem;
+  }
+  .insight::before {
+    content: "!";
+    position: absolute;
+    left: 0.9rem;
+    top: 0.85rem;
+    width: 1.2rem;
+    height: 1.2rem;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--bg);
+    font-family: Georgia, serif;
+    font-weight: 700;
+    font-size: 0.78rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .insight p:last-child { margin-bottom: 0; }
+
+  /* ── Ladder ── */
+  .ladder {
+    background: var(--ladder-bg);
+    border: 1px solid var(--border-lt);
+    border-radius: 8px;
+    padding: 1.2rem 1.4rem;
+    margin-bottom: 1.2rem;
+    font-size: 0.88rem;
+  }
+  .ladder-row {
+    display: grid;
+    grid-template-columns: 2rem 1fr auto;
+    gap: 0 0.7rem;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border-lt);
+    align-items: baseline;
+  }
+  .ladder-row:last-child { border-bottom: none; }
+  .ladder-rank { font-family: Georgia, serif; font-weight: 700; color: var(--accent); text-align: right; }
+  .ladder-label { font-weight: 500; }
+  .ladder-note { color: var(--fg-muted); font-size: 0.82rem; }
+
+  /* ── Dir tree ── */
+  .dir-tree {
+    font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.7;
+    background: var(--code-bg);
+    border: 1px solid var(--border-lt);
+    border-radius: 6px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 1.2rem;
+    overflow-x: auto;
+  }
+  .dir-tree .cmt { color: var(--fg-muted); }
+
+  /* ── Analogy block ── */
+  .analogy {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .analogy-card {
+    border: 1px solid var(--border-lt);
+    border-radius: 8px;
+    padding: 1rem;
+    background: var(--bg-raised);
+  }
+  .analogy-card h4 {
+    margin-top: 0;
+    font-size: 0.85rem;
+    color: var(--fg-muted);
+    margin-bottom: 0.5rem;
+  }
+  .analogy-card p { font-size: 0.9rem; margin-bottom: 0; }
+
+  /* ── Flow ── */
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    align-items: center;
+    justify-content: center;
+    margin: 1.5rem 0;
+    font-size: 0.85rem;
+  }
+  .flow-node {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.45rem 0.8rem;
+    font-weight: 500;
+    text-align: center;
+    min-width: 4.5rem;
+  }
+  .flow-arrow { color: var(--fg-muted); padding: 0 0.35rem; font-size: 1.1rem; }
+
+  @media (max-width: 600px) {
+    .hero { padding: 2.5rem 1.2rem 2rem; }
+    .main { padding: 1.5rem 1rem 3rem; }
+    h2 { font-size: 1.25rem; margin-top: 2.5rem; }
+    .wf-step { grid-template-columns: 2rem 1fr; }
+    .wf-num { font-size: 1.1rem; }
+    .analogy { grid-template-columns: 1fr; }
+    .graph-wrap { height: 280px; }
+  }
+</style>
+
+<div class="hero">
+  <div class="hero-inner">
+    <div class="hero-eyebrow">Beginner's Guide</div>
+    <h1>The Wiki as an External Brain:<br>Taming Complex Projects with a Knowledge Network</h1>
+    <div class="hero-thesis">
+      <p>A person's working memory can handle only 4&ndash;7 items at once. But a robot control system has hundreds of tightly coupled technical details: coordinate frame conventions, safety stop protocols, SDK parameter semantics, IK solution variants, and more.</p>
+      <p><strong>You don't need to keep all of this in your head.</strong> Crystallise it into an interconnected knowledge network: at any moment you only need to focus on the current node, while the wiki and the AI agent look after the rest. This isn't laziness. It's putting human cognitive bandwidth where judgement is actually needed.</p>
+    </div>
+  </div>
+</div>
+
+<div class="main">
+
+<!-- ═══════════ Part I ═══════════ -->
+
+<h2><span class="sec-num">I</span> Core Idea: You Only Need to Focus on "One Point"</h2>
+
+<p>Imagine you're repairing a car. You don't need to understand every detail of the engine, gearbox, electrical system, and suspension at once. You only need to know: <strong>right now I'm working on the brake pads</strong>, and if I need to know how the brake line connects to the ABS module, there's a service manual with a chapter I can turn to.</p>
+
+<p>This wiki system does exactly that, but for Human-AI collaborative development:</p>
+
+<div class="analogy">
+  <div class="analogy-card">
+    <h4>Without a Wiki</h4>
+    <p>You have to keep <strong>every key constraint of the whole system</strong> in your head. Forget a safety rule? The agent will happily write code that breaks it. Forget the precise meaning of a term? The agent will invent one of its own.</p>
+  </div>
+  <div class="analogy-card">
+    <h4>With a Wiki</h4>
+    <p>You only need to <strong>focus on the current task</strong>. Safety constraints, term definitions, and settled decisions are all captured in wiki nodes. When work begins, the agent automatically loads the relevant nodes per protocol. You make the high-level judgements; the details go to the wiki and the agent.</p>
+  </div>
+</div>
+
+<h3>A Knowledge Network, Not a Pile of Documents</h3>
+
+<p>Traditional documentation is <strong>linear</strong>: one piece after another, and you need to read the previous one to understand the next. This wiki is <strong>networked</strong>: each piece of knowledge is an independent node, and nodes are linked by references. You can enter from any node and follow the connections to the context you need.</p>
+
+<div class="graph-wrap">
+  <canvas id="kg"></canvas>
+</div>
+
+<p>The interactive diagram above shows a fragment of the knowledge network from the FR5-StreamingSys project. Hover over any node to see its connections. <strong>You don't need to understand every node</strong>, you only need to know that "when I'm working on something IK-related, the Boot Matrix will route me to the right nodes."</p>
+
+<div class="insight">
+  <p><strong>What reducing complexity really means:</strong> it isn't about making a complex system simple (it's inherently complex), it's about reducing <em>the amount you need to understand at once</em> from O(n) to O(1). You focus on one node at a time, and neighbouring nodes are expanded by the wiki and agent as needed. It's like virtual memory in an operating system: physical memory is limited, but on-demand paging lets a process use an address space far larger than physical memory.</p>
+</div>
+
+<h3>Humans Make Judgements, the Agent Handles the Details</h3>
+
+<p>This system redraws the boundary of responsibility between human and agent:</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th></th><th>Human (High-Level)</th><th>Wiki + Agent (Detail Layer)</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Plan</strong></td>
+      <td>Decide "what to do" and "why"</td>
+      <td>Check whether the plan conflicts with settled decisions or breaks safety rules</td>
+    </tr>
+    <tr>
+      <td><strong>Implement</strong></td>
+      <td>Review key design choices</td>
+      <td>Load context per the Boot Matrix, write the code, follow CLAUDE.md discipline</td>
+    </tr>
+    <tr>
+      <td><strong>Review</strong></td>
+      <td>Judge whether review findings need fixing</td>
+      <td>Pull safety rules and term definitions from the wiki, adversarially review the code</td>
+    </tr>
+    <tr>
+      <td><strong>Solidify</strong></td>
+      <td>Decide which lessons are worth solidifying</td>
+      <td>Turn lessons into rules, update the Glossary, update the Boot Matrix</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>The key point: <strong>you don't need to remember the difference between <code>StopMove</code> and <code>StopMotion</code></strong>. You only need to know that "stopping the machine is a delicate matter." When the agent does related work, it automatically loads the precise distinction and the prohibitions from <code>ctx_safety/</code>. Your attention stays entirely on questions that genuinely need human judgement, like "what should this feature's user experience be like."</p>
+
+<hr>
+
+<!-- ═══════════ Part II ═══════════ -->
+
+<h2><span class="sec-num">II</span> Wiki Structure: Five Layers of Knowledge, Loaded on Demand</h2>
+
+<p>The nodes in the knowledge network aren't flat, they're layered by <strong>authority</strong>. Information closer to the code and the hardware carries higher authority:</p>
+
+<div class="ladder">
+  <div class="ladder-row">
+    <div class="ladder-rank">0</div>
+    <div class="ladder-label">CLAUDE.md</div>
+    <div class="ladder-note">Auto-loaded every time — the behavioural constitution</div>
+  </div>
+  <div class="ladder-row">
+    <div class="ladder-rank">1</div>
+    <div class="ladder-label">AgentMgmt (005)</div>
+    <div class="ladder-note">Glossary, Safety, Boot Matrix, Truth Ladder</div>
+  </div>
+  <div class="ladder-row">
+    <div class="ladder-rank">2</div>
+    <div class="ladder-label">Architecture (002)</div>
+    <div class="ladder-note">System architecture + settled.md decisions</div>
+  </div>
+  <div class="ladder-row">
+    <div class="ladder-rank">3</div>
+    <div class="ladder-label">Inbox (001) + Guides (003)</div>
+    <div class="ladder-note">Working notes + operational guides</div>
+  </div>
+  <div class="ladder-row">
+    <div class="ladder-rank">4</div>
+    <div class="ladder-label">_historical/</div>
+    <div class="ladder-note">Superseded documents — for archaeology only</div>
+  </div>
+</div>
+
+<p>The point of layering: <strong>when two nodes disagree, you don't need to judge which is right yourself, the Truth Ladder tells you directly.</strong> Code > safety rules > contracts > design docs > notes. This is one more thing offloaded from your head.</p>
+
+<h3>Directory Structure</h3>
+
+<div class="dir-tree">
+project-root/<br>
+├── CLAUDE.md                         <span class="cmt">← Behavioural constitution — auto-loaded every time</span><br>
+└── wiki/<br>
+&nbsp;&nbsp;&nbsp;&nbsp;├── 001_Inbox/                    <span class="cmt">← Working notes (low authority)</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;├── 002_Architecture/              <span class="cmt">← Architecture + settled.md</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;├── 003_Guides/                   <span class="cmt">← Operational guides</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;└── 005_AgentMgmt/                <span class="cmt">← Core of the knowledge network</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── INDEX.md              <span class="cmt">← Boot Protocol (loading protocol)</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── active/<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── ctx_main/         <span class="cmt">← Glossary, Truth Ladder, Boot Matrix</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── ctx_safety/       <span class="cmt">← Mandatory safety rules</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;└── ctx_[subsystem]/     <span class="cmt">← Context for each subsystem</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── _historical/          <span class="cmt">← Archive (not deleted, kept for traceability)</span>
+</div>
+
+<h3>Core Mechanism: Boot Matrix Routing</h3>
+
+<p>The Boot Matrix is the "routing table" of the knowledge network. When the agent receives a task, it looks up the table to find which nodes to load, which code files to read, which tests to run, and <strong>which stale files it should not read</strong>.</p>
+
+<p>For example, when you say "I want to modify the IK solver," the Boot Matrix tells the agent:</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Must read</th><th>Follow-up reading</th><th>Code anchors</th><th>Deprecated, do not use</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>ctx_safety/offlineIK...Safety.md</code></td>
+      <td><code>ctx_offline_ik/offlineIKCurrentPipeline.md</code></td>
+      <td><code>core/path_ik_resolve.py</code></td>
+      <td><code>_historical/offlineIKIntegration*</code></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>You don't need to remember these routes, you don't even need to know the Boot Matrix exists. You only need to say "modify the IK," and the agent knows what to read on its own.</p>
+
+<hr>
+
+<!-- ═══════════ Part III ═══════════ -->
+
+<h2><span class="sec-num">III</span> Workflows in Practice (Three Full Examples)</h2>
+
+<p>The three examples below show how the wiki is used in day-to-day development. Notice throughout: <strong>the human is always making high-level judgements, while detail checks are offloaded to the wiki and agent.</strong></p>
+
+<!-- ─── Workflow 1 ─── -->
+<h3>Example One: Proposing a Plan + Adversarial Plan Review</h3>
+
+<p><span class="tag">PLAN</span><span class="tag">REVIEW</span> Scenario: adding a "resumable pause" feature to the robot, so a print can be paused mid-way and then continued.</p>
+
+<h4>You Say</h4>
+
+<div class="dialogue">
+  <div class="dialogue-header">Step One — Stating the Requirement</div>
+  <div class="dialogue-row">
+    <div class="dialogue-role">You</div>
+    <div class="dialogue-msg">"I want to be able to resume printing after a pause. Right now the only option is ESTOP and starting over, which is wasteful."</div>
+  </div>
+</div>
+
+<p>Note: you <strong>only stated the intent</strong>, not how to implement it. The agent's job is to load the constraints from the wiki, then design a solution within them:</p>
+
+<div class="dialogue">
+  <div class="dialogue-header">Knowledge Nodes the Agent Loads Automatically</div>
+  <div class="dialogue-row">
+    <div class="dialogue-role">Agent</div>
+    <div class="dialogue-msg">
+      Checks the Boot Matrix → the "ESTOP / NewSpline Runtime" row<br><br>
+      <strong>Loads 3 nodes:</strong><br>
+      &bull; GLOSSARY.md — confirms the precise semantic distinction between Hard ESTOP / Recoverable Pause / PauseMotion<br>
+      &bull; ctx_safety/estopStopMoveLesson.md — stopping must use <code>StopMove</code>; calling <code>NewSplineEnd()</code> before an ESTOP is forbidden<br>
+      &bull; settled.md S1.1 — DO switching must block and wait<br><br>
+      The design can now proceed.
+    </div>
+  </div>
+</div>
+
+<div class="insight">
+  <p><strong>What the wiki did here:</strong> you didn't need to remember a detail like "<code>NewSplineEnd()</code> waits for the segment to finish." But if the agent didn't know this constraint, it would design a plan to "gracefully finish the current trajectory before pausing," which sounds reasonable but would actually mean pressing pause and the robot not stopping. The wiki prevented this mistake without you having to worry about it.</p>
+</div>
+
+<h4>After the Agent Writes the Plan: Adversarial Review</h4>
+
+<p>A plan isn't executed the moment it's written. Adversarial review means <strong>a different agent (or the same agent in a different role) is tasked specifically with finding faults</strong>, checking whether the plan breaks safety rules, conflicts with settled decisions, or uses terminology incorrectly.</p>
+
+<div class="dialogue">
+  <div class="dialogue-header">Adversarial Review Finds Issues</div>
+  <div class="dialogue-row">
+    <div class="dialogue-role">Agent</div>
+    <div class="dialogue-msg">
+      <strong>Issue 1 (safety violation):</strong> the plan locates the resume point using the index of a Python-side deque. But GLOSSARY.md #4 clearly distinguishes the Preview Queue (Python side) from the Robot Controller Buffer (hardware side): <strong>the two count independently and are not synchronised</strong>. The resume point must be based on the actual TCP pose.<br><br>
+      <strong>Issue 2 (conflicts with settled.md):</strong> the plan proposes waiting asynchronously for the DO switch. settled.md S1.1 requires a blocking wait, a hardware constraint.
+    </div>
+  </div>
+</div>
+
+<p>Your role: look at the review findings, judge whether they're valid, and approve the changes. <strong>You don't need to check what settled.md actually says yourself</strong>, the agent has done the cross-checking for you.</p>
+
+<!-- ─── Workflow 2 ─── -->
+
+<hr>
+
+<h3>Example Two: Implementation + Adversarial Code Review</h3>
+
+<p><span class="tag">CODE</span><span class="tag">REVIEW</span> Once the plan review passes, implementation begins.</p>
+
+<h4>What Happens While the Agent Writes Code</h4>
+
+<p>You don't need to tell the agent to "remember to read the safety rules," the Boot Matrix has already configured the routing. Before writing a single line of code, the agent automatically loads:</p>
+
+<ul>
+  <li><strong>Safety rules</strong> (<code>ctx_safety/</code>) — use <code>StopMove</code> for stopping, not <code>StopMotion</code></li>
+  <li><strong>System architecture</strong> (<code>ctx_motion_streaming/</code>) — understanding NewSpline's threading model</li>
+  <li><strong>Code anchors</strong> — knowing which files to change</li>
+  <li><strong>Deprecated documents</strong> — knowing <em>not to reference</em> the old active-chunk approach</li>
+</ul>
+
+<h4>Adversarial Code Review</h4>
+
+<p>Once the code is written, code review begins. The review agent is independent of the implementation agent and loads the same wiki nodes from scratch:</p>
+
+<div class="dialogue">
+  <div class="dialogue-header">Code Review Findings</div>
+  <div class="dialogue-row">
+    <div class="dialogue-role">Agent</div>
+    <div class="dialogue-msg">
+      <strong>Finding 1 (safety violation):</strong> line 87 uses <code>robot.StopMotion()</code> as the first call when stopping. The ctx_safety hard rule requires the first action to be <code>emergency_stop_motion()</code> (via the <code>StopMove</code> 8080 control channel).<br><br>
+      <strong>Finding 2 (performance violation):</strong> line 142 calls <code>resolve_stamped_gcode_path()</code> inside the UI <code>draw()</code> loop. The CLAUDE.md Render-Loop Rule forbids file I/O in the per-frame UI loop; state should be read from cache instead.
+    </div>
+  </div>
+</div>
+
+<p>Your role: look at both findings, judge their severity, and approve the fixes. You don't need to go hunting for rules in <code>ctx_safety</code> yourself, the review agent has already made the connection.</p>
+
+<div class="callout--ok callout">
+  <p><strong>The key feeling:</strong> throughout the whole process, your attention stays on the high-level question of "is this feature correct." SDK parameter semantics, control channel protocols, UI rendering performance constraints, all of these details are held by the wiki. You don't need to carry them all in your head at once.</p>
+</div>
+
+<!-- ─── Workflow 3 ─── -->
+
+<hr>
+
+<h3>Example Three: Wiki Updates and Knowledge Solidification</h3>
+
+<p><span class="tag">WIKI</span><span class="tag">SOLIDIFY</span> During development you learn something new, for example the discovery that "the Python queue position and the hardware buffer aren't synchronised." If you don't solidify it, this knowledge is lost the next time a related task comes up.</p>
+
+<h4>The Solidification Loop</h4>
+
+<div class="flow">
+  <div class="flow-node">Discovery / Fault</div>
+  <div class="flow-arrow">&rarr;</div>
+  <div class="flow-node">Postmortem</div>
+  <div class="flow-arrow">&rarr;</div>
+  <div class="flow-node">Distil a Rule<br><small>Rule + Why</small></div>
+  <div class="flow-arrow">&rarr;</div>
+  <div class="flow-node">Write to ctx_safety/</div>
+  <div class="flow-arrow">&rarr;</div>
+  <div class="flow-node">Update Boot Matrix</div>
+</div>
+
+<p>What each step does:</p>
+
+<div class="wf-step">
+  <div class="wf-num">1</div>
+  <div class="wf-body">
+    <h4>Write a Safety Rule (New Node)</h4>
+    <p>Create a new file in <code>ctx_safety/</code> containing three parts: <strong>Rule + Postmortem + Why</strong>. The postmortem describes how the fault unfolded, not as a formality, but so the agent understands <em>why</em> and can then judge edge cases on its own. Without a postmortem, an agent will work around a rule whenever a situation "seems reasonable."</p>
+  </div>
+</div>
+<div class="wf-step">
+  <div class="wf-num">2</div>
+  <div class="wf-body">
+    <h4>Update the Glossary (Disambiguation)</h4>
+    <p>If this time the meanings of "Preview Queue" and "Robot Controller Buffer" got confused, add a new disambiguation entry to GLOSSARY.md. Next time the agent encounters the word "queue," it won't confuse the two again.</p>
+  </div>
+</div>
+<div class="wf-step">
+  <div class="wf-num">3</div>
+  <div class="wf-body">
+    <h4>Solidify the Decision in settled.md (Not Reversible)</h4>
+    <p>If a decision is made that shouldn't be reopened for debate (such as "the resume point must be based on the actual TCP pose"), write it into <code>settled.md</code>. The agent will not propose a rejected approach again.</p>
+  </div>
+</div>
+<div class="wf-step">
+  <div class="wf-num">4</div>
+  <div class="wf-body">
+    <h4>Update the Boot Matrix (Routing)</h4>
+    <p>Ensure future tasks involving resumable pauses automatically load the new safety rule node.</p>
+  </div>
+</div>
+<div class="wf-step">
+  <div class="wf-num">5</div>
+  <div class="wf-body">
+    <h4>Archive Old Documents (Don't Delete)</h4>
+    <p>Move the old approach to <code>_historical/</code> and tag it with <code>superseded_by</code>. Keep the history, since you may later need to know "why it was designed that way originally."</p>
+  </div>
+</div>
+
+<div class="insight">
+  <p><strong>The point of solidifying:</strong> spend 10 minutes today writing a lesson into a node, and every related task in future benefits automatically. Not because you benefit (you might already remember it), but because the <em>agent</em> benefits. Every agent session starts from a blank slate; a solidified node is its only memory across sessions.</p>
+</div>
+
+<hr>
+
+<!-- ═══════════ Part IV ═══════════ -->
+
+<h2><span class="sec-num">IV</span> Anti-Patterns: Practices That Break the External Brain</h2>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Anti-pattern</th><th>Consequence</th><th>Correct approach</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Stuffing all information into CLAUDE.md</td>
+      <td>Context window overflow, equivalent to forcing the external brain's contents back into working memory</td>
+      <td>CLAUDE.md holds only "needed every time" principles; details go in the wiki, loaded on demand</td>
+    </tr>
+    <tr>
+      <td>Safety rules only say "don't do X," without the why</td>
+      <td>The agent works around the rule in edge cases; the external brain's node lacks meaning and the connection breaks</td>
+      <td>Rule + Why + Postmortem, as one unit</td>
+    </tr>
+    <tr>
+      <td>Terms left ambiguous</td>
+      <td>Different sessions understand the same word differently; a knowledge network node name points to an uncertain meaning</td>
+      <td>Group the Glossary by confusion scenario</td>
+    </tr>
+    <tr>
+      <td>No Truth Ladder</td>
+      <td>When documents conflict, the agent picks one at random; equivalent to the external brain producing a contradictory memory</td>
+      <td>An explicit priority ladder, so conflicts have a deterministic resolution</td>
+    </tr>
+    <tr>
+      <td>Treating working notes as authoritative</td>
+      <td>An outdated approach in the Inbox gets treated as the current design</td>
+      <td>The Inbox has very low authority on the Truth Ladder</td>
+    </tr>
+    <tr>
+      <td>Deleting old documents</td>
+      <td>You lose the ability to trace back "why it was designed that way"; the knowledge network loses its historical dimension</td>
+      <td>Move to <code>_historical/</code> and tag with <code>superseded_by</code></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<hr>
+
+<!-- ═══════════ Part V ═══════════ -->
+
+<h2><span class="sec-num">V</span> Quick Start: Building an External Brain for Your Project</h2>
+
+<div class="wf-step">
+  <div class="wf-num">1</div>
+  <div class="wf-body">
+    <h4>Write CLAUDE.md — the Behavioural Constitution</h4>
+    <p>You don't need to cover everything at once. Start with behavioural principles (Think Before Coding, etc.) plus a first batch of hard rules (including the why). Add more as new rules come up.</p>
+  </div>
+</div>
+<div class="wf-step">
+  <div class="wf-num">2</div>
+  <div class="wf-body">
+    <h4>Create the Wiki Skeleton</h4>
+    <p>The 001-005 directory structure plus an INDEX.md for each directory. The initial content can be empty; set up the skeleton first, and let the content grow with the project.</p>
+  </div>
+</div>
+<div class="wf-step">
+  <div class="wf-num">3</div>
+  <div class="wf-body">
+    <h4>Initialise the Agent Management Layer</h4>
+    <p>Create four core files: GLOSSARY.md (the first batch of easily confused terms), TRUTH_LADDER.md (the priority ladder), BOOT_MATRIX.md (the routing table, which can start empty), and ctx_system_current.md (the current state of the system).</p>
+  </div>
+</div>
+<div class="wf-step">
+  <div class="wf-num">4</div>
+  <div class="wf-body">
+    <h4>Keep Solidifying as Development Progresses</h4>
+    <p>Fixed a bug → write a safety rule. Made a decision → write it to settled.md. Confused a term → add it to the Glossary. <strong>The wiki is a living knowledge network, not a one-off document.</strong></p>
+  </div>
+</div>
+
+<div class="callout--ok callout">
+  <p><strong>The single most important thing:</strong> the most valuable nodes in the wiki aren't design documents, they're <strong>rules learned from failure</strong>. Every safety rule traces back to a real fault. An agent only truly follows a rule that came from a hard lesson, because it understands <em>why</em>.</p>
+</div>
+
+<p style="margin-top: 2.5rem; color: var(--fg-muted); font-size: 0.85rem; text-align: center;">
+  Distilled from the FR5-StreamingSys project's wiki practice &middot; applicable to any Human-AI collaborative engineering project
+</p>
+
+</div>
+
+<script>
+(function() {
+  const canvas = document.getElementById('kg');
+  const dpr = window.devicePixelRatio || 1;
+  let W, H;
+  function resize() {
+    const r = canvas.parentElement.getBoundingClientRect();
+    W = r.width; H = r.height;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  }
+  resize();
+  window.addEventListener('resize', () => { resize(); draw(); });
+
+  const nodes = [
+    { id: 'glossary',   label: 'Glossary',           x: 0.15, y: 0.28, r: 22 },
+    { id: 'safety',     label: 'ctx_safety/',         x: 0.15, y: 0.72, r: 22 },
+    { id: 'boot',       label: 'Boot Matrix',         x: 0.38, y: 0.50, r: 24 },
+    { id: 'truth',      label: 'Truth Ladder',        x: 0.38, y: 0.18, r: 20 },
+    { id: 'settled',    label: 'settled.md',           x: 0.38, y: 0.82, r: 20 },
+    { id: 'ik',         label: 'ctx_offline_ik/',      x: 0.62, y: 0.28, r: 21 },
+    { id: 'streaming',  label: 'ctx_streaming/',       x: 0.62, y: 0.72, r: 21 },
+    { id: 'toolpath',   label: 'ctx_toolpath/',        x: 0.82, y: 0.50, r: 20 },
+    { id: 'claude',     label: 'CLAUDE.md',            x: 0.82, y: 0.15, r: 22 },
+    { id: 'arch',       label: 'Architecture/',        x: 0.82, y: 0.85, r: 20 },
+  ];
+
+  const edges = [
+    ['boot', 'glossary'], ['boot', 'safety'], ['boot', 'ik'],
+    ['boot', 'streaming'], ['boot', 'toolpath'], ['boot', 'truth'],
+    ['safety', 'settled'], ['safety', 'streaming'], ['safety', 'ik'],
+    ['truth', 'claude'], ['truth', 'settled'],
+    ['ik', 'toolpath'], ['streaming', 'arch'],
+    ['claude', 'glossary'], ['settled', 'arch'],
+  ];
+
+  let hovered = null;
+  let connected = new Set();
+
+  function getXY(n) { return [n.x * W, n.y * H]; }
+
+  function getStyle() {
+    const s = getComputedStyle(document.documentElement);
+    return {
+      fg:       s.getPropertyValue('--fg').trim(),
+      muted:    s.getPropertyValue('--fg-muted').trim(),
+      accent:   s.getPropertyValue('--accent').trim(),
+      nodeBg:   s.getPropertyValue('--node-bg').trim(),
+      nodeBd:   s.getPropertyValue('--node-border').trim(),
+      active:   s.getPropertyValue('--node-active').trim(),
+      activeFg: s.getPropertyValue('--node-active-fg').trim(),
+      edge:     s.getPropertyValue('--edge').trim(),
+    };
+  }
+
+  function draw() {
+    const ctx = canvas.getContext('2d');
+    const st = getStyle();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    // edges
+    for (const [a, b] of edges) {
+      const na = nodes.find(n => n.id === a);
+      const nb = nodes.find(n => n.id === b);
+      const [x1, y1] = getXY(na);
+      const [x2, y2] = getXY(nb);
+      const isLit = hovered && (connected.has(a) && connected.has(b)) && (a === hovered || b === hovered);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = isLit ? st.accent : st.edge;
+      ctx.lineWidth = isLit ? 2 : 1;
+      ctx.globalAlpha = isLit ? 0.8 : (hovered ? 0.2 : 0.4);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // nodes
+    for (const n of nodes) {
+      const [x, y] = getXY(n);
+      const isH = hovered === n.id;
+      const isC = hovered && connected.has(n.id);
+      const dimmed = hovered && !isH && !isC;
+
+      ctx.beginPath();
+      ctx.arc(x, y, n.r, 0, Math.PI * 2);
+      ctx.fillStyle = isH ? st.active : st.nodeBg;
+      ctx.globalAlpha = dimmed ? 0.3 : 1;
+      ctx.fill();
+      ctx.strokeStyle = isH ? st.active : (isC ? st.accent : st.nodeBd);
+      ctx.lineWidth = isH ? 2.5 : (isC ? 2 : 1);
+      ctx.stroke();
+
+      ctx.fillStyle = isH ? st.activeFg : (dimmed ? st.muted : st.fg);
+      ctx.font = (isH ? '600 ' : '500 ') + '10px system-ui, "Noto Sans SC", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(n.label, x, y);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  canvas.addEventListener('mousemove', function(e) {
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left;
+    const my = e.clientY - r.top;
+    let found = null;
+    for (const n of nodes) {
+      const [x, y] = getXY(n);
+      const d = Math.hypot(mx - x, my - y);
+      if (d < n.r + 6) { found = n.id; break; }
+    }
+    if (found !== hovered) {
+      hovered = found;
+      connected = new Set();
+      if (hovered) {
+        connected.add(hovered);
+        for (const [a, b] of edges) {
+          if (a === hovered) connected.add(b);
+          if (b === hovered) connected.add(a);
+        }
+      }
+      canvas.style.cursor = hovered ? 'pointer' : 'default';
+      draw();
+    }
+  });
+
+  canvas.addEventListener('mouseleave', function() {
+    hovered = null; connected = new Set();
+    canvas.style.cursor = 'default';
+    draw();
+  });
+
+  draw();
+
+  // Redraw on theme change
+  const observer = new MutationObserver(() => draw());
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+})();
+</script>

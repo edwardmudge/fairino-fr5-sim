@@ -13,11 +13,11 @@ import numpy as np
 import trimesh
 
 # Docstrings throughout this file cite tutorials/Stage{1-4,5,6,7}_README.md as the
-# roadmap of record. That directory is local assignment scaffolding and is NOT
-# published (.gitignore), so those citations are historical provenance only -- a
-# clone will not have them. The published equivalents are wiki/003_Guides/ (how a
-# feature is operated) and wiki/002_Architecture/settled.md (why it is built that
-# way). See README.md "A note on roadmap references".
+# roadmap of record. That directory is published and the sub-stage numbers cited
+# here resolve. Note the stage READMEs are a clean reconstruction -- a correction
+# found in a later stage is taught in the stage that needs it -- so for the actual
+# chronology use wiki/002_Architecture/settled.md, and wiki/003_Guides/ for how a
+# feature is operated. See README.md "A note on roadmap references".
 
 # Every asset path below is anchored to this file's own directory rather than the
 # process CWD. Relative paths only worked when main.py was launched from the repo
@@ -312,12 +312,14 @@ ORIENT_FRAME_COLORS = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])  # X red, Y gr
 # ===========================================================================
 # Orientation search and candidate filters -- roadmap 7.4, settled.md S1.46.
 #
-# Adapted from examples/curved_surface_printing/IK_BRANCH_REJECTION_GUIDE.md, a
-# working implementation of this task in ANOTHER project. Its file paths do not
-# exist here and its 35 deg joint-step default is deliberately not carried
-# across (see EDGE_* below). Values are robot/planner-level, so they live here;
-# study_config.py is reserved for material- and nozzle-dependent job values
-# (S1.41) -- which is why filter 8's clearance is imported from there instead.
+# Specified in docs/FR5_IK_Branch_Rejection.md -- the filters, their order, and
+# the reasoning, kept in one place rather than spread across these comments.
+# Adapted from a working implementation of this task in ANOTHER project, whose
+# 35 deg joint-step default is deliberately not carried across (see EDGE_*
+# below); that doc's closing section lists every deviation. Values are
+# robot/planner-level, so they live here; study_config.py is reserved for
+# material- and nozzle-dependent job values (S1.41) -- which is why filter 8's
+# clearance is imported from there instead.
 # ===========================================================================
 
 # The commanded tool axis need only be perpendicular to the surface WITHIN this
@@ -2880,7 +2882,9 @@ class VisContent:
 
         # E1, and ONLY between two feed waypoints -- the exchange spec's row 5
         # measures steps within a continuous extrusion line, and travel moves are
-        # legitimately large (planar: 57.32deg overall vs 5.85deg inside a segment).
+        # legitimately large (planar, measured 2026-09-08 from the shipped v7
+        # cache: 15.49deg overall vs 4.43deg inside a feed segment, 0 in-segment
+        # edges over the 30deg limit).
         if bool(self.precompute_waypoints[i - 1][1]) and bool(self.precompute_waypoints[i][1]):
             cost = np.where(D.max(axis=-1) > EDGE_MAX_JOINT_STEP_DEG, np.inf, cost)
 
@@ -3997,10 +4001,10 @@ class VisContent:
         return np.linalg.inv(self.T_user_frame), self.plate_local_bounds[0], self.plate_local_bounds[1]
 
     def _candidate_admissible(self, joints, ctx):
-        """The nine candidate filters of roadmap 7.4 / settled.md S1.46, adapted
-        from IK_BRANCH_REJECTION_GUIDE.md. Returns None if the candidate is
-        admissible, otherwise the SHORT NAME of the first filter it failed (for
-        the per-reason tally the precompute reports on failure).
+        """The nine candidate filters of roadmap 7.4 / settled.md S1.46,
+        specified in docs/FR5_IK_Branch_Rejection.md. Returns None if the
+        candidate is admissible, otherwise the SHORT NAME of the first filter it
+        failed (for the per-reason tally the precompute reports on failure).
 
         Filter 1 (joint limits) is not here: solve_ik_tcp_matrix has already
         enforced PHYSICAL_JOINT_LIMITS before a candidate reaches this point.
@@ -5014,9 +5018,10 @@ def dijkstra_candidate_path(layer_joints, layer_roll, layer_branch, layer_is_fee
     An edge is forbidden (inf) when any joint moves more than
     EDGE_MAX_JOINT_STEP_DEG -- but ONLY between two feed waypoints. The exchange
     spec's row 5 measures steps *within* a continuous extrusion line, and travel
-    moves are legitimately large: the planar path's max step is 57.32 deg overall
-    against 5.85 deg inside a segment. Applying this across a G0 boundary would
-    abort a job that the receiving side would happily accept."""
+    moves are legitimately large: the planar path's max step is 15.49 deg overall
+    against 4.43 deg inside a feed segment (measured 2026-09-08 from the shipped
+    v7 cache). Applying this across a G0 boundary would abort a job that the
+    receiving side would happily accept."""
     n_layers = len(layer_joints)
     if n_layers == 0:
         return None, 0

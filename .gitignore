@@ -1,6 +1,3 @@
-# Tutorial / assignment scaffolding (kept locally, not published)
-tutorials/
-
 # Claude Code local/session config
 .claude/settings.local.json
 

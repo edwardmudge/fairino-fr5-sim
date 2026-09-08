@@ -80,12 +80,17 @@ can sit, which constants to re-tune, and how to export the result.
 * `docs/` — technical reference (DH parameters, joint limits, mesh coordinate convention)
 * `wiki/` — project knowledge base: operation guides, architecture decisions, glossary, agent boot protocol
 * `wiki-template/` — the generic, project-agnostic methodology behind `wiki/`, reusable to bootstrap this documentation system on other projects
+* `tutorials/` — the build-it-yourself roadmap, stage by stage; start at [`tutorials/README.md`](tutorials/README.md)
 
 ### A note on roadmap references
 
 Source docstrings and wiki pages frequently cite `tutorials/Stage5_README.md`,
-`Stage6_README.md`, `Stage7_README.md` and similar. That directory is local
-assignment scaffolding and is **not published** — a clone will not contain it, and
-those citations are historical provenance rather than links you can follow. The
-published equivalents are `wiki/003_Guides/` for how a feature is operated and
-`wiki/002_Architecture/settled.md` for why it is built the way it is.
+`Stage6_README.md`, `Stage7_README.md` and similar. Those are published and the
+citations can be followed — each sub-stage number resolves to a section.
+
+The stage READMEs are a **clean reconstruction**: corrections discovered in a
+later stage are folded back into the stage where a builder needs them, so
+following them in order never means writing code that a later stage deletes. The
+unedited chronological record is `wiki/002_Architecture/settled.md`, with the
+working notes in `wiki/001_Inbox/`; `wiki/003_Guides/` covers how a finished
+feature is operated.
